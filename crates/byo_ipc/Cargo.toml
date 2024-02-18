@@ -1,0 +1,11 @@
+[package]
+name = "byo_ipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+"interprocess" = "1.2.1"
+"serde" = "1.0.196"
+"rmp-serde" = "0.15.3"
+"url" = "2.2.2"
+"thiserror" = "1.0.57"
