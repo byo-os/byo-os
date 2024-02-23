@@ -300,6 +300,10 @@ pub enum IpcError {
     MsgPackEncode(#[from] MsgPackEncodeError),
     #[error("MsgPack decode error")]
     MsgPackDecode(#[from] MsgPackDecodeError),
+    #[error("Unknown message type: `{}`", .0)]
+    UnknownMessageType(String),
+    #[error("Registry Poisoned: A thread panicked while holding the IPC registry lock")]
+    RegistryPoisoned,
 }
 
 #[cfg(test)]
