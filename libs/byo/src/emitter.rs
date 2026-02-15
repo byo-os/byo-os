@@ -5,7 +5,7 @@
 
 use std::io;
 
-use crate::protocol::{APC_START, PROTOCOL_ID, Prop, ST};
+use crate::protocol::{APC_START, Command, PROTOCOL_ID, Prop, ST};
 
 /// Returns `true` if `value` can be written bare (unquoted).
 fn is_bare(value: &str) -> bool {
@@ -18,10 +18,14 @@ fn is_bare(value: &str) -> bool {
                 && b != b'"'
                 && b != b'\''
                 && b != b'~'
+                && b != b'\\'
         })
 }
 
 /// Writes a prop value, auto-quoting when necessary.
+///
+/// When the value contains both single and double quotes, falls back to
+/// double-quoting with backslash escaping.
 fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
     if is_bare(value) {
         write!(w, "{value}")
@@ -30,7 +34,20 @@ fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
     } else if !value.contains('\'') {
         write!(w, "'{value}'")
     } else {
-        panic!("value contains both single and double quotes, cannot be encoded: {value:?}");
+        // Both quote types present — double-quote with escaping
+        w.write_all(b"\"")?;
+        for ch in value.chars() {
+            match ch {
+                '"' => w.write_all(b"\\\"")?,
+                '\\' => w.write_all(b"\\\\")?,
+                '\n' => w.write_all(b"\\n")?,
+                '\r' => w.write_all(b"\\r")?,
+                '\t' => w.write_all(b"\\t")?,
+                '\0' => w.write_all(b"\\0")?,
+                _ => write!(w, "{ch}")?,
+            }
+        }
+        w.write_all(b"\"")
     }
 }
 
@@ -44,7 +61,7 @@ fn write_props<W: io::Write>(w: &mut W, props: &[Prop<'_>]) -> io::Result<()> {
         match prop {
             Prop::Value { key, value } => {
                 write!(w, " {key}=")?;
-                write_value(w, value)?;
+                write_value(w, value.as_ref())?;
             }
             Prop::Boolean { key } => {
                 write!(w, " {key}")?;
@@ -226,6 +243,74 @@ impl<W: io::Write> Emitter<W> {
     pub fn unsub(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
         write!(self.writer, "\n!unsub {seq} {target_type}")
     }
+
+    // -- Bulk emission --------------------------------------------------------
+
+    /// Emit a slice of parsed [`Command`] values.
+    ///
+    /// Writes each command in order, translating `Push`/`Pop` into `{`/`}`.
+    /// This enables round-tripping: `parse()` → `commands()`.
+    ///
+    /// This does NOT write APC framing — call it inside a [`frame`](Self::frame)
+    /// closure or write framing separately.
+    ///
+    /// ```
+    /// use byo::emitter::Emitter;
+    /// use byo::parser::parse;
+    ///
+    /// let cmds = parse("+view root { +text child }").unwrap();
+    ///
+    /// let mut buf = Vec::new();
+    /// let mut em = Emitter::new(&mut buf);
+    /// em.frame(|em| em.commands(&cmds)).unwrap();
+    ///
+    /// let out = String::from_utf8(buf).unwrap();
+    /// assert!(out.contains("+view root"));
+    /// assert!(out.contains("+text child"));
+    /// ```
+    pub fn commands(&mut self, cmds: &[Command<'_>]) -> io::Result<()> {
+        for cmd in cmds {
+            match cmd {
+                Command::Upsert { kind, id, props } => {
+                    write!(self.writer, "\n+{kind} {id}")?;
+                    write_props(&mut self.writer, props)?;
+                }
+                Command::Destroy { kind, id } => {
+                    write!(self.writer, "\n-{kind} {id}")?;
+                }
+                Command::Push => {
+                    self.writer.write_all(b" {")?;
+                }
+                Command::Pop => {
+                    self.writer.write_all(b"\n}")?;
+                }
+                Command::Patch { kind, id, props } => {
+                    write!(self.writer, "\n@{kind} {id}")?;
+                    write_props(&mut self.writer, props)?;
+                }
+                Command::Event {
+                    kind,
+                    seq,
+                    id,
+                    props,
+                } => {
+                    write!(self.writer, "\n!{} {seq} {id}", kind.as_str())?;
+                    write_props(&mut self.writer, props)?;
+                }
+                Command::Ack { kind, seq, props } => {
+                    write!(self.writer, "\n!ack {} {seq}", kind.as_str())?;
+                    write_props(&mut self.writer, props)?;
+                }
+                Command::Sub { seq, target_type } => {
+                    write!(self.writer, "\n!sub {seq} {target_type}")?;
+                }
+                Command::Unsub { seq, target_type } => {
+                    write!(self.writer, "\n!unsub {seq} {target_type}")?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -265,9 +350,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "both single and double quotes")]
-    fn value_with_both_quotes_panics() {
-        emit(|em| em.upsert("text", "msg", &[Prop::val("content", "it's a \"test\"")]));
+    fn value_with_both_quotes_escapes() {
+        let out = emit(|em| em.upsert("text", "msg", &[Prop::val("content", "it's a \"test\"")]));
+        assert_eq!(
+            out,
+            "\x1b_B\n+text msg content=\"it's a \\\"test\\\"\"\n\x1b\\"
+        );
     }
 
     #[test]
@@ -478,11 +566,12 @@ mod tests {
 
     #[test]
     fn prop_constructors() {
+        use std::borrow::Cow;
         assert_eq!(
             Prop::val("k", "v"),
             Prop::Value {
                 key: "k",
-                value: "v"
+                value: Cow::Borrowed("v"),
             }
         );
         assert_eq!(Prop::flag("k"), Prop::Boolean { key: "k" });
@@ -518,5 +607,41 @@ mod tests {
     fn ack_no_props() {
         let out = emit(|em| em.ack("keydown", 7, &[]));
         assert_eq!(out, "\x1b_B\n!ack keydown 7\n\x1b\\");
+    }
+
+    #[test]
+    fn commands_round_trip() {
+        use crate::parser::parse;
+
+        let input = concat!(
+            "+view sidebar class=\"w-64\" {",
+            "\n+text label content=\"Hello\"",
+            "\n}",
+            "\n-view old",
+            "\n@view sidebar hidden",
+            "\n!click 0 save",
+            "\n!ack click 0 handled=true",
+            "\n!sub 0 button",
+        );
+        let cmds = parse(input).unwrap();
+
+        let out = emit(|em| em.commands(&cmds));
+
+        // Parse the re-emitted output and compare
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds2 = parse(payload).unwrap();
+        assert_eq!(cmds.len(), cmds2.len());
+    }
+
+    #[test]
+    fn commands_empty() {
+        let out = emit(|em| em.commands(&[]));
+        assert_eq!(out, "\x1b_B\n\x1b\\");
     }
 }

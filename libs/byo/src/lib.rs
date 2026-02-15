@@ -5,6 +5,8 @@
 //! over stdin/stdout.
 
 pub mod emitter;
+pub mod lexer;
+pub mod parser;
 pub mod protocol;
 pub mod scanner;
 pub mod types;

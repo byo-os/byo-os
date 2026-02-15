@@ -38,6 +38,8 @@
 //! All values are strings on the wire. Callers convert numeric or
 //! boolean values to strings before passing them (e.g. `&n.to_string()`).
 
+use std::borrow::Cow;
+
 /// APC introducer: ESC _
 pub const APC_START: &[u8] = b"\x1b_";
 
@@ -75,7 +77,7 @@ pub const ANON: &str = "_";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prop<'a> {
     /// `key=value` — set a property
-    Value { key: &'a str, value: &'a str },
+    Value { key: &'a str, value: Cow<'a, str> },
     /// `key` (bare) — boolean flag
     Boolean { key: &'a str },
     /// `~key` — remove a property (no-op in upsert/event context)
@@ -84,8 +86,11 @@ pub enum Prop<'a> {
 
 impl<'a> Prop<'a> {
     /// Create a key=value property.
-    pub fn val(key: &'a str, value: &'a str) -> Self {
-        Self::Value { key, value }
+    pub fn val(key: &'a str, value: impl Into<Cow<'a, str>>) -> Self {
+        Self::Value {
+            key,
+            value: value.into(),
+        }
     }
 
     /// Create a boolean flag property.
@@ -198,6 +203,25 @@ impl<'a> EventKind<'a> {
             EventKind::Resize => "resize",
             EventKind::Expand => "expand",
             EventKind::Other(s) => s,
+        }
+    }
+
+    /// Maps a wire-format event name to the corresponding variant.
+    ///
+    /// Known built-in names map to their keyword variants; everything
+    /// else (including third-party dot-qualified names) maps to `Other`.
+    pub fn from_wire(s: &'a str) -> Self {
+        match s {
+            "click" => EventKind::Click,
+            "keydown" => EventKind::KeyDown,
+            "keyup" => EventKind::KeyUp,
+            "pointer" => EventKind::Pointer,
+            "scroll" => EventKind::Scroll,
+            "focus" => EventKind::Focus,
+            "blur" => EventKind::Blur,
+            "resize" => EventKind::Resize,
+            "expand" => EventKind::Expand,
+            other => EventKind::Other(other),
         }
     }
 }

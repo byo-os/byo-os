@@ -263,15 +263,20 @@ command always produces the same result regardless of prior state.
 | Prop value    | unquoted, `"..."`, or `'...'`| `0`, `move`, `"px-4 py-2"`, `'hi'`        |
 | Sequence num  | `[0-9]+`                     | `0`, `12`, `1042`                         |
 
-Unquoted prop values match `[^\s{}="']+`. Single and double quotes
-are interchangeable — quoted values allow anything except their own
-unescaped delimiter.
+Unquoted prop values match `[^\s{}="'~\\]+`. Single and double quotes
+are interchangeable. Quoted strings support backslash escape sequences
+(see [`GRAMMAR.md`](GRAMMAR.md)). Bare values do not support escaping.
 
 Unqualified type names (no dots) are reserved for BYO/OS built-in
 types — those shipped with the compositor and first-party daemons
 (e.g. `view`, `layer`, `text`, `button`, `slider`). Third-party
 daemons must use dot-qualified names with a reverse-domain convention
 (e.g. `org.mybrowser.WebView`). IDs and prop names do not use dots.
+
+#### Formal grammar
+
+See [`GRAMMAR.md`](GRAMMAR.md) for the complete PEG grammar defining
+the command language within APC payloads.
 
 #### ID scoping
 
