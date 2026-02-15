@@ -1,0 +1,8 @@
+[package]
+name = "byo-compositor"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+byo.workspace = true
+bevy.workspace = true

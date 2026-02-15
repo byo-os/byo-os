@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "libs/byo",
+    "system/compositor",
+    "system/orchestrator",
+    "services/controls",
+]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+byo = { path = "libs/byo" }
+bevy = { version = "0.18", features = ["ui"] }
+tokio = { version = "1", features = ["full"] }
