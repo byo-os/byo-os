@@ -1680,6 +1680,9 @@ checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 [[package]]
 name = "byo"
 version = "0.1.0"
+dependencies = [
+ "byo-macros",
+]
 
 [[package]]
 name = "byo-compositor"
@@ -1694,6 +1697,14 @@ name = "byo-controls"
 version = "0.1.0"
 dependencies = [
  "byo",
+]
+
+[[package]]
+name = "byo-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]

@@ -343,8 +343,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
 /// are valid inside bare words (e.g. `notes-app:save`, `w-64`). They're
 /// only recognized as operators at token start via the main match arm.
 fn is_special_or_ws(b: u8) -> bool {
-    b.is_ascii_whitespace()
-        || matches!(b, b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\')
+    b.is_ascii_whitespace() || matches!(b, b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\')
 }
 
 /// Decodes backslash escape sequences in a string slice.
@@ -379,7 +378,11 @@ mod tests {
 
     /// Helper: tokenize and return just the tokens (no spans).
     fn toks(input: &str) -> Vec<Token<'_>> {
-        tokenize(input).unwrap().into_iter().map(|s| s.token).collect()
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.token)
+            .collect()
     }
 
     #[test]
@@ -458,9 +461,7 @@ mod tests {
     fn all_escape_sequences() {
         assert_eq!(
             toks(r#""\"\'\\\n\r\t\0\/""#),
-            vec![Token::Str(Cow::Owned(
-                "\"\'\\\n\r\t\0/".to_string()
-            ))]
+            vec![Token::Str(Cow::Owned("\"\'\\\n\r\t\0/".to_string()))]
         );
     }
 
@@ -567,10 +568,7 @@ mod tests {
 
     #[test]
     fn qualified_id_is_word() {
-        assert_eq!(
-            toks("notes-app:save"),
-            vec![Token::Word("notes-app:save")]
-        );
+        assert_eq!(toks("notes-app:save"), vec![Token::Word("notes-app:save")]);
     }
 
     #[test]

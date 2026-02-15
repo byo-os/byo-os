@@ -3,4 +3,9 @@ name = "byo"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = ["macros"]
+macros = ["dep:byo-macros"]
+
 [dependencies]
+byo-macros = { workspace = true, optional = true }

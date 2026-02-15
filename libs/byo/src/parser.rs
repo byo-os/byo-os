@@ -252,12 +252,24 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     // -- Children -------------------------------------------------------------
 
     fn parse_children(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
-        if matches!(self.peek(), Some(Spanned { token: Token::LBrace, .. })) {
+        if matches!(
+            self.peek(),
+            Some(Spanned {
+                token: Token::LBrace,
+                ..
+            })
+        ) {
             let open_span = self.advance().span; // consume {
             cmds.push(Command::Push);
 
             while !self.at_end() {
-                if matches!(self.peek(), Some(Spanned { token: Token::RBrace, .. })) {
+                if matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::RBrace,
+                        ..
+                    })
+                ) {
                     break;
                 }
                 self.parse_command(cmds)?;
@@ -285,25 +297,52 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             match self.peek() {
                 // Stop at operators, braces, or end
                 None => break,
-                Some(Spanned { token: Token::Plus, .. })
-                | Some(Spanned { token: Token::Minus, .. })
-                | Some(Spanned { token: Token::At, .. })
-                | Some(Spanned { token: Token::Bang, .. })
-                | Some(Spanned { token: Token::LBrace, .. })
-                | Some(Spanned { token: Token::RBrace, .. }) => break,
+                Some(Spanned {
+                    token: Token::Plus, ..
+                })
+                | Some(Spanned {
+                    token: Token::Minus,
+                    ..
+                })
+                | Some(Spanned {
+                    token: Token::At, ..
+                })
+                | Some(Spanned {
+                    token: Token::Bang, ..
+                })
+                | Some(Spanned {
+                    token: Token::LBrace,
+                    ..
+                })
+                | Some(Spanned {
+                    token: Token::RBrace,
+                    ..
+                }) => break,
 
                 // ~name — remove prop
-                Some(Spanned { token: Token::Tilde, .. }) => {
+                Some(Spanned {
+                    token: Token::Tilde,
+                    ..
+                }) => {
                     self.advance(); // consume ~
                     let name = self.expect_name()?;
                     props.push(Prop::remove(name));
                 }
 
                 // name=value or bare name (boolean flag)
-                Some(Spanned { token: Token::Word(_), .. }) => {
+                Some(Spanned {
+                    token: Token::Word(_),
+                    ..
+                }) => {
                     let name = self.expect_name()?;
 
-                    if matches!(self.peek(), Some(Spanned { token: Token::Eq, .. })) {
+                    if matches!(
+                        self.peek(),
+                        Some(Spanned {
+                            token: Token::Eq,
+                            ..
+                        })
+                    ) {
                         self.advance(); // consume =
                         let value = self.expect_value()?;
                         props.push(Prop::val(name, value));
@@ -562,9 +601,23 @@ mod tests {
     fn upsert_with_children() {
         let cmds = parse("+view root { +text child }").unwrap();
         assert_eq!(cmds.len(), 4); // Upsert, Push, Upsert, Pop
-        assert!(matches!(&cmds[0], Command::Upsert { kind: "view", id: "root", .. }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Upsert {
+                kind: "view",
+                id: "root",
+                ..
+            }
+        ));
         assert!(matches!(&cmds[1], Command::Push));
-        assert!(matches!(&cmds[2], Command::Upsert { kind: "text", id: "child", .. }));
+        assert!(matches!(
+            &cmds[2],
+            Command::Upsert {
+                kind: "text",
+                id: "child",
+                ..
+            }
+        ));
         assert!(matches!(&cmds[3], Command::Pop));
     }
 
@@ -608,7 +661,13 @@ mod tests {
     fn destroy() {
         let cmds = parse("-view item3").unwrap();
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(&cmds[0], Command::Destroy { kind: "view", id: "item3" }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Destroy {
+                kind: "view",
+                id: "item3"
+            }
+        ));
     }
 
     // -- Patch ----------------------------------------------------------------
@@ -643,7 +702,12 @@ mod tests {
     fn event_click() {
         let cmds = parse("!click 0 save").unwrap();
         match &cmds[0] {
-            Command::Event { kind, seq, id, props } => {
+            Command::Event {
+                kind,
+                seq,
+                id,
+                props,
+            } => {
                 assert_eq!(*kind, EventKind::Click);
                 assert_eq!(*seq, 0);
                 assert_eq!(*id, "save");
@@ -657,7 +721,12 @@ mod tests {
     fn event_with_props() {
         let cmds = parse("!keydown 0 editor key=a mod=ctrl").unwrap();
         match &cmds[0] {
-            Command::Event { kind, seq, id, props } => {
+            Command::Event {
+                kind,
+                seq,
+                id,
+                props,
+            } => {
                 assert_eq!(*kind, EventKind::KeyDown);
                 assert_eq!(*seq, 0);
                 assert_eq!(*id, "editor");
@@ -720,13 +789,25 @@ mod tests {
     #[test]
     fn sub() {
         let cmds = parse("!sub 0 button").unwrap();
-        assert!(matches!(&cmds[0], Command::Sub { seq: 0, target_type: "button" }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Sub {
+                seq: 0,
+                target_type: "button"
+            }
+        ));
     }
 
     #[test]
     fn unsub() {
         let cmds = parse("!unsub 2 checkbox").unwrap();
-        assert!(matches!(&cmds[0], Command::Unsub { seq: 2, target_type: "checkbox" }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Unsub {
+                seq: 2,
+                target_type: "checkbox"
+            }
+        ));
     }
 
     // -- Multi-command batches ------------------------------------------------
@@ -744,9 +825,27 @@ mod tests {
     fn mixed_batch() {
         let cmds = parse("!sub 0 button !sub 1 slider !sub 2 checkbox").unwrap();
         assert_eq!(cmds.len(), 3);
-        assert!(matches!(&cmds[0], Command::Sub { seq: 0, target_type: "button" }));
-        assert!(matches!(&cmds[1], Command::Sub { seq: 1, target_type: "slider" }));
-        assert!(matches!(&cmds[2], Command::Sub { seq: 2, target_type: "checkbox" }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Sub {
+                seq: 0,
+                target_type: "button"
+            }
+        ));
+        assert!(matches!(
+            &cmds[1],
+            Command::Sub {
+                seq: 1,
+                target_type: "slider"
+            }
+        ));
+        assert!(matches!(
+            &cmds[2],
+            Command::Sub {
+                seq: 2,
+                target_type: "checkbox"
+            }
+        ));
     }
 
     #[test]
@@ -760,10 +859,31 @@ mod tests {
         let cmds = parse(input).unwrap();
         // layer, view, push, text, pop
         assert_eq!(cmds.len(), 5);
-        assert!(matches!(&cmds[0], Command::Upsert { kind: "layer", id: "content", .. }));
-        assert!(matches!(&cmds[1], Command::Upsert { kind: "view", id: "greeting", .. }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Upsert {
+                kind: "layer",
+                id: "content",
+                ..
+            }
+        ));
+        assert!(matches!(
+            &cmds[1],
+            Command::Upsert {
+                kind: "view",
+                id: "greeting",
+                ..
+            }
+        ));
         assert!(matches!(&cmds[2], Command::Push));
-        assert!(matches!(&cmds[3], Command::Upsert { kind: "text", id: "label", .. }));
+        assert!(matches!(
+            &cmds[3],
+            Command::Upsert {
+                kind: "text",
+                id: "label",
+                ..
+            }
+        ));
         assert!(matches!(&cmds[4], Command::Pop));
     }
 
@@ -801,7 +921,10 @@ mod tests {
     #[test]
     fn missing_id() {
         let err = parse("+view").unwrap_err();
-        assert!(matches!(err.kind, ParseErrorKind::Expected { expected: "id", .. }));
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::Expected { expected: "id", .. }
+        ));
     }
 
     #[test]
@@ -814,13 +937,25 @@ mod tests {
     fn invalid_event_type() {
         // Event type must match [a-zA-Z][a-zA-Z0-9._-]*, not a number
         let err = parse("!123 0 target").unwrap_err();
-        assert!(matches!(err.kind, ParseErrorKind::Expected { expected: "type name", .. }));
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::Expected {
+                expected: "type name",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn invalid_ack_event_type() {
         let err = parse("!ack 123 0").unwrap_err();
-        assert!(matches!(err.kind, ParseErrorKind::Expected { expected: "type name", .. }));
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::Expected {
+                expected: "type name",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -828,7 +963,10 @@ mod tests {
         let err = parse("-view _").unwrap_err();
         assert!(matches!(
             err.kind,
-            ParseErrorKind::Expected { expected: "named id (not '_')", .. }
+            ParseErrorKind::Expected {
+                expected: "named id (not '_')",
+                ..
+            }
         ));
     }
 
@@ -837,7 +975,10 @@ mod tests {
         let err = parse("@view _").unwrap_err();
         assert!(matches!(
             err.kind,
-            ParseErrorKind::Expected { expected: "named id (not '_')", .. }
+            ParseErrorKind::Expected {
+                expected: "named id (not '_')",
+                ..
+            }
         ));
     }
 
@@ -912,10 +1053,14 @@ mod tests {
 
     #[test]
     fn expand_event() {
-        let cmds =
-            parse("!expand 0 notes-app:save kind=button label=\"Save\"").unwrap();
+        let cmds = parse("!expand 0 notes-app:save kind=button label=\"Save\"").unwrap();
         match &cmds[0] {
-            Command::Event { kind, seq, id, props } => {
+            Command::Event {
+                kind,
+                seq,
+                id,
+                props,
+            } => {
                 assert_eq!(*kind, EventKind::Expand);
                 assert_eq!(*seq, 0);
                 assert_eq!(*id, "notes-app:save");
@@ -999,10 +1144,37 @@ mod tests {
 
         let cmds = parse(payload).unwrap();
         assert_eq!(cmds.len(), 4);
-        assert!(matches!(&cmds[0], Command::Event { kind: EventKind::Click, seq: 0, id: "save", .. }));
-        assert!(matches!(&cmds[1], Command::Ack { kind: EventKind::Click, seq: 0, .. }));
-        assert!(matches!(&cmds[2], Command::Sub { seq: 0, target_type: "button" }));
-        assert!(matches!(&cmds[3], Command::Unsub { seq: 1, target_type: "slider" }));
+        assert!(matches!(
+            &cmds[0],
+            Command::Event {
+                kind: EventKind::Click,
+                seq: 0,
+                id: "save",
+                ..
+            }
+        ));
+        assert!(matches!(
+            &cmds[1],
+            Command::Ack {
+                kind: EventKind::Click,
+                seq: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &cmds[2],
+            Command::Sub {
+                seq: 0,
+                target_type: "button"
+            }
+        ));
+        assert!(matches!(
+            &cmds[3],
+            Command::Unsub {
+                seq: 1,
+                target_type: "slider"
+            }
+        ));
     }
 
     #[test]
@@ -1011,10 +1183,8 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut em = Emitter::new(&mut buf);
-        em.frame(|em| {
-            em.upsert("text", "msg", &[Prop::val("content", "it's a \"test\"")])
-        })
-        .unwrap();
+        em.frame(|em| em.upsert("text", "msg", &[Prop::val("content", "it's a \"test\"")]))
+            .unwrap();
 
         let wire = String::from_utf8(buf).unwrap();
         let payload = wire

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "libs/byo",
+    "libs/byo-macros",
     "system/compositor",
     "system/orchestrator",
     "services/controls",
@@ -12,5 +13,6 @@ edition = "2024"
 
 [workspace.dependencies]
 byo = { path = "libs/byo" }
+byo-macros = { path = "libs/byo-macros" }
 bevy = { version = "0.18", features = ["ui"] }
 tokio = { version = "1", features = ["full"] }
