@@ -143,16 +143,87 @@ fn ack() {
 }
 
 #[test]
-fn sub_unsub() {
+fn claim_unclaim() {
     let out = emit(|em| {
         byo_write!(em,
-            !sub 0 button
-            !unsub 1 slider
+            ?claim 0 button
+            ?unclaim 1 slider
         )
     });
     let p = payload(&out);
-    assert!(p.contains("!sub 0 button"));
-    assert!(p.contains("!unsub 1 slider"));
+    assert!(p.contains("?claim 0 button"));
+    assert!(p.contains("?unclaim 1 slider"));
+}
+
+#[test]
+fn observe_unobserve() {
+    let out = emit(|em| {
+        byo_write!(em,
+            ?observe 0 view
+            ?unobserve 1 text
+        )
+    });
+    let p = payload(&out);
+    assert!(p.contains("?observe 0 view"));
+    assert!(p.contains("?unobserve 1 text"));
+}
+
+#[test]
+fn request_expand() {
+    let out = emit(|em| {
+        byo_write!(em, ?expand 0 save kind=button label="Save")
+    });
+    let p = payload(&out);
+    assert!(p.contains("?expand 0 save kind=button label=Save"));
+}
+
+#[test]
+fn response_expand() {
+    let out = emit(|em| {
+        byo_write!(em,
+            .expand 0 {
+                +view root class="btn" {
+                    +text label content="Save"
+                }
+            }
+        )
+    });
+    let p = payload(&out);
+    assert!(p.contains(".expand 0 {"));
+    assert!(p.contains("+view root class=btn {"));
+    assert!(p.contains("+text label content=Save"));
+}
+
+#[test]
+fn generic_request() {
+    let out = emit(|em| {
+        byo_write!(em, ?"render-frame" 0 viewport)
+    });
+    let p = payload(&out);
+    assert!(p.contains("?render-frame 0 viewport"));
+}
+
+#[test]
+fn generic_response_no_body() {
+    let out = emit(|em| {
+        byo_write!(em, ."render-frame" 0 status=ok)
+    });
+    let p = payload(&out);
+    assert!(p.contains(".render-frame 0 status=ok"));
+}
+
+#[test]
+fn generic_response_with_body() {
+    let out = emit(|em| {
+        byo_write!(em,
+            ."render-frame" 0 status=ok {
+                +view frame
+            }
+        )
+    });
+    let p = payload(&out);
+    assert!(p.contains(".render-frame 0 status=ok {"));
+    assert!(p.contains("+view frame"));
 }
 
 // ---------------------------------------------------------------------------
@@ -362,12 +433,12 @@ fn round_trip_parse() {
             @view sidebar hidden
             !click 0 save
             !ack click 0 handled=true
-            !sub 0 button
+            ?claim 0 button
         )
     });
     let p = payload(&out);
     let cmds = parse(p).unwrap();
-    // Upsert + Push + Text + Pop + Destroy + Patch + Event + Ack + Sub = 9
+    // Upsert + Push + Text + Pop + Destroy + Patch + Event + Ack + Request = 9
     assert_eq!(cmds.len(), 9);
 }
 

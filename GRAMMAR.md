@@ -8,7 +8,7 @@ structure within that payload.
 # -- Top level --
 
 batch      = whitespace? (command whitespace?)*
-command    = upsert | destroy | patch | event
+command    = upsert | destroy | patch | event | request | response
 
 # -- Object operations --
 
@@ -19,11 +19,24 @@ children   = '{' whitespace? (command whitespace?)* '}'
 
 # -- Events --
 
-event      = '!' (ack | sub | unsub | other)
+event      = '!' (ack | other_event)
 ack        = 'ack' type seqnum prop*
-sub        = 'sub' seqnum type
-unsub      = 'unsub' seqnum type
-other      = type seqnum id prop*
+other_event = type seqnum id prop*
+
+# -- Requests --
+
+request      = '?' (claim_req | unclaim_req | observe_req | unobserve_req | other_req)
+claim_req    = 'claim' seqnum type
+unclaim_req  = 'unclaim' seqnum type
+observe_req  = 'observe' seqnum type
+unobserve_req = 'unobserve' seqnum type
+other_req    = type seqnum id prop*
+
+# -- Responses --
+
+response   = '.' (expand_res | other_res)
+expand_res = 'expand' seqnum children
+other_res  = type seqnum prop* children?
 
 # -- Properties --
 
@@ -37,7 +50,7 @@ dqchar     = [^"\\] | escape
 sqstring   = "'" sqchar* "'"
 sqchar     = [^'\\] | escape
 escape     = '\\' ["'\\/nrt0]
-bare       = [^\s{}="'~\\+\-@!] [^\s{}="'~\\]*
+bare       = [^\s{}="'~\\+\-@!?.] [^\s{}="'~\\]*
 
 # -- Atoms --
 
@@ -72,15 +85,15 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
   enforcing balanced `{`/`}`. The parser emits flat `Push`/`Pop`
   commands in the output stream.
 
-- **Children targets.** Only `upsert` (`+`) and `patch` (`@`) can
-  have children blocks.
+- **Children targets.** `upsert` (`+`), `patch` (`@`), and
+  `response` (`.`) can have children blocks.
 
 - **Greedy props.** `prop*` is delimited by whitespace. The parser
   greedily consumes props until it hits a character that starts a
-  new command (`+`, `-`, `@`, `!`, `{`, `}`) or end-of-input.
+  new command (`+`, `-`, `@`, `!`, `?`, `.`, `{`, `}`) or end-of-input.
 
 - **Whitespace.** Mandatory between tokens, except immediately after
-  operator characters (`+`, `-`, `@`, `!`) and around braces
+  operator characters (`+`, `-`, `@`, `!`, `?`, `.`) and around braces
   (`{`, `}`).
 
 - **Anonymous ID.** The `id` rule includes `_` for anonymous objects
@@ -90,12 +103,23 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
   cross-client references used by daemons and the orchestrator.
 
 - **Bare values and operators.** Operator characters (`+`, `-`, `@`,
-  `!`) cannot start a bare value — they are always parsed as command
-  operators at a token boundary. They are valid mid-value (e.g.
-  `notes-app`, `w-64`, `a+b`). To use a value that starts with an
-  operator character, quote it: `value="+5"`.
+  `!`, `?`, `.`) cannot start a bare value — they are always parsed
+  as command operators at a token boundary. They are valid mid-value
+  (e.g. `notes-app`, `w-64`, `a+b`, `com.example.foo`). To use a
+  value that starts with an operator character, quote it: `value="+5"`.
 
-- **Event dispatch.** The `event` rule tries `ack`, `sub`, `unsub`
-  as keywords first, then falls back to `other` for all other event
-  types (both built-in like `click` and third-party like
-  `com.example.spell-check`).
+- **Event dispatch.** The `event` rule tries `ack` as a keyword first,
+  then falls back to `other_event` for all other event types (both
+  built-in like `click` and third-party like `com.example.spell-check`).
+
+- **Request dispatch.** The `request` rule tries `claim`, `unclaim`,
+  `observe`, and `unobserve` as keywords first, then falls back to
+  `other_req` (including `expand` and custom request types).
+
+- **Response dispatch.** The `response` rule tries `expand` first
+  (which requires a mandatory children body), then falls back to
+  `other_res` (with optional children).
+
+- **Dot-qualified types.** `.` is an operator at token start but is
+  valid within bare words (mid-token). So `com.example.foo` tokenizes
+  as a single word, while `.expand` tokenizes as `.` operator + `expand`.

@@ -55,6 +55,10 @@ pub enum Token<'a> {
     At,
     /// `!` — event operator
     Bang,
+    /// `?` — request operator
+    Question,
+    /// `.` — response operator
+    Dot,
     /// `{` — begin children
     LBrace,
     /// `}` — end children
@@ -213,6 +217,20 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
             b'!' => {
                 tokens.push(Spanned {
                     token: Token::Bang,
+                    span: Span { start, end: i + 1 },
+                });
+                i += 1;
+            }
+            b'?' => {
+                tokens.push(Spanned {
+                    token: Token::Question,
+                    span: Span { start, end: i + 1 },
+                });
+                i += 1;
+            }
+            b'.' => {
+                tokens.push(Spanned {
+                    token: Token::Dot,
                     span: Span { start, end: i + 1 },
                 });
                 i += 1;
@@ -398,12 +416,14 @@ mod tests {
     #[test]
     fn single_char_operators() {
         assert_eq!(
-            toks("+ - @ ! { } ~ ="),
+            toks("+ - @ ! ? . { } ~ ="),
             vec![
                 Token::Plus,
                 Token::Minus,
                 Token::At,
                 Token::Bang,
+                Token::Question,
+                Token::Dot,
                 Token::LBrace,
                 Token::RBrace,
                 Token::Tilde,
@@ -423,13 +443,56 @@ mod tests {
     #[test]
     fn bare_words() {
         assert_eq!(
-            toks("view sidebar 42 com.example.foo"),
+            toks("view sidebar 42"),
             vec![
                 Token::Word("view"),
                 Token::Word("sidebar"),
                 Token::Word("42"),
-                Token::Word("com.example.foo"),
             ]
+        );
+    }
+
+    #[test]
+    fn request_tokens() {
+        assert_eq!(
+            toks("?sub 0 button"),
+            vec![
+                Token::Question,
+                Token::Word("sub"),
+                Token::Word("0"),
+                Token::Word("button"),
+            ]
+        );
+    }
+
+    #[test]
+    fn response_tokens() {
+        assert_eq!(
+            toks(".expand 0 { +view x }"),
+            vec![
+                Token::Dot,
+                Token::Word("expand"),
+                Token::Word("0"),
+                Token::LBrace,
+                Token::Plus,
+                Token::Word("view"),
+                Token::Word("x"),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn dot_not_in_is_special() {
+        // com.example.foo should NOT stay as one word anymore since . is now an operator.
+        // But note: . is only an operator at token start. Inside a word it's a regular char.
+        // However, we need to verify: . IS now an operator at token start, so `.expand`
+        // tokenizes as Dot + Word("expand"). But `com.example.foo` starts with `com`
+        // which enters the bare word path. The bare word path uses is_special_or_ws
+        // which does NOT include `.`, so the dot mid-word is fine.
+        assert_eq!(
+            toks("com.example.foo"),
+            vec![Token::Word("com.example.foo")]
         );
     }
 

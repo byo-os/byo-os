@@ -234,14 +234,76 @@ impl<W: io::Write> Emitter<W> {
         write_props(&mut self.writer, props)
     }
 
-    /// `!sub seq type` — Subscribe to an object type.
-    pub fn sub(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n!sub {seq} {target_type}")
+    // -- Requests/Responses ---------------------------------------------------
+
+    /// `?claim seq type` — Claim ownership of an object type (fire-and-forget).
+    pub fn claim(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n?claim {seq} {target_type}")
     }
 
-    /// `!unsub seq type` — Unsubscribe from an object type.
-    pub fn unsub(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n!unsub {seq} {target_type}")
+    /// `?unclaim seq type` — Release claim on an object type (fire-and-forget).
+    pub fn unclaim(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n?unclaim {seq} {target_type}")
+    }
+
+    /// `?observe seq type` — Observe final output for an object type (fire-and-forget).
+    pub fn observe(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n?observe {seq} {target_type}")
+    }
+
+    /// `?unobserve seq type` — Stop observing an object type (fire-and-forget).
+    pub fn unobserve(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n?unobserve {seq} {target_type}")
+    }
+
+    /// `?expand seq id props...` — Request daemon expansion.
+    pub fn expand(&mut self, seq: u64, id: &str, props: &[Prop<'_>]) -> io::Result<()> {
+        write!(self.writer, "\n?expand {seq} {id}")?;
+        write_props(&mut self.writer, props)
+    }
+
+    /// `.expand seq { body }` — Expansion response (closure-based).
+    pub fn expanded_with(
+        &mut self,
+        seq: u64,
+        body: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        write!(self.writer, "\n.expand {seq} {{")?;
+        body(self)?;
+        self.writer.write_all(b"\n}")
+    }
+
+    /// `?kind seq target props...` — Generic request.
+    pub fn request(
+        &mut self,
+        kind: &str,
+        seq: u64,
+        target: &str,
+        props: &[Prop<'_>],
+    ) -> io::Result<()> {
+        write!(self.writer, "\n?{kind} {seq} {target}")?;
+        write_props(&mut self.writer, props)
+    }
+
+    /// `.kind seq props... { body }` — Generic response with body (closure-based).
+    pub fn response_with(
+        &mut self,
+        kind: &str,
+        seq: u64,
+        props: &[Prop<'_>],
+        body: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        write!(self.writer, "\n.{kind} {seq}")?;
+        write_props(&mut self.writer, props)?;
+        self.writer.write_all(b" {")?;
+        body(self)?;
+        self.writer.write_all(b"\n}")
+    }
+
+    /// `.kind seq props...` — Generic response without body.
+    pub fn response(&mut self, kind: &str, seq: u64, props: &[Prop<'_>]) -> io::Result<()> {
+        write!(self.writer, "\n.{kind} {seq}")?;
+        write_props(&mut self.writer, props)
     }
 
     // -- Bulk emission --------------------------------------------------------
@@ -301,11 +363,28 @@ impl<W: io::Write> Emitter<W> {
                     write!(self.writer, "\n!ack {} {seq}", kind.as_str())?;
                     write_props(&mut self.writer, props)?;
                 }
-                Command::Sub { seq, target_type } => {
-                    write!(self.writer, "\n!sub {seq} {target_type}")?;
+                Command::Request {
+                    kind,
+                    seq,
+                    target,
+                    props,
+                } => {
+                    write!(self.writer, "\n?{} {seq} {target}", kind.as_str())?;
+                    write_props(&mut self.writer, props)?;
                 }
-                Command::Unsub { seq, target_type } => {
-                    write!(self.writer, "\n!unsub {seq} {target_type}")?;
+                Command::Response {
+                    kind,
+                    seq,
+                    props,
+                    body,
+                } => {
+                    write!(self.writer, "\n.{} {seq}", kind.as_str())?;
+                    write_props(&mut self.writer, props)?;
+                    if let Some(body) = body {
+                        self.writer.write_all(b" {")?;
+                        self.commands(body)?;
+                        self.writer.write_all(b"\n}")?;
+                    }
                 }
             }
         }
@@ -447,15 +526,83 @@ mod tests {
     }
 
     #[test]
-    fn sub_unsub() {
+    fn claim_unclaim() {
         let out = emit(|em| {
-            em.sub(0, "button")?;
-            em.sub(1, "slider")?;
-            em.unsub(2, "checkbox")
+            em.claim(0, "button")?;
+            em.claim(1, "slider")?;
+            em.unclaim(2, "checkbox")
         });
         assert_eq!(
             out,
-            "\x1b_B\n!sub 0 button\n!sub 1 slider\n!unsub 2 checkbox\n\x1b\\"
+            "\x1b_B\n?claim 0 button\n?claim 1 slider\n?unclaim 2 checkbox\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn observe_unobserve() {
+        let out = emit(|em| {
+            em.observe(0, "view")?;
+            em.observe(1, "text")?;
+            em.unobserve(2, "view")
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n?observe 0 view\n?observe 1 text\n?unobserve 2 view\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn expand_request() {
+        let out = emit(|em| {
+            em.expand(0, "notes-app:save", &[Prop::val("kind", "button")])
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n?expand 0 notes-app:save kind=button\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn expanded_with_body() {
+        let out = emit(|em| {
+            em.expanded_with(0, |em| {
+                em.upsert("view", "save-root", &[Prop::val("class", "btn")])
+            })
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n.expand 0 {\n+view save-root class=btn\n}\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn generic_request() {
+        let out = emit(|em| em.request("render-frame", 0, "viewport", &[]));
+        assert_eq!(
+            out,
+            "\x1b_B\n?render-frame 0 viewport\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn generic_response_no_body() {
+        let out = emit(|em| em.response("render-frame", 0, &[Prop::val("status", "ok")]));
+        assert_eq!(
+            out,
+            "\x1b_B\n.render-frame 0 status=ok\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn generic_response_with_body() {
+        let out = emit(|em| {
+            em.response_with("render-frame", 0, &[Prop::val("status", "ok")], |em| {
+                em.upsert("view", "frame", &[])
+            })
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n.render-frame 0 status=ok {\n+view frame\n}\n\x1b\\"
         );
     }
 
@@ -589,10 +736,30 @@ mod tests {
         assert_eq!(EventKind::Focus.as_str(), "focus");
         assert_eq!(EventKind::Blur.as_str(), "blur");
         assert_eq!(EventKind::Resize.as_str(), "resize");
-        assert_eq!(EventKind::Expand.as_str(), "expand");
         assert_eq!(
             EventKind::Other("com.example.foo").as_str(),
             "com.example.foo"
+        );
+    }
+
+    #[test]
+    fn request_kind_as_str() {
+        use crate::protocol::RequestKind;
+        assert_eq!(RequestKind::Claim.as_str(), "claim");
+        assert_eq!(RequestKind::Unclaim.as_str(), "unclaim");
+        assert_eq!(RequestKind::Observe.as_str(), "observe");
+        assert_eq!(RequestKind::Unobserve.as_str(), "unobserve");
+        assert_eq!(RequestKind::Expand.as_str(), "expand");
+        assert_eq!(RequestKind::Other("render-frame").as_str(), "render-frame");
+    }
+
+    #[test]
+    fn response_kind_as_str() {
+        use crate::protocol::ResponseKind;
+        assert_eq!(ResponseKind::Expand.as_str(), "expand");
+        assert_eq!(
+            ResponseKind::Other("render-frame").as_str(),
+            "render-frame"
         );
     }
 
@@ -621,7 +788,7 @@ mod tests {
             "\n@view sidebar hidden",
             "\n!click 0 save",
             "\n!ack click 0 handled=true",
-            "\n!sub 0 button",
+            "\n?claim 0 button",
         );
         let cmds = parse(input).unwrap();
 

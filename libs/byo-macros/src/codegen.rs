@@ -119,24 +119,18 @@ impl Codegen {
                     }
                 }
             }
-            IrCommand::Sub { seq, target_type } => {
-                let (seq_binds, seq_expr) = self.gen_seq_value(seq);
-                let (type_binds, type_expr) = self.gen_str_value(target_type);
-                quote! {
-                    #seq_binds
-                    #type_binds
-                    #em_ident.sub(#seq_expr, #type_expr)?;
-                }
-            }
-            IrCommand::Unsub { seq, target_type } => {
-                let (seq_binds, seq_expr) = self.gen_seq_value(seq);
-                let (type_binds, type_expr) = self.gen_str_value(target_type);
-                quote! {
-                    #seq_binds
-                    #type_binds
-                    #em_ident.unsub(#seq_expr, #type_expr)?;
-                }
-            }
+            IrCommand::Request {
+                kind,
+                seq,
+                target,
+                props,
+            } => self.gen_request(kind, seq, target, props, em_ident),
+            IrCommand::Response {
+                kind,
+                seq,
+                props,
+                children,
+            } => self.gen_response(kind, seq, props, children, em_ident),
             IrCommand::Conditional {
                 condition,
                 then_cmds,
@@ -257,6 +251,190 @@ impl Codegen {
                             #child_code
                             ::std::result::Result::Ok(())
                         })?;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generate code for a request command.
+    fn gen_request(
+        &mut self,
+        kind: &IrValue,
+        seq: &IrValue,
+        target: &IrValue,
+        props: &[IrProp],
+        em_ident: &proc_macro2::Ident,
+    ) -> TokenStream {
+        let (seq_binds, seq_expr) = self.gen_seq_value(seq);
+        let (target_binds, target_expr) = self.gen_str_value(target);
+
+        // Optimize known literal kinds to direct emitter methods
+        if let IrValue::Literal(k) = kind {
+            match k.as_str() {
+                "claim" => {
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.claim(#seq_expr, #target_expr)?;
+                    };
+                }
+                "unclaim" => {
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.unclaim(#seq_expr, #target_expr)?;
+                    };
+                }
+                "observe" => {
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.observe(#seq_expr, #target_expr)?;
+                    };
+                }
+                "unobserve" => {
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.unobserve(#seq_expr, #target_expr)?;
+                    };
+                }
+                "expand" if !props.is_empty() => {
+                    if has_dynamic_props(props) {
+                        let props_var = self.fresh_ident("props");
+                        let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                        return quote! {
+                            {
+                                #seq_binds
+                                #target_binds
+                                let mut #props_var = ::std::vec::Vec::new();
+                                #push_stmts
+                                #em_ident.expand(#seq_expr, #target_expr, &#props_var)?;
+                            }
+                        };
+                    } else {
+                        let prop_items = self.gen_static_prop_items(props);
+                        return quote! {
+                            #seq_binds
+                            #target_binds
+                            #em_ident.expand(#seq_expr, #target_expr, &[#(#prop_items),*])?;
+                        };
+                    }
+                }
+                "expand" => {
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.expand(#seq_expr, #target_expr, &[])?;
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        // Generic request: ?kind seq target props...
+        let (kind_binds, kind_expr) = self.gen_str_value(kind);
+        if has_dynamic_props(props) {
+            let props_var = self.fresh_ident("props");
+            let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+            quote! {
+                {
+                    #kind_binds
+                    #seq_binds
+                    #target_binds
+                    let mut #props_var = ::std::vec::Vec::new();
+                    #push_stmts
+                    #em_ident.request(#kind_expr, #seq_expr, #target_expr, &#props_var)?;
+                }
+            }
+        } else {
+            let prop_items = self.gen_static_prop_items(props);
+            quote! {
+                #kind_binds
+                #seq_binds
+                #target_binds
+                #em_ident.request(#kind_expr, #seq_expr, #target_expr, &[#(#prop_items),*])?;
+            }
+        }
+    }
+
+    /// Generate code for a response command.
+    fn gen_response(
+        &mut self,
+        kind: &IrValue,
+        seq: &IrValue,
+        props: &[IrProp],
+        children: &Option<Vec<IrCommand>>,
+        em_ident: &proc_macro2::Ident,
+    ) -> TokenStream {
+        let (kind_binds, kind_expr) = self.gen_str_value(kind);
+        let (seq_binds, seq_expr) = self.gen_seq_value(seq);
+
+        // .expand → expanded_with (closure-based)
+        if let IrValue::Literal(k) = kind
+            && k == "expand"
+            && let Some(ch) = children
+        {
+            let child_code = self.gen_commands(ch, em_ident);
+            return quote! {
+                #seq_binds
+                #em_ident.expanded_with(#seq_expr, |#em_ident| {
+                    #child_code
+                    ::std::result::Result::Ok(())
+                })?;
+            };
+        }
+
+        match children {
+            Some(ch) => {
+                let child_code = self.gen_commands(ch, em_ident);
+                if has_dynamic_props(props) {
+                    let props_var = self.fresh_ident("props");
+                    let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                    quote! {
+                        {
+                            #kind_binds
+                            #seq_binds
+                            let mut #props_var = ::std::vec::Vec::new();
+                            #push_stmts
+                            #em_ident.response_with(#kind_expr, #seq_expr, &#props_var, |#em_ident| {
+                                #child_code
+                                ::std::result::Result::Ok(())
+                            })?;
+                        }
+                    }
+                } else {
+                    let prop_items = self.gen_static_prop_items(props);
+                    quote! {
+                        #kind_binds
+                        #seq_binds
+                        #em_ident.response_with(#kind_expr, #seq_expr, &[#(#prop_items),*], |#em_ident| {
+                            #child_code
+                            ::std::result::Result::Ok(())
+                        })?;
+                    }
+                }
+            }
+            None => {
+                if has_dynamic_props(props) {
+                    let props_var = self.fresh_ident("props");
+                    let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                    quote! {
+                        {
+                            #kind_binds
+                            #seq_binds
+                            let mut #props_var = ::std::vec::Vec::new();
+                            #push_stmts
+                            #em_ident.response(#kind_expr, #seq_expr, &#props_var)?;
+                        }
+                    }
+                } else {
+                    let prop_items = self.gen_static_prop_items(props);
+                    quote! {
+                        #kind_binds
+                        #seq_binds
+                        #em_ident.response(#kind_expr, #seq_expr, &[#(#prop_items),*])?;
                     }
                 }
             }

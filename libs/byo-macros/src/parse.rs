@@ -160,7 +160,7 @@ impl Parser {
                 let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                 return match inner.first() {
                     Some(TokenTree::Punct(p)) => {
-                        matches!(p.as_char(), '+' | '-' | '@' | '!')
+                        matches!(p.as_char(), '+' | '-' | '@' | '!' | '?' | '.')
                     }
                     Some(TokenTree::Ident(id)) => id == "if" || id == "for",
                     _ => false,
@@ -302,6 +302,8 @@ impl Parser {
                 || self.peek_punct('-')
                 || self.peek_punct('@')
                 || self.peek_punct('!')
+                || self.peek_punct('?')
+                || self.peek_punct('.')
             {
                 break;
             }
@@ -535,20 +537,30 @@ impl Parser {
             });
         }
 
-        // `!` — event/ack/sub/unsub
+        // `!` — event/ack
         if self.eat_punct('!') {
             return self.parse_event_command();
         }
 
+        // `?` — request (sub, unsub, expand, custom)
+        if self.eat_punct('?') {
+            return self.parse_request_command();
+        }
+
+        // `.` — response (expand, custom)
+        if self.eat_punct('.') {
+            return self.parse_response_command();
+        }
+
         Err(format!(
-            "expected command (+, -, @, !, if, for), found {:?}",
+            "expected command (+, -, @, !, ?, ., if, for), found {:?}",
             self.peek()
         ))
     }
 
     /// Parse an event command after the `!` has been consumed.
     fn parse_event_command(&mut self) -> Result<IrCommand, String> {
-        // Check for ack/sub/unsub keywords
+        // Check for ack keyword
         if self.peek_keyword("ack") {
             self.pos += 1;
             let kind = self.parse_type()?;
@@ -558,20 +570,6 @@ impl Parser {
                 return Err("'!ack' cannot have a children block".to_string());
             }
             return Ok(IrCommand::Ack { kind, seq, props });
-        }
-
-        if self.peek_keyword("sub") {
-            self.pos += 1;
-            let seq = self.parse_seq()?;
-            let target_type = self.parse_type()?;
-            return Ok(IrCommand::Sub { seq, target_type });
-        }
-
-        if self.peek_keyword("unsub") {
-            self.pos += 1;
-            let seq = self.parse_seq()?;
-            let target_type = self.parse_type()?;
-            return Ok(IrCommand::Unsub { seq, target_type });
         }
 
         // Generic event: !kind seq id props...
@@ -587,6 +585,55 @@ impl Parser {
             seq,
             id,
             props,
+        })
+    }
+
+    /// Parse a request command after the `?` has been consumed.
+    fn parse_request_command(&mut self) -> Result<IrCommand, String> {
+        // claim/unclaim/observe/unobserve: ?claim seq type, etc.
+        if self.peek_keyword("claim")
+            || self.peek_keyword("unclaim")
+            || self.peek_keyword("observe")
+            || self.peek_keyword("unobserve")
+        {
+            let kind_str = self.expect_ident("expected request kind")?;
+            let kind = IrValue::Literal(kind_str);
+            let seq = self.parse_seq()?;
+            let target = self.parse_type()?;
+            return Ok(IrCommand::Request {
+                kind,
+                seq,
+                target,
+                props: Vec::new(),
+            });
+        }
+
+        // Generic request: ?kind seq target props...
+        let kind = self.parse_type()?;
+        let seq = self.parse_seq()?;
+        let target = self.parse_id()?;
+        let (props, children) = self.parse_props()?;
+        if children.is_some() {
+            return Err("requests cannot have a children block".to_string());
+        }
+        Ok(IrCommand::Request {
+            kind,
+            seq,
+            target,
+            props,
+        })
+    }
+
+    /// Parse a response command after the `.` has been consumed.
+    fn parse_response_command(&mut self) -> Result<IrCommand, String> {
+        let kind = self.parse_type()?;
+        let seq = self.parse_seq()?;
+        let (props, children) = self.parse_props()?;
+        Ok(IrCommand::Response {
+            kind,
+            seq,
+            props,
+            children,
         })
     }
 
@@ -747,16 +794,94 @@ mod tests {
     }
 
     #[test]
-    fn parse_sub_unsub() {
-        let input = quote! { !sub 0 button !unsub 1 slider };
+    fn parse_claim_unclaim() {
+        let input = quote! { ?claim 0 button ?unclaim 1 slider };
         let cmds = parse(input, false).unwrap();
         assert_eq!(cmds.len(), 2);
         assert!(
-            matches!(&cmds[0], IrCommand::Sub { seq: IrValue::Literal(s), target_type: IrValue::Literal(t) } if s == "0" && t == "button")
+            matches!(&cmds[0], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "claim" && s == "0" && t == "button")
         );
         assert!(
-            matches!(&cmds[1], IrCommand::Unsub { seq: IrValue::Literal(s), target_type: IrValue::Literal(t) } if s == "1" && t == "slider")
+            matches!(&cmds[1], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "unclaim" && s == "1" && t == "slider")
         );
+    }
+
+    #[test]
+    fn parse_observe_unobserve() {
+        let input = quote! { ?observe 0 view ?unobserve 1 text };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            matches!(&cmds[0], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "observe" && s == "0" && t == "view")
+        );
+        assert!(
+            matches!(&cmds[1], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "unobserve" && s == "1" && t == "text")
+        );
+    }
+
+    #[test]
+    fn parse_request_expand() {
+        let input = quote! { ?expand 0 save kind=button };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                target: IrValue::Literal(t),
+                props,
+            } => {
+                assert_eq!(k, "expand");
+                assert_eq!(s, "0");
+                assert_eq!(t, "save");
+                assert_eq!(props.len(), 1);
+            }
+            _ => panic!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn parse_response_expand() {
+        let input = quote! {
+            .expand 0 {
+                +view root
+            }
+        };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Response {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                children: Some(ch),
+                ..
+            } => {
+                assert_eq!(k, "expand");
+                assert_eq!(s, "0");
+                assert_eq!(ch.len(), 1);
+            }
+            _ => panic!("expected Response with children"),
+        }
+    }
+
+    #[test]
+    fn parse_response_no_body() {
+        let input = quote! { .status 0 ok=true };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Response {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                props,
+                children: None,
+            } => {
+                assert_eq!(k, "status");
+                assert_eq!(s, "0");
+                assert_eq!(props.len(), 1);
+            }
+            _ => panic!("expected Response without children"),
+        }
     }
 
     #[test]

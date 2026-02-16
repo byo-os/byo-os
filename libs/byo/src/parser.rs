@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 
 use crate::lexer::{ParseError, ParseErrorKind, Span, Spanned, Token, tokenize};
-use crate::protocol::{Command, EventKind, Prop};
+use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 
 /// Parses a BYO/OS protocol payload string into a sequence of commands.
 ///
@@ -149,9 +149,11 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             Token::Minus => self.parse_destroy(cmds),
             Token::At => self.parse_patch(cmds),
             Token::Bang => self.parse_event(cmds),
+            Token::Question => self.parse_request(cmds),
+            Token::Dot => self.parse_response(cmds),
             _ => Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "command operator (+, -, @, !)",
+                    expected: "command operator (+, -, @, !, ?, .)",
                     found: self.describe_token(tok),
                 },
                 span: tok.span,
@@ -202,8 +204,6 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
         match word {
             "ack" => self.parse_ack(cmds),
-            "sub" => self.parse_sub(cmds),
-            "unsub" => self.parse_unsub(cmds),
             _ => self.parse_other_event(word, cmds),
         }
     }
@@ -214,20 +214,6 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         let seq = self.expect_seqnum()?;
         let props = self.parse_props()?;
         cmds.push(Command::Ack { kind, seq, props });
-        Ok(())
-    }
-
-    fn parse_sub(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
-        let seq = self.expect_seqnum()?;
-        let target_type = self.expect_type()?;
-        cmds.push(Command::Sub { seq, target_type });
-        Ok(())
-    }
-
-    fn parse_unsub(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
-        let seq = self.expect_seqnum()?;
-        let target_type = self.expect_type()?;
-        cmds.push(Command::Unsub { seq, target_type });
         Ok(())
     }
 
@@ -247,6 +233,142 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             props,
         });
         Ok(())
+    }
+
+    // -- Request (?) ----------------------------------------------------------
+
+    fn parse_request(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+        self.advance(); // consume ?
+
+        let word = self.expect_type()?;
+
+        match word {
+            "claim" | "unclaim" | "observe" | "unobserve" => {
+                let kind = RequestKind::from_wire(word);
+                let seq = self.expect_seqnum()?;
+                let target = self.expect_type()?;
+                cmds.push(Command::Request {
+                    kind,
+                    seq,
+                    target,
+                    props: Vec::new(),
+                });
+                Ok(())
+            }
+            _ => {
+                let kind = RequestKind::from_wire(word);
+                let seq = self.expect_seqnum()?;
+                let id = self.expect_id()?;
+                let props = self.parse_props()?;
+                cmds.push(Command::Request {
+                    kind,
+                    seq,
+                    target: id,
+                    props,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    // -- Response (.) ---------------------------------------------------------
+
+    fn parse_response(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+        self.advance(); // consume .
+
+        let word = self.expect_type()?;
+        let kind = ResponseKind::from_wire(word);
+        let seq = self.expect_seqnum()?;
+
+        match kind {
+            ResponseKind::Expand => {
+                // .expand seq { body } — body is mandatory
+                let mut body = Vec::new();
+                self.parse_mandatory_children(&mut body)?;
+                cmds.push(Command::Response {
+                    kind,
+                    seq,
+                    props: Vec::new(),
+                    body: Some(body),
+                });
+                Ok(())
+            }
+            _ => {
+                // .kind seq props... [{ body }]
+                let props = self.parse_props()?;
+                let body = if matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::LBrace,
+                        ..
+                    })
+                ) {
+                    let mut body = Vec::new();
+                    self.parse_children(&mut body)?;
+                    if body.is_empty() {
+                        None
+                    } else {
+                        Some(body)
+                    }
+                } else {
+                    None
+                };
+                cmds.push(Command::Response {
+                    kind,
+                    seq,
+                    props,
+                    body,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Parse a mandatory children block (used by `.expand`).
+    fn parse_mandatory_children(
+        &mut self,
+        cmds: &mut Vec<Command<'a>>,
+    ) -> Result<(), ParseError> {
+        match self.peek() {
+            Some(Spanned {
+                token: Token::LBrace,
+                ..
+            }) => {
+                let open_span = self.advance().span; // consume {
+                cmds.push(Command::Push);
+
+                while !self.at_end() {
+                    if matches!(
+                        self.peek(),
+                        Some(Spanned {
+                            token: Token::RBrace,
+                            ..
+                        })
+                    ) {
+                        break;
+                    }
+                    self.parse_command(cmds)?;
+                }
+
+                if self.at_end() {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnclosedBrace,
+                        span: open_span,
+                    });
+                }
+
+                self.advance(); // consume }
+                cmds.push(Command::Pop);
+                Ok(())
+            }
+            _ => Err(self.error(ParseErrorKind::Expected {
+                expected: "'{' (response body)",
+                found: match self.peek() {
+                    Some(tok) => self.describe_token(tok),
+                    None => "end of input".into(),
+                },
+            })),
+        }
     }
 
     // -- Children -------------------------------------------------------------
@@ -309,6 +431,13 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 })
                 | Some(Spanned {
                     token: Token::Bang, ..
+                })
+                | Some(Spanned {
+                    token: Token::Question,
+                    ..
+                })
+                | Some(Spanned {
+                    token: Token::Dot, ..
                 })
                 | Some(Spanned {
                     token: Token::LBrace,
@@ -513,6 +642,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             Token::Minus => "'-'".into(),
             Token::At => "'@'".into(),
             Token::Bang => "'!'".into(),
+            Token::Question => "'?'".into(),
+            Token::Dot => "'.'".into(),
             Token::LBrace => "'{'".into(),
             Token::RBrace => "'}'".into(),
             Token::Tilde => "'~'".into(),
@@ -787,25 +918,162 @@ mod tests {
     }
 
     #[test]
-    fn sub() {
-        let cmds = parse("!sub 0 button").unwrap();
+    fn claim() {
+        let cmds = parse("?claim 0 button").unwrap();
         assert!(matches!(
             &cmds[0],
-            Command::Sub {
+            Command::Request {
+                kind: RequestKind::Claim,
                 seq: 0,
-                target_type: "button"
+                target: "button",
+                ..
             }
         ));
     }
 
     #[test]
-    fn unsub() {
-        let cmds = parse("!unsub 2 checkbox").unwrap();
+    fn unclaim() {
+        let cmds = parse("?unclaim 2 checkbox").unwrap();
         assert!(matches!(
             &cmds[0],
-            Command::Unsub {
+            Command::Request {
+                kind: RequestKind::Unclaim,
                 seq: 2,
-                target_type: "checkbox"
+                target: "checkbox",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn observe() {
+        let cmds = parse("?observe 0 view").unwrap();
+        assert!(matches!(
+            &cmds[0],
+            Command::Request {
+                kind: RequestKind::Observe,
+                seq: 0,
+                target: "view",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unobserve() {
+        let cmds = parse("?unobserve 1 text").unwrap();
+        assert!(matches!(
+            &cmds[0],
+            Command::Request {
+                kind: RequestKind::Unobserve,
+                seq: 1,
+                target: "text",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn request_expand() {
+        let cmds = parse("?expand 0 notes-app:save kind=button label=\"Save\"").unwrap();
+        match &cmds[0] {
+            Command::Request {
+                kind,
+                seq,
+                target,
+                props,
+            } => {
+                assert_eq!(*kind, RequestKind::Expand);
+                assert_eq!(*seq, 0);
+                assert_eq!(*target, "notes-app:save");
+                assert_eq!(props[0], Prop::val("kind", "button"));
+                assert_eq!(props[1], Prop::val("label", "Save"));
+            }
+            _ => panic!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn request_custom() {
+        let cmds = parse("?render-frame 0 viewport").unwrap();
+        match &cmds[0] {
+            Command::Request {
+                kind,
+                seq,
+                target,
+                props,
+            } => {
+                assert_eq!(*kind, RequestKind::Other("render-frame"));
+                assert_eq!(*seq, 0);
+                assert_eq!(*target, "viewport");
+                assert!(props.is_empty());
+            }
+            _ => panic!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn response_expand() {
+        let cmds = parse(".expand 0 { +view root { +text label } }").unwrap();
+        match &cmds[0] {
+            Command::Response {
+                kind,
+                seq,
+                body: Some(body),
+                ..
+            } => {
+                assert_eq!(*kind, ResponseKind::Expand);
+                assert_eq!(*seq, 0);
+                // body: Push, Upsert(root), Push, Upsert(label), Pop, Pop
+                assert_eq!(body.len(), 6);
+            }
+            _ => panic!("expected Response with body"),
+        }
+    }
+
+    #[test]
+    fn response_custom_no_body() {
+        let cmds = parse(".render-frame 0 status=ok").unwrap();
+        match &cmds[0] {
+            Command::Response {
+                kind,
+                seq,
+                props,
+                body,
+            } => {
+                assert_eq!(*kind, ResponseKind::Other("render-frame"));
+                assert_eq!(*seq, 0);
+                assert_eq!(props[0], Prop::val("status", "ok"));
+                assert!(body.is_none());
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn claim_under_bang_is_event() {
+        // !claim should parse as a generic event, not a request
+        let cmds = parse("!claim 0 button").unwrap();
+        assert!(matches!(
+            &cmds[0],
+            Command::Event {
+                kind: EventKind::Other("claim"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sub_parses_as_other_request() {
+        // ?sub is no longer a keyword — parses as Other("sub") via generic path
+        let cmds = parse("?sub 0 button").unwrap();
+        assert!(matches!(
+            &cmds[0],
+            Command::Request {
+                kind: RequestKind::Other("sub"),
+                seq: 0,
+                target: "button",
+                ..
             }
         ));
     }
@@ -823,27 +1091,33 @@ mod tests {
 
     #[test]
     fn mixed_batch() {
-        let cmds = parse("!sub 0 button !sub 1 slider !sub 2 checkbox").unwrap();
+        let cmds = parse("?claim 0 button ?claim 1 slider ?claim 2 checkbox").unwrap();
         assert_eq!(cmds.len(), 3);
         assert!(matches!(
             &cmds[0],
-            Command::Sub {
+            Command::Request {
+                kind: RequestKind::Claim,
                 seq: 0,
-                target_type: "button"
+                target: "button",
+                ..
             }
         ));
         assert!(matches!(
             &cmds[1],
-            Command::Sub {
+            Command::Request {
+                kind: RequestKind::Claim,
                 seq: 1,
-                target_type: "slider"
+                target: "slider",
+                ..
             }
         ));
         assert!(matches!(
             &cmds[2],
-            Command::Sub {
+            Command::Request {
+                kind: RequestKind::Claim,
                 seq: 2,
-                target_type: "checkbox"
+                target: "checkbox",
+                ..
             }
         ));
     }
@@ -1049,27 +1323,7 @@ mod tests {
         }
     }
 
-    // -- Expand event ---------------------------------------------------------
-
-    #[test]
-    fn expand_event() {
-        let cmds = parse("!expand 0 notes-app:save kind=button label=\"Save\"").unwrap();
-        match &cmds[0] {
-            Command::Event {
-                kind,
-                seq,
-                id,
-                props,
-            } => {
-                assert_eq!(*kind, EventKind::Expand);
-                assert_eq!(*seq, 0);
-                assert_eq!(*id, "notes-app:save");
-                assert_eq!(props[0], Prop::val("kind", "button"));
-                assert_eq!(props[1], Prop::val("label", "Save"));
-            }
-            _ => panic!("expected Event"),
-        }
-    }
+    // -- Request/Response tests are above in sub/unsub/request_expand sections --
 
     // -- Round-trip test (emitter → parser) -----------------------------------
 
@@ -1128,8 +1382,8 @@ mod tests {
         em.frame(|em| {
             em.event("click", 0, "save", &[])?;
             em.ack("click", 0, &[Prop::val("handled", "true")])?;
-            em.sub(0, "button")?;
-            em.unsub(1, "slider")
+            em.claim(0, "button")?;
+            em.unclaim(1, "slider")
         })
         .unwrap();
 
@@ -1163,16 +1417,20 @@ mod tests {
         ));
         assert!(matches!(
             &cmds[2],
-            Command::Sub {
+            Command::Request {
+                kind: RequestKind::Claim,
                 seq: 0,
-                target_type: "button"
+                target: "button",
+                ..
             }
         ));
         assert!(matches!(
             &cmds[3],
-            Command::Unsub {
+            Command::Request {
+                kind: RequestKind::Unclaim,
                 seq: 1,
-                target_type: "slider"
+                target: "slider",
+                ..
             }
         ));
     }

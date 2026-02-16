@@ -91,37 +91,16 @@ on types the compositor handles directly (e.g. `class` on views).
 Daemon-owned types like controls use semantic props (e.g. `label`,
 `variant`) — the daemon decides how they look.
 
-#### Events and messages
+#### Events
 
 | Op       | Form                | Meaning                             |
 |----------|---------------------|-------------------------------------|
 | `!`      | `!type seq id`      | Event (input, control, etc.)        |
 | `!ack`   | `!ack type seq`     | Acknowledge a received event        |
-| `!sub`   | `!sub seq type`     | Subscribe to an object type         |
-| `!unsub` | `!unsub seq type`   | Unsubscribe from an object type     |
-| `!expand`| `!expand seq id`    | Orchestrator → daemon: expand object|
 
 Events flow in both directions. The compositor/daemons send input
 events to apps (pointer, keyboard, focus, control interactions), and
 apps ACK them.
-
-**Type subscriptions:** Daemons subscribe to object types via `!sub`.
-A subscription to a type means the daemon receives:
-- All `!expand` events when any app creates/updates that type
-- All input events targeted at objects of that type
-- Excludes events originating from the daemon itself
-
-For example, the controls daemon at startup:
-```
-\e_B !sub 0 button !sub 1 slider !sub 2 checkbox \e\
-```
-
-After this, any `+button` from any app triggers an `!expand` to
-the controls daemon. The orchestrator ACKs the subscription.
-
-`!expand` carries the qualified ID and original props (e.g.
-`!expand 0 notes-app:save kind=button label="Save"`). The daemon
-responds with compositor-native commands and an `!ack expand 0`.
 
 Each side maintains its own incrementing sequence counter for
 messages it sends. Sequence numbers are **namespaced per event type**
@@ -133,25 +112,91 @@ ACK carries a handling disposition for event bubbling:
 - `handled=true` — event was consumed, stop propagation
 - `handled=false` — event was not handled, bubble to parent
 
-#### Reserved event names
+#### Requests and responses
 
-Unqualified event names are reserved for BYO/OS built-ins.
-Third-party events must use dot-qualified names (same rule as
-type names).
+| Op  | Form                   | Meaning                             |
+|-----|------------------------|-------------------------------------|
+| `?` | `?claim seq type`      | Claim ownership of an object type   |
+| `?` | `?unclaim seq type`    | Release claim on an object type     |
+| `?` | `?observe seq type`    | Observe final output for a type     |
+| `?` | `?unobserve seq type`  | Stop observing a type               |
+| `?` | `?expand seq id`       | Request daemon expansion            |
+| `?` | `?kind seq target`     | Generic/custom request              |
+| `.` | `.expand seq { body }` | Expansion response with body        |
+| `.` | `.kind seq props`      | Generic/custom response             |
+
+Requests (`?`) and responses (`.`) handle system commands and
+daemon interactions. `?claim`/`?unclaim`/`?observe`/`?unobserve`
+are fire-and-forget (no response needed). `?expand` expects a
+`.expand` response from the daemon.
+
+**Two subscription modes:**
+
+| Command | Mode | Meaning | Counterpart |
+|---------|------|---------|-------------|
+| `?claim seq type` | Expand | "I own this type — send me `?expand`" | `?unclaim seq type` |
+| `?observe seq type` | Consume | "I consume final output for this type" | `?unobserve seq type` |
+
+**Claim** is singular — only one daemon can claim a type at a time.
+A claim means the daemon receives:
+- All `?expand` requests when any app creates/updates that type
+- All input events targeted at objects of that type
+- Excludes events originating from the daemon itself
+
+**Observe** is plural — multiple processes can observe the same type.
+Observers receive the final expanded output. Use cases:
+- Compositor observes `view`, `text`, `layer` → renders them
+- Accessibility service observes `view`, `text` → builds a11y tree
+
+For example, the controls daemon at startup:
+```
+\e_B ?claim 0 button ?claim 1 slider ?claim 2 checkbox \e\
+```
+
+After this, any `+button` from any app triggers a `?expand` to
+the controls daemon.
+
+`?expand` carries the qualified ID and original props (e.g.
+`?expand 0 notes-app:save kind=button label="Save"`). The daemon
+responds with a grammar-scoped `.expand` containing compositor-native
+commands:
+
+```
+\e_B
+  .expand 0 {
+    +view save-root class="inline-flex px-4 py-2 rounded bg-blue-500" {
+      +text save-label content="Save" class="text-white"
+    }
+  }
+\e\
+```
+
+#### Reserved event and request names
+
+Unqualified names are reserved for BYO/OS built-ins.
+Third-party events/requests must use dot-qualified names (same rule
+as type names).
 
 Known built-in events parse as keywords with typed fields in the
 `byo` library. Unknown events parse into a generic form, keeping
 the protocol extensible.
 
-**Input events:**
+**Input events (`!`):**
 - `click`, `keydown`, `keyup`, `pointer`, `scroll`
 - `focus`, `blur`, `resize`
 
-**System events:**
+**Event responses (`!`):**
 - `ack` — acknowledge a received event
-- `sub` — subscribe to an object type
-- `unsub` — unsubscribe from an object type
-- `expand` — orchestrator → daemon object expansion request
+
+**Requests (`?`):**
+- `claim` — claim ownership of an object type
+- `unclaim` — release claim on an object type
+- `observe` — observe final output for a type
+- `unobserve` — stop observing a type
+- `expand` — request daemon expansion
+
+**Responses (`.`):**
+- `expand` — expansion response with body
 
 **Future (reserved):**
 - `drag`, `drop`, `touch`, `gesture`, `paste`, `ime`
@@ -183,14 +228,15 @@ The compositor only ever sees native types (`view`, `layer`, `text`).
    ```
 2. Orchestrator buffers the batch, recognizes `button` routes to
    the controls daemon
-3. Orchestrator sends `!expand 0 notes-app:save kind=button label="Save"`
+3. Orchestrator sends `?expand 0 notes-app:save kind=button label="Save"`
    to the controls daemon
-4. Controls daemon responds with compositor-native expansion:
+4. Controls daemon responds with a grammar-scoped expansion:
    ```
-   +view save-root class="inline-flex px-4 py-2 rounded bg-blue-500" {
-     +text save-label content="Save" class="text-white"
+   .expand 0 {
+     +view save-root class="inline-flex px-4 py-2 rounded bg-blue-500" {
+       +text save-label content="Save" class="text-white"
+     }
    }
-   !ack expand 0
    ```
 5. Orchestrator **rewrites** the batch, substituting the button
    in-place with the daemon's expansion (properly namespaced):
@@ -206,11 +252,11 @@ The compositor only ever sees native types (`view`, `layer`, `text`).
 6. Rewritten batch is flushed to the compositor
 
 The orchestrator tracks a **refcount per batch** (WaitGroup pattern).
-Each daemon-bound command increments it; each ACK decrements it.
-When the count reaches zero, the rewrite is performed and the batch
-is flushed. Daemons can trigger further daemon work (e.g. controls
-→ text daemon), which increments the count again before it
-decrements — naturally handling nested expansion.
+Each daemon-bound command increments it; each `.expand` response
+decrements it. When the count reaches zero, the rewrite is performed
+and the batch is flushed. Daemons can trigger further daemon work
+(e.g. controls → text daemon), which increments the count again
+before it decrements — naturally handling nested expansion.
 
 **Scoping and ordering:** Each APC sequence is an independent
 batch/transaction. Only `B` batches containing daemon-owned types
@@ -234,9 +280,9 @@ equivalent of a single `+` with the final props. This enables:
 **Daemon crash recovery:**
 1. Daemon disconnects — orchestrator removes all `daemon:*` nodes
    from the compositor
-2. Daemon restarts, re-subscribes via `!sub`
+2. Daemon restarts, re-claims types via `?claim`
 3. Orchestrator replays the reduced state for all objects of the
-   daemon's subscribed types as `!expand` events
+   daemon's claimed types as `?expand` requests
 4. Daemon re-expands everything, compositor gets fresh subtrees
 
 **Late daemon startup:** Apps can create daemon-owned types before
@@ -383,6 +429,30 @@ App ACKs:
 \e_B
   !ack keydown 0 handled=true
   !ack click 0 handled=false
+\e\
+```
+
+Daemon claims (fire-and-forget, no response needed):
+
+```
+\e_B ?claim 0 button ?claim 1 slider ?claim 2 checkbox \e\
+```
+
+Expansion request (orchestrator → daemon):
+
+```
+\e_B ?expand 0 notes-app:save kind=button label="Save" \e\
+```
+
+Expansion response (daemon → orchestrator, grammar-scoped body):
+
+```
+\e_B
+  .expand 0 {
+    +view save-root class="inline-flex px-4 py-2 rounded bg-blue-500" {
+      +text save-label content="Save" class="text-white"
+    }
+  }
 \e\
 ```
 

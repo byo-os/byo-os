@@ -1,0 +1,20 @@
+# Every process has a name and command. The orchestrator spawns each
+# as a child process and communicates via stdin/stdout pipes.
+
+[[process]]
+name = "compositor"
+command = "byo-compositor"
+# args = ["--fullscreen"]
+
+[[process]]
+name = "controls"
+command = "byo-controls"
+
+# [[process]]
+# name = "text"
+# command = "byo-text"
+
+# Apps launched at startup
+# [[process]]
+# name = "terminal"
+# command = "byo-terminal"

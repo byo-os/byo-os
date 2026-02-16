@@ -121,8 +121,8 @@ impl<'a> Prop<'a> {
 /// | `Patch`   | `@type id props...`   | Update specific props on an object   |
 /// | `Event`   | `!type seq id props`  | Input or system event                |
 /// | `Ack`     | `!ack type seq props` | Acknowledge a received event         |
-/// | `Sub`     | `!sub seq type`       | Subscribe to an object type          |
-/// | `Unsub`   | `!unsub seq type`     | Unsubscribe from an object type      |
+/// | `Request` | `?kind seq target`    | Request (sub, unsub, expand, custom) |
+/// | `Response`| `.kind seq props body`| Response (expand, custom)            |
 #[derive(Debug, Clone)]
 pub enum Command<'a> {
     /// `+type id props...` — Create or update (full replace, idempotent).
@@ -158,10 +158,20 @@ pub enum Command<'a> {
         seq: u64,
         props: Vec<Prop<'a>>,
     },
-    /// `!sub seq type` — Subscribe to an object type.
-    Sub { seq: u64, target_type: &'a str },
-    /// `!unsub seq type` — Unsubscribe from an object type.
-    Unsub { seq: u64, target_type: &'a str },
+    /// `?kind seq target props...` — Request (sub, unsub, expand, custom).
+    Request {
+        kind: RequestKind<'a>,
+        seq: u64,
+        target: &'a str,
+        props: Vec<Prop<'a>>,
+    },
+    /// `.kind seq props... [{ body }]` — Response (expand, custom).
+    Response {
+        kind: ResponseKind<'a>,
+        seq: u64,
+        props: Vec<Prop<'a>>,
+        body: Option<Vec<Command<'a>>>,
+    },
 }
 
 /// Known built-in event types and a generic fallback for
@@ -182,9 +192,6 @@ pub enum EventKind<'a> {
     Blur,
     Resize,
 
-    // System events
-    Expand,
-
     /// Unknown or third-party event (e.g. `com.example.spell-check`)
     Other(&'a str),
 }
@@ -201,7 +208,6 @@ impl<'a> EventKind<'a> {
             EventKind::Focus => "focus",
             EventKind::Blur => "blur",
             EventKind::Resize => "resize",
-            EventKind::Expand => "expand",
             EventKind::Other(s) => s,
         }
     }
@@ -220,8 +226,86 @@ impl<'a> EventKind<'a> {
             "focus" => EventKind::Focus,
             "blur" => EventKind::Blur,
             "resize" => EventKind::Resize,
-            "expand" => EventKind::Expand,
             other => EventKind::Other(other),
+        }
+    }
+}
+
+/// Known request types for `?` commands.
+///
+/// `Claim` and `Unclaim` register/release ownership of a type (daemon
+/// expansion). `Observe` and `Unobserve` register/release consumption
+/// of final output for a type. All four are fire-and-forget (no response).
+/// `Expand` expects a `.expand` response from the daemon.
+/// Third-party request types use [`Other`](RequestKind::Other).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestKind<'a> {
+    /// `?claim` — claim ownership of an object type (daemon expansion)
+    Claim,
+    /// `?unclaim` — release claim on an object type
+    Unclaim,
+    /// `?observe` — observe final output for an object type
+    Observe,
+    /// `?unobserve` — stop observing an object type
+    Unobserve,
+    /// `?expand` — request daemon expansion
+    Expand,
+    /// Custom request (e.g. `?render-frame`)
+    Other(&'a str),
+}
+
+impl<'a> RequestKind<'a> {
+    /// Returns the wire-format string for this request kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            RequestKind::Claim => "claim",
+            RequestKind::Unclaim => "unclaim",
+            RequestKind::Observe => "observe",
+            RequestKind::Unobserve => "unobserve",
+            RequestKind::Expand => "expand",
+            RequestKind::Other(s) => s,
+        }
+    }
+
+    /// Maps a wire-format request name to the corresponding variant.
+    pub fn from_wire(s: &'a str) -> Self {
+        match s {
+            "claim" => RequestKind::Claim,
+            "unclaim" => RequestKind::Unclaim,
+            "observe" => RequestKind::Observe,
+            "unobserve" => RequestKind::Unobserve,
+            "expand" => RequestKind::Expand,
+            other => RequestKind::Other(other),
+        }
+    }
+}
+
+/// Known response types for `.` commands.
+///
+/// `Expand` carries a body (children block) with the expansion result.
+/// Third-party response types use [`Other`](ResponseKind::Other).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseKind<'a> {
+    /// `.expand` — expansion response with body
+    Expand,
+    /// Custom response (e.g. `.render-frame`)
+    Other(&'a str),
+}
+
+impl<'a> ResponseKind<'a> {
+    /// Returns the wire-format string for this response kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            ResponseKind::Expand => "expand",
+            ResponseKind::Other(s) => s,
+        }
+    }
+
+    /// Maps a wire-format response name to the corresponding variant.
+    pub fn from_wire(s: &'a str) -> Self {
+        match s {
+            "expand" => ResponseKind::Expand,
+            other => ResponseKind::Other(other),
         }
     }
 }

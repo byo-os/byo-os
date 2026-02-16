@@ -16,3 +16,8 @@ byo = { path = "libs/byo" }
 byo-macros = { path = "libs/byo-macros" }
 bevy = { version = "0.18", features = ["ui"] }
 tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+indexmap = "2"

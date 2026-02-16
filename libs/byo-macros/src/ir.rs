@@ -59,10 +59,20 @@ pub enum IrCommand {
         seq: IrValue,
         props: Vec<IrProp>,
     },
-    /// `!sub seq type`
-    Sub { seq: IrValue, target_type: IrValue },
-    /// `!unsub seq type`
-    Unsub { seq: IrValue, target_type: IrValue },
+    /// `?kind seq target props...`
+    Request {
+        kind: IrValue,
+        seq: IrValue,
+        target: IrValue,
+        props: Vec<IrProp>,
+    },
+    /// `.kind seq props... [{ children }]`
+    Response {
+        kind: IrValue,
+        seq: IrValue,
+        props: Vec<IrProp>,
+        children: Option<Vec<IrCommand>>,
+    },
     /// `if cond { cmds... } [else { cmds... }]`
     Conditional {
         condition: TokenStream,
