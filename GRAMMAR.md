@@ -10,6 +10,12 @@ structure within that payload.
 batch      = whitespace? (command whitespace?)*
 command    = upsert | destroy | patch | event | request | response
 
+# -- Comments (stripped by lexer, not part of command stream) --
+
+comment       = line-comment / block-comment
+line-comment  = '//' [^\n]*
+block-comment = '/*' (block-comment / [^*] / '*' [^/])* '*/'
+
 # -- Object operations --
 
 upsert     = '+' type id prop* children?
@@ -124,3 +130,9 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
 - **Dot-qualified types.** `.` is an operator at token start but is
   valid within bare words (mid-token). So `com.example.foo` tokenizes
   as a single word, while `.expand` tokenizes as `.` operator + `expand`.
+
+- **Comments.** `//` (line) and `/* */` (block) comments are stripped
+  during lexing and never reach the parser or wire format. Block
+  comments are nestable (`/* ... /* ... */ ... */`), like Rust.
+  `/` remains valid mid-word in bare values (e.g. `bg-zinc-700/50`);
+  the lexer only checks for `//` and `/*` at token boundaries.

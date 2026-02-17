@@ -106,6 +106,8 @@ pub enum ParseErrorKind {
     InvalidEscape(char),
     /// Unexpected byte that doesn't match any token pattern.
     UnexpectedByte(u8),
+    /// Block comment reached end of input without closing `*/`.
+    UnterminatedComment,
 
     // -- Parser errors --------------------------------------------------------
     /// Expected a specific token kind but found something else.
@@ -125,6 +127,7 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::UnterminatedString => write!(f, "unterminated string"),
             ParseErrorKind::InvalidEscape(ch) => write!(f, "invalid escape sequence: \\{ch}"),
             ParseErrorKind::UnexpectedByte(b) => write!(f, "unexpected byte: 0x{b:02x}"),
+            ParseErrorKind::UnterminatedComment => write!(f, "unterminated block comment"),
             ParseErrorKind::Expected { expected, found } => {
                 write!(f, "expected {expected}, found {found}")
             }
@@ -347,6 +350,39 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
                         end: start + 1,
                     },
                 });
+            }
+            // Line comment: // to end of line
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            // Block comment: /* ... */ (nestable, like Rust)
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                let comment_start = i;
+                i += 2;
+                let mut depth: u32 = 1;
+                while depth > 0 {
+                    if i >= bytes.len() {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnterminatedComment,
+                            span: Span {
+                                start: comment_start,
+                                end: bytes.len(),
+                            },
+                        });
+                    }
+                    if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
             }
             _ => {
                 // Bare word: consume until whitespace or special char
@@ -693,5 +729,83 @@ mod tests {
         assert_eq!(tokens[1], Token::Word("layer"));
         // Just verify it parsed without error and has reasonable length
         assert!(tokens.len() > 15);
+    }
+
+    // -- Comment tests --------------------------------------------------------
+
+    #[test]
+    fn line_comment() {
+        assert_eq!(
+            toks("+view x // comment\n+text y"),
+            vec![
+                Token::Plus,
+                Token::Word("view"),
+                Token::Word("x"),
+                Token::Plus,
+                Token::Word("text"),
+                Token::Word("y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn line_comment_at_end() {
+        assert_eq!(
+            toks("+view x // trailing"),
+            vec![Token::Plus, Token::Word("view"), Token::Word("x")]
+        );
+    }
+
+    #[test]
+    fn line_comment_empty() {
+        assert_eq!(
+            toks("// empty\n+view x"),
+            vec![Token::Plus, Token::Word("view"), Token::Word("x")]
+        );
+    }
+
+    #[test]
+    fn block_comment() {
+        assert_eq!(
+            toks("+view x /* skip */ +text y"),
+            vec![
+                Token::Plus,
+                Token::Word("view"),
+                Token::Word("x"),
+                Token::Plus,
+                Token::Word("text"),
+                Token::Word("y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_block_comment() {
+        assert_eq!(
+            toks("/* outer /* inner */ still outer */ +view x"),
+            vec![Token::Plus, Token::Word("view"), Token::Word("x")]
+        );
+    }
+
+    #[test]
+    fn unterminated_block_comment() {
+        let err = tokenize("/* oops").unwrap_err();
+        assert_eq!(err.kind, ParseErrorKind::UnterminatedComment);
+    }
+
+    #[test]
+    fn slash_bare_word_preserved() {
+        // `/` mid-word must remain part of the bare value (e.g. Tailwind opacity)
+        assert_eq!(
+            toks("+view x class=bg-zinc-700/50"),
+            vec![
+                Token::Plus,
+                Token::Word("view"),
+                Token::Word("x"),
+                Token::Word("class"),
+                Token::Eq,
+                Token::Word("bg-zinc-700/50"),
+            ]
+        );
     }
 }
