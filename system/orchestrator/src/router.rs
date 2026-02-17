@@ -6,17 +6,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use byo::emitter::Emitter;
 use byo::parser::parse;
-use byo::protocol::{Command, Prop, RequestKind, ResponseKind};
+use byo::protocol::{Command, RequestKind, ResponseKind};
+use byo::tree::{PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch, write_props};
 use crate::id::QualifiedId;
 use crate::process::{Process, ProcessId, WriteMsg};
-use crate::state::{ObjectTree, PropValue};
+use crate::state::ObjectTree;
 
 /// Messages flowing from process reader tasks to the router.
 #[derive(Debug)]
@@ -284,7 +286,8 @@ impl Router {
                     } else {
                         batch.add_pending_expand(subscriber, expand_seq, qid, 0);
                     }
-                    self.send_to(subscriber, WriteMsg::Byo(expand_buf)).await;
+                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
+                        .await;
                 }
 
                 if let Some(queue) = self.output_queues.get_mut(&from) {
@@ -367,9 +370,11 @@ impl Router {
 
         // Forward graphics to all observers of "view" (typically the compositor).
         if let Some(observers) = self.observers.get("view") {
+            let arc = Arc::new(raw);
             for &pid in observers {
                 if pid != from {
-                    self.send_to(pid, WriteMsg::Graphics(raw.clone())).await;
+                    self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)))
+                        .await;
                 }
             }
         }
@@ -385,9 +390,11 @@ impl Router {
         }
 
         if let Some(observers) = self.observers.get("view") {
+            let arc = Arc::new(raw);
             for &pid in observers {
                 if pid != from {
-                    self.send_to(pid, WriteMsg::Passthrough(raw.clone())).await;
+                    self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)))
+                        .await;
                 }
             }
         }
@@ -415,7 +422,7 @@ impl Router {
         self.expand_seqs.remove(&process);
 
         // Remove objects owned by this process from the state tree.
-        let _removed = self.state.remove_by_owner(process);
+        let _removed = crate::state::remove_by_owner(&mut self.state, process);
 
         // Clean up process state.
         self.output_queues.remove(&process);
@@ -438,7 +445,7 @@ impl Router {
             .state
             .objects_of_type(target_type)
             .into_iter()
-            .map(|o| (o.qid.clone(), o.kind.clone()))
+            .map(|o| (o.id.clone(), o.kind.clone()))
             .collect();
 
         for (qid, _kind) in &objects {
@@ -450,7 +457,8 @@ impl Router {
                     "\n?expand {expand_seq} {}",
                     String::from_utf8_lossy(&reduced).trim_start_matches('+')
                 );
-                self.send_to(from, WriteMsg::Byo(expand_buf)).await;
+                self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)))
+                    .await;
             }
         }
     }
@@ -508,9 +516,9 @@ impl Router {
             Some(t) => t,
             None => return,
         };
-        let replay = self.state.project_tree(types);
+        let replay = crate::state::project_tree(&self.state, types);
         if !replay.is_empty() {
-            self.send_to(pid, WriteMsg::Byo(replay)).await;
+            self.send_to(pid, WriteMsg::Byo(Arc::new(replay))).await;
         }
     }
 
@@ -603,7 +611,8 @@ impl Router {
                         qid,
                         current_depth + 1,
                     );
-                    self.send_to(subscriber, WriteMsg::Byo(expand_buf)).await;
+                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
+                        .await;
                 }
             }
         }
@@ -855,7 +864,7 @@ impl Router {
             }
 
             for (daemon_pid, notification_buf) in daemon_notifications {
-                self.send_to(daemon_pid, WriteMsg::Byo(notification_buf))
+                self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification_buf)))
                     .await;
             }
 
@@ -979,7 +988,8 @@ impl Router {
                 payload.to_vec()
             };
             if !projected.is_empty() {
-                self.send_to(target, WriteMsg::Byo(projected)).await;
+                self.send_to(target, WriteMsg::Byo(Arc::new(projected)))
+                    .await;
             }
         }
     }
@@ -1140,7 +1150,7 @@ fn project_under_ancestor(
 ) {
     // Look up the nearest observed ancestor in the state tree.
     let ancestor = QualifiedId::parse(id)
-        .and_then(|qid| state.nearest_observed_ancestor(&qid, observed_types));
+        .and_then(|qid| crate::state::nearest_observed_ancestor(state, &qid, observed_types));
 
     if let Some(ref ancestor_qid) = ancestor
         && let Some(ancestor_obj) = state.get(ancestor_qid)
@@ -1184,47 +1194,11 @@ fn emit_observed_descendant_destroys(
     }
 }
 
-/// Convert parsed props to a state-storage IndexMap.
-fn props_to_map(props: &[Prop<'_>]) -> IndexMap<String, PropValue> {
-    let mut map = IndexMap::new();
-    for prop in props {
-        match prop {
-            Prop::Value { key, value } => {
-                map.insert(key.to_string(), PropValue::Str(value.to_string()));
-            }
-            Prop::Boolean { key } => {
-                map.insert(key.to_string(), PropValue::Flag);
-            }
-            Prop::Remove { .. } => {} // Remove is a no-op in upsert context.
-        }
-    }
-    map
-}
-
-/// Convert parsed props to patch operations (set + remove).
-fn props_to_patch(props: &[Prop<'_>]) -> (IndexMap<String, PropValue>, Vec<String>) {
-    let mut set = IndexMap::new();
-    let mut remove = Vec::new();
-    for prop in props {
-        match prop {
-            Prop::Value { key, value } => {
-                set.insert(key.to_string(), PropValue::Str(value.to_string()));
-            }
-            Prop::Boolean { key } => {
-                set.insert(key.to_string(), PropValue::Flag);
-            }
-            Prop::Remove { key } => {
-                remove.push(key.to_string());
-            }
-        }
-    }
-    (set, remove)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use byo::assert::assert_eq_bytes;
+    use byo::protocol::Prop;
 
     #[test]
     fn project_all_types_observed() {

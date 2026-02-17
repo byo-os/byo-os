@@ -1682,6 +1682,7 @@ name = "byo"
 version = "0.1.0"
 dependencies = [
  "byo-macros",
+ "indexmap",
 ]
 
 [[package]]

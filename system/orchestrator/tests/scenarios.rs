@@ -45,7 +45,9 @@ async fn send_byo(router: &mut Router, from: ProcessId, payload: &str) {
 /// Panics if no message is available or if the message is not a `WriteMsg::Byo`.
 fn recv_byo_raw(rx: &mut mpsc::Receiver<WriteMsg>) -> String {
     match rx.try_recv() {
-        Ok(WriteMsg::Byo(raw)) => String::from_utf8(raw).expect("BYO payload is valid UTF-8"),
+        Ok(WriteMsg::Byo(raw)) => {
+            String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8")
+        }
         Ok(other) => panic!("expected WriteMsg::Byo, got: {other:?}"),
         Err(_) => panic!("no message available"),
     }
@@ -54,7 +56,9 @@ fn recv_byo_raw(rx: &mut mpsc::Receiver<WriteMsg>) -> String {
 /// Try to receive a BYO message, returning None if the channel is empty.
 fn try_recv_byo(rx: &mut mpsc::Receiver<WriteMsg>) -> Option<String> {
     match rx.try_recv() {
-        Ok(WriteMsg::Byo(raw)) => Some(String::from_utf8(raw).expect("BYO payload is valid UTF-8")),
+        Ok(WriteMsg::Byo(raw)) => {
+            Some(String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8"))
+        }
         Ok(other) => panic!("expected WriteMsg::Byo, got: {other:?}"),
         Err(_) => None,
     }

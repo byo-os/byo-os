@@ -5,6 +5,7 @@
 //! them into BYO payloads, graphics payloads, and passthrough.
 
 use std::process::Stdio;
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
@@ -20,14 +21,17 @@ use crate::router::RouterMsg;
 pub struct ProcessId(pub u32);
 
 /// Message sent to a process's stdin writer task.
-#[derive(Debug)]
+///
+/// Payloads use `Arc<Vec<u8>>` so fan-out to multiple observers is a
+/// refcount bump instead of a deep copy.
+#[derive(Debug, Clone)]
 pub enum WriteMsg {
     /// Raw BYO payload (will be APC-framed with `B` prefix).
-    Byo(Vec<u8>),
+    Byo(Arc<Vec<u8>>),
     /// Raw graphics payload (will be APC-framed with `G` prefix).
-    Graphics(Vec<u8>),
+    Graphics(Arc<Vec<u8>>),
     /// Raw bytes, no framing.
-    Passthrough(Vec<u8>),
+    Passthrough(Arc<Vec<u8>>),
 }
 
 /// A managed child process.
@@ -161,12 +165,12 @@ async fn reader_task(
 
 async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<WriteMsg>) {
     while let Some(msg) = rx.recv().await {
-        let result = match msg {
+        let result = match &msg {
             WriteMsg::Byo(payload) => {
                 let mut frame = Vec::with_capacity(APC_START.len() + 1 + payload.len() + ST.len());
                 frame.extend_from_slice(APC_START);
                 frame.push(PROTOCOL_ID);
-                frame.extend_from_slice(&payload);
+                frame.extend_from_slice(payload);
                 frame.extend_from_slice(ST);
                 stdin.write_all(&frame).await
             }
@@ -174,11 +178,11 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
                 let mut frame = Vec::with_capacity(APC_START.len() + 1 + payload.len() + ST.len());
                 frame.extend_from_slice(APC_START);
                 frame.push(GRAPHICS_PROTOCOL_ID);
-                frame.extend_from_slice(&payload);
+                frame.extend_from_slice(payload);
                 frame.extend_from_slice(ST);
                 stdin.write_all(&frame).await
             }
-            WriteMsg::Passthrough(data) => stdin.write_all(&data).await,
+            WriteMsg::Passthrough(data) => stdin.write_all(data).await,
         };
         if result.is_err() {
             break;

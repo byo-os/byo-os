@@ -8,7 +8,7 @@ use std::io;
 use crate::protocol::{APC_START, Command, PROTOCOL_ID, Prop, ST};
 
 /// Returns `true` if `value` can be written bare (unquoted).
-fn is_bare(value: &str) -> bool {
+pub fn is_bare(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|b| {
             !b.is_ascii_whitespace()
@@ -27,7 +27,7 @@ fn is_bare(value: &str) -> bool {
 ///
 /// When the value contains both single and double quotes, falls back to
 /// double-quoting with backslash escaping.
-fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
+pub fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
     if is_bare(value) {
         write!(w, "{value}")
     } else if !value.contains('"') {
@@ -57,7 +57,7 @@ fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
 /// [`Prop::Remove`] writes `~key` on the wire. In upsert/event context
 /// this is a no-op for the receiver, but we emit it unconditionally to
 /// keep the emitter simple.
-fn write_props<W: io::Write>(w: &mut W, props: &[Prop<'_>]) -> io::Result<()> {
+pub fn write_props<W: io::Write>(w: &mut W, props: &[Prop<'_>]) -> io::Result<()> {
     for prop in props {
         match prop {
             Prop::Value { key, value } => {

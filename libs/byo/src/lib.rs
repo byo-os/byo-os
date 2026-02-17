@@ -10,6 +10,7 @@ pub mod lexer;
 pub mod parser;
 pub mod protocol;
 pub mod scanner;
+pub mod tree;
 pub mod types;
 
 pub use protocol::*;

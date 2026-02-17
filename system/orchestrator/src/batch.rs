@@ -261,55 +261,16 @@ pub(crate) fn write_patch(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo
     write_props(buf, props);
 }
 
-/// Write props in wire format.
+/// Write props in wire format. Delegates to the canonical implementation
+/// in [`byo::emitter::write_props`].
 pub(crate) fn write_props(buf: &mut Vec<u8>, props: &[byo::Prop<'_>]) {
-    for prop in props {
-        match prop {
-            byo::Prop::Value { key, value } => {
-                let _ = write!(buf, " {key}=");
-                write_value(buf, value.as_ref());
-            }
-            byo::Prop::Boolean { key } => {
-                let _ = write!(buf, " {key}");
-            }
-            byo::Prop::Remove { key } => {
-                let _ = write!(buf, " ~{key}");
-            }
-        }
-    }
+    byo::emitter::write_props(&mut *buf, props).unwrap();
 }
 
-/// Write a value, auto-quoting as needed.
+/// Write a value, auto-quoting as needed. Delegates to the canonical
+/// implementation in [`byo::emitter::write_value`].
 pub(crate) fn write_value(buf: &mut Vec<u8>, value: &str) {
-    let needs_quoting = value.is_empty()
-        || value.bytes().any(|b| {
-            b.is_ascii_whitespace()
-                || b == b'{'
-                || b == b'}'
-                || b == b'='
-                || b == b'"'
-                || b == b'\''
-                || b == b'~'
-                || b == b'\\'
-        });
-
-    if !needs_quoting {
-        buf.extend_from_slice(value.as_bytes());
-    } else if !value.contains('"') {
-        let _ = write!(buf, "\"{value}\"");
-    } else if !value.contains('\'') {
-        let _ = write!(buf, "'{value}'");
-    } else {
-        buf.push(b'"');
-        for ch in value.bytes() {
-            match ch {
-                b'"' => buf.extend_from_slice(b"\\\""),
-                b'\\' => buf.extend_from_slice(b"\\\\"),
-                _ => buf.push(ch),
-            }
-        }
-        buf.push(b'"');
-    }
+    byo::emitter::write_value(&mut *buf, value).unwrap();
 }
 
 /// Re-serialize commands with all IDs qualified under `client`.
