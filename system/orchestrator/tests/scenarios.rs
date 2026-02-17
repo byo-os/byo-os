@@ -32,12 +32,8 @@ fn mock_process(id: u32, name: &str) -> (Process, mpsc::Receiver<WriteMsg>) {
 
 /// Send a BYO payload string to the router from a given process.
 async fn send_byo(router: &mut Router, from: ProcessId, payload: &str) {
-    router
-        .handle(RouterMsg::Byo {
-            from,
-            raw: payload.as_bytes().to_vec(),
-        })
-        .await;
+    let commands = byo::parser::parse(payload).expect("test payload should parse");
+    router.handle(RouterMsg::Byo { from, commands }).await;
 }
 
 /// Receive the next BYO message from a mock process's channel as a raw string.

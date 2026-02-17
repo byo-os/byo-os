@@ -11,6 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
+use bytes::Bytes;
+
 use byo::scanner::{Handler, Scanner};
 use byo::{APC_START, GRAPHICS_PROTOCOL_ID, PROTOCOL_ID, ST};
 
@@ -50,13 +52,16 @@ struct CollectHandler {
 
 impl Handler for CollectHandler {
     fn on_byo(&mut self, payload: &[u8]) {
+        let bytes = Bytes::copy_from_slice(payload);
+        let commands = match byo::parser::parse_bytes(bytes) {
+            Ok(cmds) => cmds,
+            Err(_) => return, // skip malformed payloads
+        };
         let msg = RouterMsg::Byo {
             from: self.process_id,
-            raw: payload.to_vec(),
+            commands,
         };
-        // Use blocking_send since we're in a sync callback from Scanner.
-        // In practice this is called from an async context via block_in_place
-        // or similar — but try_send is safer here to avoid deadlocks.
+        // try_send avoids deadlocks in the sync scanner callback.
         let _ = self.router_tx.try_send(msg);
     }
 

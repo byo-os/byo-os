@@ -7,6 +7,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 
+use byo::protocol::Command;
+
 use crate::id::{QualifiedId, qualify_into};
 use crate::process::ProcessId;
 use crate::router::RouterMsg;
@@ -18,20 +20,20 @@ pub struct PendingBatch {
     pub from: ProcessId,
     /// The client name of the sender.
     pub client_name: String,
-    /// The original raw BYO payload bytes.
-    pub raw: Vec<u8>,
+    /// The pre-parsed commands from the original payload.
+    pub commands: Vec<Command>,
     /// Outstanding `!expand` requests.
     pub pending_expands: Vec<PendingExpand>,
-    /// QID → (daemon PID, raw expansion bytes, is_re_expand) from daemons.
-    pub expansions: HashMap<String, (ProcessId, Vec<u8>, bool)>,
+    /// QID → (daemon PID, qualified expansion commands, is_re_expand) from daemons.
+    pub expansions: HashMap<String, (ProcessId, Vec<Command>, bool)>,
 }
 
 impl PendingBatch {
-    pub fn new(from: ProcessId, client_name: String, raw: Vec<u8>) -> Self {
+    pub fn new(from: ProcessId, client_name: String, commands: Vec<Command>) -> Self {
         Self {
             from,
             client_name,
-            raw,
+            commands,
             pending_expands: Vec::new(),
             expansions: HashMap::new(),
         }
@@ -92,15 +94,15 @@ impl PendingBatch {
         &mut self,
         qid: &QualifiedId,
         owner: ProcessId,
-        expansion_bytes: Vec<u8>,
+        expansion_cmds: Vec<Command>,
         is_re_expand: bool,
     ) {
         self.expansions
-            .insert(qid.to_string(), (owner, expansion_bytes, is_re_expand));
+            .insert(qid.to_string(), (owner, expansion_cmds, is_re_expand));
     }
 
-    /// Rewrite the batch: re-parse the original payload, splice expansions,
-    /// and qualify all IDs. Returns the rewritten payload bytes.
+    /// Rewrite the batch: splice expansions and qualify all IDs.
+    /// Returns the rewritten payload bytes.
     ///
     /// For each command in the original:
     /// - If it's a daemon-owned type with an expansion, splice the expansion
@@ -110,20 +112,10 @@ impl PendingBatch {
     /// Rewrite result: the rewritten payload bytes plus any claimed-type
     /// destroys that need cascade handling by the router.
     pub fn rewrite(&self, claims: &HashMap<String, ProcessId>) -> (Vec<u8>, Vec<QualifiedId>) {
-        let payload_str = match std::str::from_utf8(&self.raw) {
-            Ok(s) => s,
-            Err(_) => return (self.raw.clone(), Vec::new()),
-        };
-
-        let commands = match byo::parser::parse(payload_str) {
-            Ok(cmds) => cmds,
-            Err(_) => return (self.raw.clone(), Vec::new()),
-        };
-
         let mut buf = Vec::new();
         let mut claimed_destroys = Vec::new();
         self.rewrite_commands(
-            &commands,
+            &self.commands,
             &self.client_name,
             claims,
             &mut buf,
@@ -184,17 +176,9 @@ impl PendingBatch {
 
                     if *id != "_" && self.expansions.contains_key(&*qid_buf) {
                         // Splice in the daemon expansion — recursively rewrite it.
-                        let (_, expansion, _) = &self.expansions[&*qid_buf];
-                        if let Ok(exp_str) = std::str::from_utf8(expansion)
-                            && let Ok(exp_cmds) = byo::parser::parse(exp_str)
-                        {
-                            // Empty client: expansion IDs are already qualified.
-                            self.rewrite_commands(&exp_cmds, "", claims, buf, claimed_destroys);
-                        } else {
-                            // Fallback: splice raw bytes.
-                            buf.extend_from_slice(b"\n");
-                            buf.extend_from_slice(expansion);
-                        }
+                        let (_, expansion_cmds, _) = &self.expansions[&*qid_buf];
+                        // Empty client: expansion IDs are already qualified.
+                        self.rewrite_commands(expansion_cmds, "", claims, buf, claimed_destroys);
                         // If next command is Push, skip the children block.
                         skip_next_children = true;
                     } else if claims.contains_key(&**kind) && *id != "_" {
@@ -315,6 +299,43 @@ pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8>
     buf
 }
 
+/// Qualify bare IDs in commands under a client namespace.
+///
+/// Returns new commands with qualified IDs. ByteStr clone is cheap
+/// (atomic refcount bump — no allocation for the common case).
+pub fn qualify_commands(commands: &[Command], client: &str) -> Vec<Command> {
+    use byo::ByteStr;
+
+    fn qualify_bytestr(client: &str, id: &ByteStr) -> ByteStr {
+        if id.contains(':') || client.is_empty() || **id == *"_" {
+            id.clone()
+        } else {
+            ByteStr::from(format!("{client}:{id}"))
+        }
+    }
+
+    commands
+        .iter()
+        .map(|cmd| match cmd {
+            Command::Upsert { kind, id, props } => Command::Upsert {
+                kind: kind.clone(),
+                id: qualify_bytestr(client, id),
+                props: props.clone(),
+            },
+            Command::Destroy { kind, id } => Command::Destroy {
+                kind: kind.clone(),
+                id: qualify_bytestr(client, id),
+            },
+            Command::Patch { kind, id, props } => Command::Patch {
+                kind: kind.clone(),
+                id: qualify_bytestr(client, id),
+                props: props.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect()
+}
+
 /// Maximum nesting depth for recursive daemon expansion.
 pub const MAX_EXPANSION_DEPTH: u32 = 64;
 
@@ -383,9 +404,13 @@ mod tests {
         ProcessId(n)
     }
 
+    fn cmds(s: &str) -> Vec<Command> {
+        byo::parser::parse(s).unwrap()
+    }
+
     #[test]
     fn pending_batch_starts_ready() {
-        let batch = PendingBatch::new(pid(1), "app".into(), b"+view sidebar".to_vec());
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("+view sidebar"));
         assert!(batch.is_ready());
     }
 
@@ -395,19 +420,18 @@ mod tests {
 
     #[test]
     fn pending_batch_tracks_expansions() {
-        let mut batch =
-            PendingBatch::new(pid(1), "app".into(), b"+button save label=Save".to_vec());
+        let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+button save label=Save"));
         batch.add_pending_expand(pid(2), 0, qid("app", "save"), 0);
         assert!(!batch.is_ready());
 
         let id = batch.complete_expand(pid(2), 0).unwrap();
-        batch.record_expansion(&id, pid(2), b"+view save-root class=btn".to_vec(), false);
+        batch.record_expansion(&id, pid(2), cmds("+view save-root class=btn"), false);
         assert!(batch.is_ready());
     }
 
     #[test]
     fn pending_batch_matches_by_subscriber_seq() {
-        let mut batch = PendingBatch::new(pid(1), "app".into(), b"+button a +slider b".to_vec());
+        let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+button a +slider b"));
         batch.add_pending_expand(pid(2), 0, qid("app", "a"), 0);
         batch.add_pending_expand(pid(3), 0, qid("app", "b"), 0);
         assert!(!batch.is_ready());
@@ -424,7 +448,7 @@ mod tests {
 
     #[test]
     fn complete_expand_wrong_seq_returns_none() {
-        let mut batch = PendingBatch::new(pid(1), "app".into(), b"+button save".to_vec());
+        let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+button save"));
         batch.add_pending_expand(pid(2), 5, qid("app", "save"), 0);
         assert!(batch.complete_expand(pid(2), 99).is_none());
         assert!(!batch.is_ready());
@@ -432,7 +456,7 @@ mod tests {
 
     #[test]
     fn rewrite_native_only() {
-        let batch = PendingBatch::new(pid(1), "app".into(), b"+view sidebar class=w-64".to_vec());
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("+view sidebar class=w-64"));
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
         assert_eq_bytes(&result, "+view app:sidebar class=w-64");
@@ -443,7 +467,7 @@ mod tests {
         let mut batch = PendingBatch::new(
             pid(1),
             "app".into(),
-            b"+view root { +button save label=Save +view footer }".to_vec(),
+            cmds("+view root { +button save label=Save +view footer }"),
         );
 
         let mut subs = HashMap::new();
@@ -451,11 +475,7 @@ mod tests {
 
         batch.expansions.insert(
             "app:save".to_string(),
-            (
-                pid(2),
-                b"+view controls:save-root class=btn".to_vec(),
-                false,
-            ),
+            (pid(2), cmds("+view controls:save-root class=btn"), false),
         );
 
         let (result, _) = batch.rewrite(&subs);
@@ -470,7 +490,7 @@ mod tests {
         let batch = PendingBatch::new(
             pid(1),
             "app".into(),
-            b"+view root { +view child1 +view child2 }".to_vec(),
+            cmds("+view root { +view child1 +view child2 }"),
         );
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
@@ -527,7 +547,7 @@ mod tests {
         let mut batch = PendingBatch::new(
             pid(1),
             "app".into(),
-            b"+view root { +button save label=Save }".to_vec(),
+            cmds("+view root { +button save label=Save }"),
         );
 
         let mut claims = HashMap::new();
@@ -539,7 +559,7 @@ mod tests {
             "app:save".to_string(),
             (
                 pid(2),
-                b"+view controls:save-root { +icon controls:save-icon name=check }".to_vec(),
+                cmds("+view controls:save-root { +icon controls:save-icon name=check }"),
                 false,
             ),
         );
@@ -547,11 +567,7 @@ mod tests {
         // Icon daemon expansion for controls:save-icon (already qualified).
         batch.expansions.insert(
             "controls:save-icon".to_string(),
-            (
-                pid(3),
-                b"+image icons:check-img src=check.png".to_vec(),
-                false,
-            ),
+            (pid(3), cmds("+image icons:check-img src=check.png"), false),
         );
 
         let (result, _) = batch.rewrite(&claims);
@@ -564,7 +580,7 @@ mod tests {
     #[test]
     fn rewrite_claimed_destroy_collected() {
         // App sends `-button save` — should be collected as claimed destroy.
-        let batch = PendingBatch::new(pid(1), "app".into(), b"-button save".to_vec());
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("-button save"));
 
         let mut claims = HashMap::new();
         claims.insert("button".to_string(), pid(2));
@@ -580,7 +596,7 @@ mod tests {
     #[test]
     fn rewrite_native_destroy_emitted() {
         // App sends `-view sidebar` — native type, should be emitted.
-        let batch = PendingBatch::new(pid(1), "app".into(), b"-view sidebar".to_vec());
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("-view sidebar"));
 
         let claims = HashMap::new();
         let (result, claimed_destroys) = batch.rewrite(&claims);

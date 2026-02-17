@@ -23,25 +23,17 @@ use crate::state::ObjectTree;
 /// Messages flowing from process reader tasks to the router.
 #[derive(Debug)]
 pub enum RouterMsg {
-    /// A complete BYO payload from a process.
-    Byo { from: ProcessId, raw: Vec<u8> },
+    /// Pre-parsed BYO commands from a process.
+    Byo {
+        from: ProcessId,
+        commands: Vec<Command>,
+    },
     /// A complete graphics payload from a process.
     Graphics { from: ProcessId, raw: Vec<u8> },
     /// Passthrough bytes from a process.
     Passthrough { from: ProcessId, raw: Vec<u8> },
     /// A process has disconnected.
     Disconnected { process: ProcessId },
-}
-
-/// What to do with the batch after the parse block finishes.
-enum BatchAction {
-    /// No daemon types — forward with qualified IDs.
-    Forward,
-    /// Has daemon types — start expansion.
-    Expand {
-        /// (subscriber, qid, seq, expand_buf, is_re_expand) for each daemon-owned command.
-        expand_msgs: Vec<(ProcessId, QualifiedId, u64, Vec<u8>, bool)>,
-    },
 }
 
 /// The central router that dispatches messages between processes.
@@ -109,18 +101,15 @@ impl Router {
     /// Handle an incoming router message.
     pub async fn handle(&mut self, msg: RouterMsg) {
         match msg {
-            RouterMsg::Byo { from, raw } => self.handle_byo(from, raw).await,
+            RouterMsg::Byo { from, commands } => self.handle_byo(from, commands).await,
             RouterMsg::Graphics { from, raw } => self.handle_graphics(from, raw).await,
             RouterMsg::Passthrough { from, raw } => self.handle_passthrough(from, raw).await,
             RouterMsg::Disconnected { process } => self.handle_disconnect(process).await,
         }
     }
 
-    /// Handle a BYO payload from a process.
-    ///
-    /// Parses the payload within a block scope so borrows on `raw` end
-    /// naturally before `raw` is moved into a `PendingBatch`.
-    async fn handle_byo(&mut self, from: ProcessId, raw: Vec<u8>) {
+    /// Handle pre-parsed BYO commands from a process.
+    async fn handle_byo(&mut self, from: ProcessId, commands: Vec<Command>) {
         let client = match self.client_name(from) {
             Some(n) => n.to_owned(),
             None => return,
@@ -130,173 +119,138 @@ impl Router {
         if let Some(queue) = self.output_queues.get_mut(&from)
             && queue.is_blocked()
         {
-            queue.push(RouterMsg::Byo { from, raw });
+            queue.push(RouterMsg::Byo { from, commands });
             return;
         }
 
-        // Parse within a block scope. All borrows of `raw` end at the
-        // closing brace, so `raw` can be moved afterward.
-        let (action, resync_pids) = {
-            let mut resync_pids: Vec<ProcessId> = Vec::new();
-            let payload_str = match std::str::from_utf8(&raw) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-
-            // TODO: move parsing to per-process reader tasks so the router
-            // only receives pre-parsed commands and doesn't pay the parse cost
-            // on the single-threaded hot path.
-            let commands = match parse(payload_str) {
-                Ok(cmds) => cmds,
-                Err(e) => {
-                    tracing::warn!("parse error from {client}: {e:?}");
-                    return;
+        // Process requests/ack/responses.
+        let mut resync_pids: Vec<ProcessId> = Vec::new();
+        for cmd in &commands {
+            match cmd {
+                Command::Request {
+                    kind: RequestKind::Claim,
+                    seq,
+                    targets,
+                    ..
+                } => {
+                    for target in targets {
+                        self.handle_claim(from, &client, *seq, target).await;
+                    }
                 }
-            };
-
-            // Process requests/ack/responses directly while commands are borrowed.
-            for cmd in &commands {
-                match cmd {
-                    Command::Request {
-                        kind: RequestKind::Claim,
-                        seq,
-                        targets,
-                        ..
-                    } => {
-                        for target in targets {
-                            self.handle_claim(from, &client, *seq, target).await;
-                        }
+                Command::Request {
+                    kind: RequestKind::Unclaim,
+                    seq,
+                    targets,
+                    ..
+                } => {
+                    for target in targets {
+                        self.handle_unclaim(from, &client, *seq, target).await;
                     }
-                    Command::Request {
-                        kind: RequestKind::Unclaim,
-                        seq,
-                        targets,
-                        ..
-                    } => {
-                        for target in targets {
-                            self.handle_unclaim(from, &client, *seq, target).await;
-                        }
-                    }
-                    Command::Request {
-                        kind: RequestKind::Observe,
-                        seq,
-                        targets,
-                        ..
-                    } => {
-                        for target in targets {
-                            self.handle_observe(from, &client, *seq, target);
-                        }
-                        resync_pids.push(from);
-                    }
-                    Command::Request {
-                        kind: RequestKind::Unobserve,
-                        seq,
-                        targets,
-                        ..
-                    } => {
-                        for target in targets {
-                            self.handle_unobserve(from, &client, *seq, target);
-                        }
-                        resync_pids.push(from);
-                    }
-                    Command::Response {
-                        kind: ResponseKind::Expand,
-                        seq,
-                        body,
-                        ..
-                    } => {
-                        self.handle_expand_response(from, &client, *seq, body).await;
-                    }
-                    Command::Ack { seq, .. } => {
-                        // Other ACKs (click, keydown, etc.) — forwarded to event source.
-                        // For now, liveness tracking is not implemented.
-                        let _ = (from, &client, *seq);
-                    }
-                    _ => {}
                 }
+                Command::Request {
+                    kind: RequestKind::Observe,
+                    seq,
+                    targets,
+                    ..
+                } => {
+                    for target in targets {
+                        self.handle_observe(from, &client, *seq, target);
+                    }
+                    resync_pids.push(from);
+                }
+                Command::Request {
+                    kind: RequestKind::Unobserve,
+                    seq,
+                    targets,
+                    ..
+                } => {
+                    for target in targets {
+                        self.handle_unobserve(from, &client, *seq, target);
+                    }
+                    resync_pids.push(from);
+                }
+                Command::Response {
+                    kind: ResponseKind::Expand,
+                    seq,
+                    body,
+                    ..
+                } => {
+                    self.handle_expand_response(from, &client, *seq, body).await;
+                }
+                Command::Ack { seq, .. } => {
+                    let _ = (from, &client, *seq);
+                }
+                _ => {}
             }
+        }
 
-            // Update state tree directly from borrowed commands.
-            self.update_state(&commands, from, &client);
+        // Update state tree from commands.
+        self.update_state(&commands, from, &client);
 
-            // Determine routing: check for daemon-claimed types.
-            let mut expand_msgs = Vec::new();
-            let mut reduced_buf = Vec::new();
+        // Determine routing: check for daemon-claimed types.
+        let mut expand_msgs = Vec::new();
+        let mut reduced_buf = Vec::new();
 
-            for cmd in &commands {
-                match cmd {
-                    Command::Upsert { kind, id, props }
-                        if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
-                    {
-                        let subscriber = self.claims[&**kind];
-                        let qid = QualifiedId::new(&client, id);
+        for cmd in &commands {
+            match cmd {
+                Command::Upsert { kind, id, props }
+                    if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
+                {
+                    let subscriber = self.claims[&**kind];
+                    let qid = QualifiedId::new(&client, id);
+                    let expand_seq = self.next_expand_seq(subscriber);
+
+                    let mut expand_buf = Vec::new();
+                    let _ = write!(expand_buf, "\n?expand {expand_seq} {qid} kind={kind}");
+                    write_props(&mut expand_buf, props);
+
+                    expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
+                }
+                Command::Patch { kind, id, .. }
+                    if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
+                {
+                    let subscriber = self.claims[&**kind];
+                    let qid = QualifiedId::new(&client, id);
+
+                    reduced_buf.clear();
+                    if self.state.write_reduced_command(&qid, &mut reduced_buf) {
                         let expand_seq = self.next_expand_seq(subscriber);
-
                         let mut expand_buf = Vec::new();
-                        let _ = write!(expand_buf, "\n?expand {expand_seq} {qid} kind={kind}");
-                        write_props(&mut expand_buf, props);
-
-                        expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
+                        let _ = write!(
+                            expand_buf,
+                            "\n?expand {expand_seq} {}",
+                            String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
+                        );
+                        expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
                     }
-                    Command::Patch { kind, id, .. }
-                        if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
-                    {
-                        // Patch on a claimed type: re-expand with full reduced state.
-                        let subscriber = self.claims[&**kind];
-                        let qid = QualifiedId::new(&client, id);
-
-                        reduced_buf.clear();
-                        if self.state.write_reduced_command(&qid, &mut reduced_buf) {
-                            let expand_seq = self.next_expand_seq(subscriber);
-                            let mut expand_buf = Vec::new();
-                            let _ = write!(
-                                expand_buf,
-                                "\n?expand {expand_seq} {}",
-                                String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
-                            );
-                            expand_msgs.push((
-                                subscriber, qid, expand_seq, expand_buf, true, // re-expand
-                            ));
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
+        }
 
-            if expand_msgs.is_empty() {
-                (BatchAction::Forward, resync_pids)
-            } else {
-                (BatchAction::Expand { expand_msgs }, resync_pids)
-            }
-        };
-        // --- block scope ends, `raw` is no longer borrowed ---
+        if expand_msgs.is_empty() {
+            let batch = PendingBatch::new(from, client, commands);
+            let (mut rewritten, claimed_destroys) = batch.rewrite(&self.claims);
+            self.handle_cascade_destroys(&claimed_destroys, &mut rewritten)
+                .await;
+            self.forward_to_observers(&rewritten, from).await;
+        } else {
+            let mut batch = PendingBatch::new(from, client, commands);
 
-        match action {
-            BatchAction::Forward => {
-                let batch = PendingBatch::new(from, client, raw);
-                let (mut rewritten, claimed_destroys) = batch.rewrite(&self.claims);
-                self.handle_cascade_destroys(&claimed_destroys, &mut rewritten)
+            for (subscriber, qid, expand_seq, expand_buf, is_re_expand) in expand_msgs {
+                if is_re_expand {
+                    batch.add_pending_re_expand(subscriber, expand_seq, qid);
+                } else {
+                    batch.add_pending_expand(subscriber, expand_seq, qid, 0);
+                }
+                self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
                     .await;
-                self.forward_to_observers(&rewritten, from).await;
             }
-            BatchAction::Expand { expand_msgs } => {
-                let mut batch = PendingBatch::new(from, client, raw);
 
-                for (subscriber, qid, expand_seq, expand_buf, is_re_expand) in expand_msgs {
-                    if is_re_expand {
-                        batch.add_pending_re_expand(subscriber, expand_seq, qid);
-                    } else {
-                        batch.add_pending_expand(subscriber, expand_seq, qid, 0);
-                    }
-                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
-                        .await;
-                }
-
-                if let Some(queue) = self.output_queues.get_mut(&from) {
-                    queue.block();
-                }
-                self.pending_batches.push(batch);
+            if let Some(queue) = self.output_queues.get_mut(&from) {
+                queue.block();
             }
+            self.pending_batches.push(batch);
         }
 
         // Resync observers that changed their subscriptions in this batch.
@@ -543,11 +497,10 @@ impl Router {
             .map(|e| e.depth)
             .unwrap_or(0);
 
-        // Record the expansion body bytes if present, with IDs qualified
-        // under the daemon's client name. The body from the parser contains
-        // just the inner commands (no wrapping Push/Pop).
+        // Record qualified commands if body is present. The body from the
+        // parser contains just the inner commands (no wrapping Push/Pop).
         if let Some(body_cmds) = body {
-            let expansion_buf = crate::batch::qualify_and_serialize(body_cmds, client);
+            let qualified_cmds = crate::batch::qualify_commands(body_cmds, client);
 
             // Scan for nested daemon-owned types within the expansion.
             if current_depth < crate::batch::MAX_EXPANSION_DEPTH {
@@ -560,7 +513,7 @@ impl Router {
                 );
             }
 
-            self.record_expansion_output(from, seq, expansion_buf);
+            self.record_expansion_output(from, seq, qualified_cmds);
         }
         self.complete_expansion(from, seq).await;
     }
@@ -629,25 +582,15 @@ impl Router {
     /// up all expansion objects, and the tree relationship itself encodes the
     /// expansion link (no `expanded_from` field needed).
     fn update_expansion_state(&mut self, batch: &PendingBatch) {
-        for (source_qid_str, (daemon_pid, expansion_bytes, _is_re_expand)) in &batch.expansions {
+        for (source_qid_str, (daemon_pid, expansion_cmds, _is_re_expand)) in &batch.expansions {
             let Some(source_qid) = QualifiedId::parse(source_qid_str) else {
                 continue;
-            };
-
-            let exp_str = match std::str::from_utf8(expansion_bytes) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let commands = match byo::parser::parse(exp_str) {
-                Ok(cmds) => cmds,
-                Err(_) => continue,
             };
 
             let mut parent_stack: Vec<QualifiedId> = Vec::new();
             let mut last_qid: Option<QualifiedId> = None;
 
-            for cmd in &commands {
+            for cmd in expansion_cmds {
                 match cmd {
                     Command::Upsert { kind, id, props } => {
                         if *id == "_" {
@@ -709,7 +652,7 @@ impl Router {
         &mut self,
         source_qid: &QualifiedId,
         daemon_pid: ProcessId,
-        new_expansion_bytes: &[u8],
+        new_expansion_cmds: &[Command],
     ) -> Vec<u8> {
         use std::io::Write;
 
@@ -725,23 +668,13 @@ impl Router {
             .map(|(qid, kind, _)| (qid.clone(), kind.clone()))
             .collect();
 
-        // Parse new expansion.
-        let exp_str = match std::str::from_utf8(new_expansion_bytes) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let new_cmds = match byo::parser::parse(exp_str) {
-            Ok(cmds) => cmds,
-            Err(_) => return Vec::new(),
-        };
-
         let mut delta = Vec::new();
         let mut seen_qids: std::collections::HashSet<QualifiedId> =
             std::collections::HashSet::new();
         let mut parent_stack: Vec<QualifiedId> = Vec::new();
         let mut last_qid: Option<QualifiedId> = None;
 
-        for cmd in &new_cmds {
+        for cmd in new_expansion_cmds {
             match cmd {
                 Command::Upsert { kind, id, props } => {
                     if *id == "_" {
@@ -902,9 +835,9 @@ impl Router {
 
             // Reconcile re-expansions using the per-expansion flag.
             let mut reconciliation_buf = Vec::new();
-            for (source_qid_str, (daemon_pid, expansion_bytes, is_re_expand)) in &batch.expansions {
+            for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand)) in &batch.expansions {
                 if *is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
-                    let delta = self.reconcile_expansion(&source_qid, *daemon_pid, expansion_bytes);
+                    let delta = self.reconcile_expansion(&source_qid, *daemon_pid, expansion_cmds);
                     reconciliation_buf.extend_from_slice(&delta);
                 }
             }
@@ -937,7 +870,7 @@ impl Router {
     }
 
     /// Record a daemon's expansion output for a pending batch.
-    pub fn record_expansion_output(&mut self, from: ProcessId, seq: u64, raw: Vec<u8>) {
+    pub fn record_expansion_output(&mut self, from: ProcessId, seq: u64, commands: Vec<Command>) {
         let batch = self
             .pending_batches
             .iter_mut()
@@ -952,7 +885,7 @@ impl Router {
                 .map(|e| (e.qid.clone(), e.is_re_expand));
 
             if let Some((ref qid, is_re_expand)) = expand_info {
-                batch.record_expansion(qid, from, raw, is_re_expand);
+                batch.record_expansion(qid, from, commands, is_re_expand);
             }
         }
     }

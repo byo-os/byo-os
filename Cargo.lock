@@ -1714,6 +1714,7 @@ name = "byo-orchestrator"
 version = "0.1.0"
 dependencies = [
  "byo",
+ "bytes",
  "indexmap",
  "serde",
  "tokio",
