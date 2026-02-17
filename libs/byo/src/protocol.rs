@@ -1,8 +1,9 @@
 //! Core types for the BYO/OS protocol.
 //!
 //! These types are shared by both the parser and emitter. The parser
-//! produces [`Command`] values borrowing from the input buffer; the
-//! emitter consumes [`Prop`] slices to write wire-format output.
+//! produces [`Command`] values with [`ByteStr`] fields for zero-copy
+//! owned strings; the emitter consumes [`Prop`] slices to write
+//! wire-format output.
 //!
 //! # Wire format overview
 //!
@@ -38,7 +39,7 @@
 //! All values are strings on the wire. Callers convert numeric or
 //! boolean values to strings before passing them (e.g. `&n.to_string()`).
 
-use std::borrow::Cow;
+use crate::byte_str::ByteStr;
 
 /// APC introducer: ESC _
 pub const APC_START: &[u8] = b"\x1b_";
@@ -86,40 +87,40 @@ pub fn strip_apc(s: &str) -> &str {
 /// ];
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Prop<'a> {
+pub enum Prop {
     /// `key=value` — set a property
-    Value { key: &'a str, value: Cow<'a, str> },
+    Value { key: ByteStr, value: ByteStr },
     /// `key` (bare) — boolean flag
-    Boolean { key: &'a str },
+    Boolean { key: ByteStr },
     /// `~key` — remove a property (no-op in upsert/event context)
-    Remove { key: &'a str },
+    Remove { key: ByteStr },
 }
 
-impl<'a> Prop<'a> {
+impl Prop {
     /// Create a key=value property.
-    pub fn val(key: &'a str, value: impl Into<Cow<'a, str>>) -> Self {
+    pub fn val(key: impl Into<ByteStr>, value: impl Into<ByteStr>) -> Self {
         Self::Value {
-            key,
+            key: key.into(),
             value: value.into(),
         }
     }
 
     /// Create a boolean flag property.
-    pub fn flag(key: &'a str) -> Self {
-        Self::Boolean { key }
+    pub fn flag(key: impl Into<ByteStr>) -> Self {
+        Self::Boolean { key: key.into() }
     }
 
     /// Remove a property. No-op in upsert/event context.
-    pub fn remove(key: &'a str) -> Self {
-        Self::Remove { key }
+    pub fn remove(key: impl Into<ByteStr>) -> Self {
+        Self::Remove { key: key.into() }
     }
 }
 
 /// A parsed BYO/OS protocol command.
 ///
 /// Each variant carries only the fields valid for that operation,
-/// making invalid states unrepresentable. Borrows from the input
-/// buffer for zero-copy parsing.
+/// making invalid states unrepresentable. Uses [`ByteStr`] for
+/// zero-copy owned strings that can cross thread boundaries.
 ///
 /// # Variants
 ///
@@ -135,56 +136,56 @@ impl<'a> Prop<'a> {
 /// | `Request` | `?kind seq target`    | Request (sub, unsub, expand, custom) |
 /// | `Response`| `.kind seq props body`| Response (expand, custom)            |
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command<'a> {
+pub enum Command {
     /// `+type id props...` — Create or update (full replace, idempotent).
     /// ID is `_` for anonymous objects.
     Upsert {
-        kind: &'a str,
-        id: &'a str,
-        props: Vec<Prop<'a>>,
+        kind: ByteStr,
+        id: ByteStr,
+        props: Vec<Prop>,
     },
     /// `-type id` — Destroy an object and its children.
-    Destroy { kind: &'a str, id: &'a str },
+    Destroy { kind: ByteStr, id: ByteStr },
     /// `{` — Push (begin children of the preceding `+`/`@` target).
     Push,
     /// `}` — Pop (end children context).
     Pop,
     /// `@type id props...` — Patch props and/or set context on an existing object.
     Patch {
-        kind: &'a str,
-        id: &'a str,
-        props: Vec<Prop<'a>>,
+        kind: ByteStr,
+        id: ByteStr,
+        props: Vec<Prop>,
     },
     /// `!type seq id props...` — Event. Known built-in event names
     /// parse as keywords; unknown events use the generic form.
     Event {
-        kind: EventKind<'a>,
+        kind: EventKind,
         seq: u64,
-        id: &'a str,
-        props: Vec<Prop<'a>>,
+        id: ByteStr,
+        props: Vec<Prop>,
     },
     /// `!ack type seq props...` — Acknowledge a received event.
     Ack {
-        kind: EventKind<'a>,
+        kind: EventKind,
         seq: u64,
-        props: Vec<Prop<'a>>,
+        props: Vec<Prop>,
     },
     /// `?kind seq target(s) props...` — Request (sub, unsub, expand, custom).
     /// Subscription commands (claim, unclaim, observe, unobserve) use
     /// `targets` for one or more type names. Expand/other use a single
     /// target (ID).
     Request {
-        kind: RequestKind<'a>,
+        kind: RequestKind,
         seq: u64,
-        targets: Vec<&'a str>,
-        props: Vec<Prop<'a>>,
+        targets: Vec<ByteStr>,
+        props: Vec<Prop>,
     },
     /// `.kind seq props... [{ body }]` — Response (expand, custom).
     Response {
-        kind: ResponseKind<'a>,
+        kind: ResponseKind,
         seq: u64,
-        props: Vec<Prop<'a>>,
-        body: Option<Vec<Command<'a>>>,
+        props: Vec<Prop>,
+        body: Option<Vec<Command>>,
     },
 }
 
@@ -195,7 +196,7 @@ pub enum Command<'a> {
 /// Third-party events use dot-qualified names (e.g. `com.example.spell-check`)
 /// and parse as [`Other`](EventKind::Other).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventKind<'a> {
+pub enum EventKind {
     // Input events
     Click,
     KeyDown,
@@ -207,10 +208,10 @@ pub enum EventKind<'a> {
     Resize,
 
     /// Unknown or third-party event (e.g. `com.example.spell-check`)
-    Other(&'a str),
+    Other(ByteStr),
 }
 
-impl<'a> EventKind<'a> {
+impl EventKind {
     /// Returns the wire-format string for this event kind.
     pub fn as_str(&self) -> &str {
         match self {
@@ -230,8 +231,9 @@ impl<'a> EventKind<'a> {
     ///
     /// Known built-in names map to their keyword variants; everything
     /// else (including third-party dot-qualified names) maps to `Other`.
-    pub fn from_wire(s: &'a str) -> Self {
-        match s {
+    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
+        let s = s.into();
+        match s.as_ref() {
             "click" => EventKind::Click,
             "keydown" => EventKind::KeyDown,
             "keyup" => EventKind::KeyUp,
@@ -240,7 +242,7 @@ impl<'a> EventKind<'a> {
             "focus" => EventKind::Focus,
             "blur" => EventKind::Blur,
             "resize" => EventKind::Resize,
-            other => EventKind::Other(other),
+            _ => EventKind::Other(s),
         }
     }
 }
@@ -253,7 +255,7 @@ impl<'a> EventKind<'a> {
 /// `Expand` expects a `.expand` response from the daemon.
 /// Third-party request types use [`Other`](RequestKind::Other).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequestKind<'a> {
+pub enum RequestKind {
     /// `?claim` — claim ownership of an object type (daemon expansion)
     Claim,
     /// `?unclaim` — release claim on an object type
@@ -265,10 +267,10 @@ pub enum RequestKind<'a> {
     /// `?expand` — request daemon expansion
     Expand,
     /// Custom request (e.g. `?render-frame`)
-    Other(&'a str),
+    Other(ByteStr),
 }
 
-impl<'a> RequestKind<'a> {
+impl RequestKind {
     /// Returns the wire-format string for this request kind.
     pub fn as_str(&self) -> &str {
         match self {
@@ -282,14 +284,15 @@ impl<'a> RequestKind<'a> {
     }
 
     /// Maps a wire-format request name to the corresponding variant.
-    pub fn from_wire(s: &'a str) -> Self {
-        match s {
+    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
+        let s = s.into();
+        match s.as_ref() {
             "claim" => RequestKind::Claim,
             "unclaim" => RequestKind::Unclaim,
             "observe" => RequestKind::Observe,
             "unobserve" => RequestKind::Unobserve,
             "expand" => RequestKind::Expand,
-            other => RequestKind::Other(other),
+            _ => RequestKind::Other(s),
         }
     }
 }
@@ -299,14 +302,14 @@ impl<'a> RequestKind<'a> {
 /// `Expand` carries a body (children block) with the expansion result.
 /// Third-party response types use [`Other`](ResponseKind::Other).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResponseKind<'a> {
+pub enum ResponseKind {
     /// `.expand` — expansion response with body
     Expand,
     /// Custom response (e.g. `.render-frame`)
-    Other(&'a str),
+    Other(ByteStr),
 }
 
-impl<'a> ResponseKind<'a> {
+impl ResponseKind {
     /// Returns the wire-format string for this response kind.
     pub fn as_str(&self) -> &str {
         match self {
@@ -316,10 +319,11 @@ impl<'a> ResponseKind<'a> {
     }
 
     /// Maps a wire-format response name to the corresponding variant.
-    pub fn from_wire(s: &'a str) -> Self {
-        match s {
+    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
+        let s = s.into();
+        match s.as_ref() {
             "expand" => ResponseKind::Expand,
-            other => ResponseKind::Other(other),
+            _ => ResponseKind::Other(s),
         }
     }
 }

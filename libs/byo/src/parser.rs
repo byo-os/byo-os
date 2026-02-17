@@ -12,15 +12,38 @@
 //! use byo::protocol::{Command, Prop};
 //!
 //! let cmds = parse("+view sidebar class=\"w-64\"").unwrap();
-//! assert!(matches!(&cmds[0], Command::Upsert { kind: "view", id: "sidebar", .. }));
+//! assert!(matches!(&cmds[0], Command::Upsert { kind, id, .. } if kind == "view" && id == "sidebar"));
 //! ```
 
 use std::borrow::Cow;
 
+use bytes::Bytes;
+
+use crate::byte_str::ByteStr;
 use crate::lexer::{ParseError, ParseErrorKind, Span, Spanned, Token, tokenize};
 use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 
-/// Parses a BYO/OS protocol payload string into a sequence of commands.
+/// Zero-copy parse from a `Bytes` source.
+///
+/// The `Bytes` buffer must contain valid UTF-8. The parser sub-slices
+/// it to produce `ByteStr` fields in the returned commands — zero-copy
+/// for types, IDs, keys, and unescaped values.
+pub fn parse_bytes(input: Bytes) -> Result<Vec<Command>, ParseError> {
+    // Validate UTF-8 upfront — all subsequent sub-slicing is safe.
+    let source = input.clone(); // cheap: atomic increment
+    let input_str = std::str::from_utf8(&input).map_err(|e| ParseError {
+        kind: ParseErrorKind::Expected {
+            expected: "valid UTF-8",
+            found: format!("invalid UTF-8 at byte {}", e.valid_up_to()),
+        },
+        span: Span::at(e.valid_up_to()),
+    })?;
+    let tokens = tokenize(input_str)?;
+    let mut p = Parser::new(input_str, &tokens, source);
+    p.parse_batch()
+}
+
+/// Convenience wrapper — copies input into `Bytes` first.
 ///
 /// The input should be the payload content between `ESC _ B` and `ESC \`
 /// (not including the protocol identifier byte).
@@ -33,9 +56,9 @@ use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 /// use byo::protocol::Command;
 ///
 /// let cmds = parse("+view root { +text child }").unwrap();
-/// assert!(matches!(&cmds[0], Command::Upsert { kind: "view", id: "root", .. }));
+/// assert!(matches!(&cmds[0], Command::Upsert { kind, id, .. } if kind == "view" && id == "root"));
 /// assert!(matches!(&cmds[1], Command::Push));
-/// assert!(matches!(&cmds[2], Command::Upsert { kind: "text", id: "child", .. }));
+/// assert!(matches!(&cmds[2], Command::Upsert { kind, id, .. } if kind == "text" && id == "child"));
 /// assert!(matches!(&cmds[3], Command::Pop));
 /// ```
 ///
@@ -50,7 +73,7 @@ use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 /// assert_eq!(cmds.len(), 1);
 /// match &cmds[0] {
 ///     Command::Upsert { id, props, .. } => {
-///         assert_eq!(*id, "root");
+///         assert_eq!(id, "root");
 ///         assert_eq!(props[0], Prop::flag("baz-boop"));
 ///     }
 ///     _ => panic!("expected Upsert"),
@@ -69,24 +92,24 @@ use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 /// let err = parse("+view root {").unwrap_err();
 /// assert_eq!(err.kind, ParseErrorKind::UnclosedBrace);
 /// ```
-pub fn parse(input: &str) -> Result<Vec<Command<'_>>, ParseError> {
-    let tokens = tokenize(input)?;
-    let mut p = Parser::new(input, &tokens);
-    p.parse_batch()
+pub fn parse(input: &str) -> Result<Vec<Command>, ParseError> {
+    parse_bytes(Bytes::copy_from_slice(input.as_bytes()))
 }
 
 // -- Parser internals ---------------------------------------------------------
 
 struct Parser<'a, 'tok> {
     input: &'a str,
+    source: Bytes,
     tokens: &'tok [Spanned<'a>],
     pos: usize,
 }
 
 impl<'a, 'tok> Parser<'a, 'tok> {
-    fn new(input: &'a str, tokens: &'tok [Spanned<'a>]) -> Self {
+    fn new(input: &'a str, tokens: &'tok [Spanned<'a>], source: Bytes) -> Self {
         Self {
             input,
+            source,
             tokens,
             pos: 0,
         }
@@ -124,9 +147,15 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         }
     }
 
+    /// Create a ByteStr by sub-slicing the source Bytes at the given span.
+    fn byte_str_at(&self, span: Span) -> ByteStr {
+        // SAFETY: source is validated UTF-8 and span comes from tokenizer.
+        ByteStr::from_utf8(self.source.slice(span.start..span.end)).unwrap()
+    }
+
     // -- Batch ----------------------------------------------------------------
 
-    fn parse_batch(&mut self) -> Result<Vec<Command<'a>>, ParseError> {
+    fn parse_batch(&mut self) -> Result<Vec<Command>, ParseError> {
         let mut cmds = Vec::new();
         while !self.at_end() {
             self.parse_command(&mut cmds)?;
@@ -136,7 +165,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Command dispatch -----------------------------------------------------
 
-    fn parse_command(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_command(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         let tok = self.peek().ok_or_else(|| {
             self.error(ParseErrorKind::Expected {
                 expected: "command",
@@ -163,7 +192,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Upsert (+) -----------------------------------------------------------
 
-    fn parse_upsert(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_upsert(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume +
         let kind = self.expect_type()?;
         let id = self.expect_id()?;
@@ -175,7 +204,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Destroy (-) ----------------------------------------------------------
 
-    fn parse_destroy(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_destroy(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume -
         let kind = self.expect_type()?;
         let id = self.expect_named_id()?;
@@ -185,7 +214,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Patch (@) ------------------------------------------------------------
 
-    fn parse_patch(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_patch(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume @
         let kind = self.expect_type()?;
         let id = self.expect_named_id()?;
@@ -197,18 +226,31 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Event (!) ------------------------------------------------------------
 
-    fn parse_event(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_event(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume !
 
-        let word = self.expect_type()?;
+        let word = self.expect_word("type name")?;
+        let is_ack = word == "ack";
 
-        match word {
-            "ack" => self.parse_ack(cmds),
-            _ => self.parse_other_event(word, cmds),
+        if is_ack {
+            self.parse_ack(cmds)
+        } else {
+            let span = self.tokens[self.pos - 1].span;
+            if !is_valid_type(word) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "type name",
+                        found: format!("{word:?}"),
+                    },
+                    span,
+                });
+            }
+            let kind_str = self.byte_str_at(span);
+            self.parse_other_event(kind_str, cmds)
         }
     }
 
-    fn parse_ack(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_ack(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         let kind_str = self.expect_type()?;
         let kind = EventKind::from_wire(kind_str);
         let seq = self.expect_seqnum()?;
@@ -219,8 +261,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     fn parse_other_event(
         &mut self,
-        kind_str: &'a str,
-        cmds: &mut Vec<Command<'a>>,
+        kind_str: impl Into<ByteStr>,
+        cmds: &mut Vec<Command>,
     ) -> Result<(), ParseError> {
         let kind = EventKind::from_wire(kind_str);
         let seq = self.expect_seqnum()?;
@@ -237,14 +279,25 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Request (?) ----------------------------------------------------------
 
-    fn parse_request(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_request(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume ?
 
-        let word = self.expect_type()?;
+        let word = self.expect_word("type name")?;
+        let span = self.tokens[self.pos - 1].span;
+
+        if !is_valid_type(word) {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "type name",
+                    found: format!("{word:?}"),
+                },
+                span,
+            });
+        }
 
         match word {
             "claim" | "unclaim" | "observe" | "unobserve" => {
-                let kind = RequestKind::from_wire(word);
+                let kind = RequestKind::from_wire(self.byte_str_at(span));
                 let seq = self.expect_seqnum()?;
                 let mut targets = vec![self.expect_type()?];
                 while matches!(
@@ -266,7 +319,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 Ok(())
             }
             _ => {
-                let kind = RequestKind::from_wire(word);
+                let kind = RequestKind::from_wire(self.byte_str_at(span));
                 let seq = self.expect_seqnum()?;
                 let id = self.expect_id()?;
                 let props = self.parse_props()?;
@@ -283,11 +336,23 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Response (.) ---------------------------------------------------------
 
-    fn parse_response(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_response(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         self.advance(); // consume .
 
-        let word = self.expect_type()?;
-        let kind = ResponseKind::from_wire(word);
+        let word = self.expect_word("type name")?;
+        let span = self.tokens[self.pos - 1].span;
+
+        if !is_valid_type(word) {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "type name",
+                    found: format!("{word:?}"),
+                },
+                span,
+            });
+        }
+
+        let kind = ResponseKind::from_wire(self.byte_str_at(span));
         let seq = self.expect_seqnum()?;
 
         match kind {
@@ -335,7 +400,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     /// Unlike `parse_children`, this does **not** add `Push`/`Pop` to `cmds`.
     /// The braces here are grammar syntax delimiting the response body, not
     /// tree-structure commands. The emitter re-wraps with `{ ... }` on output.
-    fn parse_mandatory_children(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_mandatory_children(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         match self.peek() {
             Some(Spanned {
                 token: Token::LBrace,
@@ -378,7 +443,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Children -------------------------------------------------------------
 
-    fn parse_children(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
+    fn parse_children(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
         if matches!(
             self.peek(),
             Some(Spanned {
@@ -417,7 +482,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     // -- Props ----------------------------------------------------------------
 
-    fn parse_props(&mut self) -> Result<Vec<Prop<'a>>, ParseError> {
+    fn parse_props(&mut self) -> Result<Vec<Prop>, ParseError> {
         let mut props = Vec::new();
 
         loop {
@@ -503,11 +568,12 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     // -- Expect helpers -------------------------------------------------------
 
     /// Expect a Word token matching the type pattern: `[a-zA-Z][a-zA-Z0-9._-]*`
-    fn expect_type(&mut self) -> Result<&'a str, ParseError> {
+    /// Returns a ByteStr sub-sliced from the source.
+    fn expect_type(&mut self) -> Result<ByteStr, ParseError> {
         let span = self.here_span();
         let word = self.expect_word("type name")?;
         if is_valid_type(word) {
-            Ok(word)
+            Ok(self.byte_str_at(self.tokens[self.pos - 1].span))
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::Expected {
@@ -523,11 +589,11 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     ///
     /// Accepts `_` (anonymous). Use [`expect_named_id`](Self::expect_named_id)
     /// when anonymous IDs are not allowed (destroy, patch).
-    fn expect_id(&mut self) -> Result<&'a str, ParseError> {
+    fn expect_id(&mut self) -> Result<ByteStr, ParseError> {
         let span = self.here_span();
         let word = self.expect_word("id")?;
         if is_valid_id(word) {
-            Ok(word)
+            Ok(self.byte_str_at(self.tokens[self.pos - 1].span))
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::Expected {
@@ -543,7 +609,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     ///
     /// Only `+` (upsert) supports anonymous objects. `-` and `@` require
     /// a named ID.
-    fn expect_named_id(&mut self) -> Result<&'a str, ParseError> {
+    fn expect_named_id(&mut self) -> Result<ByteStr, ParseError> {
         let span = self.here_span();
         let id = self.expect_id()?;
         if id == "_" {
@@ -560,11 +626,11 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     }
 
     /// Expect a Word token matching the name pattern: `[a-zA-Z][a-zA-Z0-9_-]*`
-    fn expect_name(&mut self) -> Result<&'a str, ParseError> {
+    fn expect_name(&mut self) -> Result<ByteStr, ParseError> {
         let span = self.here_span();
         let word = self.expect_word("prop name")?;
         if is_valid_name(word) {
-            Ok(word)
+            Ok(self.byte_str_at(self.tokens[self.pos - 1].span))
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::Expected {
@@ -586,8 +652,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         })
     }
 
-    /// Expect a value: Word or Str token.
-    fn expect_value(&mut self) -> Result<Cow<'a, str>, ParseError> {
+    /// Expect a value: Word or Str token. Returns a ByteStr.
+    fn expect_value(&mut self) -> Result<ByteStr, ParseError> {
         let tok = self.peek().ok_or_else(|| {
             self.error(ParseErrorKind::Expected {
                 expected: "value",
@@ -596,15 +662,29 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         })?;
 
         match &tok.token {
-            Token::Word(w) => {
-                let w = *w;
+            Token::Word(_) => {
+                let span = tok.span;
                 self.advance();
-                Ok(Cow::Borrowed(w))
+                Ok(self.byte_str_at(span))
             }
             Token::Str(cow) => {
-                let cow = cow.clone();
-                self.advance();
-                Ok(cow)
+                let span = tok.span;
+                match cow {
+                    Cow::Borrowed(_) => {
+                        // No escapes — sub-slice source at content (trim quotes)
+                        self.advance();
+                        Ok(
+                            ByteStr::from_utf8(self.source.slice(span.start + 1..span.end - 1))
+                                .unwrap(),
+                        )
+                    }
+                    Cow::Owned(s) => {
+                        // Has escapes — must allocate
+                        let bs = ByteStr::from(s.clone());
+                        self.advance();
+                        Ok(bs)
+                    }
+                }
             }
             _ => Err(ParseError {
                 kind: ParseErrorKind::Expected {
@@ -704,7 +784,7 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert!(matches!(
             &cmds[0],
-            Command::Upsert { kind: "view", id: "sidebar", props } if props.is_empty()
+            Command::Upsert { kind, id, props } if kind == "view" && id == "sidebar" && props.is_empty()
         ));
     }
 
@@ -714,8 +794,8 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             Command::Upsert { kind, id, props } => {
-                assert_eq!(*kind, "view");
-                assert_eq!(*id, "sidebar");
+                assert_eq!(kind, "view");
+                assert_eq!(id, "sidebar");
                 assert_eq!(props.len(), 3);
                 assert_eq!(props[0], Prop::val("class", "w-64"));
                 assert_eq!(props[1], Prop::val("order", "0"));
@@ -729,7 +809,7 @@ mod tests {
     fn upsert_anonymous() {
         let cmds = parse("+view _").unwrap();
         match &cmds[0] {
-            Command::Upsert { id, .. } => assert_eq!(*id, "_"),
+            Command::Upsert { id, .. } => assert_eq!(id, "_"),
             _ => panic!("expected Upsert"),
         }
     }
@@ -740,20 +820,12 @@ mod tests {
         assert_eq!(cmds.len(), 4); // Upsert, Push, Upsert, Pop
         assert!(matches!(
             &cmds[0],
-            Command::Upsert {
-                kind: "view",
-                id: "root",
-                ..
-            }
+            Command::Upsert { kind, id, .. } if kind == "view" && id == "root"
         ));
         assert!(matches!(&cmds[1], Command::Push));
         assert!(matches!(
             &cmds[2],
-            Command::Upsert {
-                kind: "text",
-                id: "child",
-                ..
-            }
+            Command::Upsert { kind, id, .. } if kind == "text" && id == "child"
         ));
         assert!(matches!(&cmds[3], Command::Pop));
     }
@@ -764,11 +836,11 @@ mod tests {
         // +view a → Upsert, { → Push, +view b → Upsert, { → Push,
         // +text c → Upsert, } → Pop, } → Pop = 7
         assert_eq!(cmds.len(), 7);
-        assert!(matches!(&cmds[0], Command::Upsert { id: "a", .. }));
+        assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "a"));
         assert!(matches!(&cmds[1], Command::Push));
-        assert!(matches!(&cmds[2], Command::Upsert { id: "b", .. }));
+        assert!(matches!(&cmds[2], Command::Upsert { id, .. } if id == "b"));
         assert!(matches!(&cmds[3], Command::Push));
-        assert!(matches!(&cmds[4], Command::Upsert { id: "c", .. }));
+        assert!(matches!(&cmds[4], Command::Upsert { id, .. } if id == "c"));
         assert!(matches!(&cmds[5], Command::Pop));
         assert!(matches!(&cmds[6], Command::Pop));
     }
@@ -800,10 +872,7 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert!(matches!(
             &cmds[0],
-            Command::Destroy {
-                kind: "view",
-                id: "item3"
-            }
+            Command::Destroy { kind, id } if kind == "view" && id == "item3"
         ));
     }
 
@@ -814,8 +883,8 @@ mod tests {
         let cmds = parse("@view sidebar hidden ~tooltip").unwrap();
         match &cmds[0] {
             Command::Patch { kind, id, props } => {
-                assert_eq!(*kind, "view");
-                assert_eq!(*id, "sidebar");
+                assert_eq!(kind, "view");
+                assert_eq!(id, "sidebar");
                 assert_eq!(props[0], Prop::flag("hidden"));
                 assert_eq!(props[1], Prop::remove("tooltip"));
             }
@@ -847,7 +916,7 @@ mod tests {
             } => {
                 assert_eq!(*kind, EventKind::Click);
                 assert_eq!(*seq, 0);
-                assert_eq!(*id, "save");
+                assert_eq!(id, "save");
                 assert!(props.is_empty());
             }
             _ => panic!("expected Event"),
@@ -866,7 +935,7 @@ mod tests {
             } => {
                 assert_eq!(*kind, EventKind::KeyDown);
                 assert_eq!(*seq, 0);
-                assert_eq!(*id, "editor");
+                assert_eq!(id, "editor");
                 assert_eq!(props[0], Prop::val("key", "a"));
                 assert_eq!(props[1], Prop::val("mod", "ctrl"));
             }
@@ -891,7 +960,10 @@ mod tests {
         let cmds = parse("!com.example.spell-check 0 editor").unwrap();
         match &cmds[0] {
             Command::Event { kind, .. } => {
-                assert_eq!(*kind, EventKind::Other("com.example.spell-check"));
+                assert_eq!(
+                    *kind,
+                    EventKind::Other(ByteStr::from("com.example.spell-check"))
+                );
             }
             _ => panic!("expected Event"),
         }
@@ -928,11 +1000,13 @@ mod tests {
         let cmds = parse("?claim 0 button").unwrap();
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["button"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0], "button");
+            }
             _ => panic!("expected Claim request"),
         }
     }
@@ -942,11 +1016,12 @@ mod tests {
         let cmds = parse("?unclaim 2 checkbox").unwrap();
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Unclaim,
-                seq: 2,
-                targets,
-                ..
-            } => assert_eq!(targets, &["checkbox"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Unclaim);
+                assert_eq!(*seq, 2);
+                assert_eq!(targets[0], "checkbox");
+            }
             _ => panic!("expected Unclaim request"),
         }
     }
@@ -956,11 +1031,12 @@ mod tests {
         let cmds = parse("?observe 0 view").unwrap();
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Observe,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["view"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Observe);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets[0], "view");
+            }
             _ => panic!("expected Observe request"),
         }
     }
@@ -970,11 +1046,12 @@ mod tests {
         let cmds = parse("?unobserve 1 text").unwrap();
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Unobserve,
-                seq: 1,
-                targets,
-                ..
-            } => assert_eq!(targets, &["text"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Unobserve);
+                assert_eq!(*seq, 1);
+                assert_eq!(targets[0], "text");
+            }
             _ => panic!("expected Unobserve request"),
         }
     }
@@ -985,11 +1062,15 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Observe,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["view", "text", "layer"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Observe);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets.len(), 3);
+                assert_eq!(targets[0], "view");
+                assert_eq!(targets[1], "text");
+                assert_eq!(targets[2], "layer");
+            }
             _ => panic!("expected multi-type Observe"),
         }
     }
@@ -1000,11 +1081,15 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Observe,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["view", "text", "layer"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Observe);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets.len(), 3);
+                assert_eq!(targets[0], "view");
+                assert_eq!(targets[1], "text");
+                assert_eq!(targets[2], "layer");
+            }
             _ => panic!("expected multi-type Observe with spaces"),
         }
     }
@@ -1015,11 +1100,15 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["button", "slider", "checkbox"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets.len(), 3);
+                assert_eq!(targets[0], "button");
+                assert_eq!(targets[1], "slider");
+                assert_eq!(targets[2], "checkbox");
+            }
             _ => panic!("expected multi-type Claim"),
         }
     }
@@ -1036,7 +1125,7 @@ mod tests {
             } => {
                 assert_eq!(*kind, RequestKind::Expand);
                 assert_eq!(*seq, 0);
-                assert_eq!(targets, &["notes-app:save"]);
+                assert_eq!(targets[0], "notes-app:save");
                 assert_eq!(props[0], Prop::val("kind", "button"));
                 assert_eq!(props[1], Prop::val("label", "Save"));
             }
@@ -1054,9 +1143,9 @@ mod tests {
                 targets,
                 props,
             } => {
-                assert_eq!(*kind, RequestKind::Other("render-frame"));
+                assert_eq!(*kind, RequestKind::Other(ByteStr::from("render-frame")));
                 assert_eq!(*seq, 0);
-                assert_eq!(targets, &["viewport"]);
+                assert_eq!(targets[0], "viewport");
                 assert!(props.is_empty());
             }
             _ => panic!("expected Request"),
@@ -1093,7 +1182,7 @@ mod tests {
                 props,
                 body,
             } => {
-                assert_eq!(*kind, ResponseKind::Other("render-frame"));
+                assert_eq!(*kind, ResponseKind::Other(ByteStr::from("render-frame")));
                 assert_eq!(*seq, 0);
                 assert_eq!(props[0], Prop::val("status", "ok"));
                 assert!(body.is_none());
@@ -1109,9 +1198,9 @@ mod tests {
         assert!(matches!(
             &cmds[0],
             Command::Event {
-                kind: EventKind::Other("claim"),
+                kind,
                 ..
-            }
+            } if kind == &EventKind::Other(ByteStr::from("claim"))
         ));
     }
 
@@ -1121,11 +1210,12 @@ mod tests {
         let cmds = parse("?sub 0 button").unwrap();
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Other("sub"),
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["button"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Other(ByteStr::from("sub")));
+                assert_eq!(*seq, 0);
+                assert_eq!(targets[0], "button");
+            }
             _ => panic!("expected Other(sub) request"),
         }
     }
@@ -1136,9 +1226,9 @@ mod tests {
     fn multiple_commands() {
         let cmds = parse("+view a +view b -view c").unwrap();
         assert_eq!(cmds.len(), 3);
-        assert!(matches!(&cmds[0], Command::Upsert { id: "a", .. }));
-        assert!(matches!(&cmds[1], Command::Upsert { id: "b", .. }));
-        assert!(matches!(&cmds[2], Command::Destroy { id: "c", .. }));
+        assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "a"));
+        assert!(matches!(&cmds[1], Command::Upsert { id, .. } if id == "b"));
+        assert!(matches!(&cmds[2], Command::Destroy { id, .. } if id == "c"));
     }
 
     #[test]
@@ -1147,29 +1237,32 @@ mod tests {
         assert_eq!(cmds.len(), 3);
         match &cmds[0] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["button"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets[0], "button");
+            }
             _ => panic!("expected Claim"),
         }
         match &cmds[1] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 1,
-                targets,
-                ..
-            } => assert_eq!(targets, &["slider"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 1);
+                assert_eq!(targets[0], "slider");
+            }
             _ => panic!("expected Claim"),
         }
         match &cmds[2] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 2,
-                targets,
-                ..
-            } => assert_eq!(targets, &["checkbox"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 2);
+                assert_eq!(targets[0], "checkbox");
+            }
             _ => panic!("expected Claim"),
         }
     }
@@ -1187,28 +1280,16 @@ mod tests {
         assert_eq!(cmds.len(), 5);
         assert!(matches!(
             &cmds[0],
-            Command::Upsert {
-                kind: "layer",
-                id: "content",
-                ..
-            }
+            Command::Upsert { kind, id, .. } if kind == "layer" && id == "content"
         ));
         assert!(matches!(
             &cmds[1],
-            Command::Upsert {
-                kind: "view",
-                id: "greeting",
-                ..
-            }
+            Command::Upsert { kind, id, .. } if kind == "view" && id == "greeting"
         ));
         assert!(matches!(&cmds[2], Command::Push));
         assert!(matches!(
             &cmds[3],
-            Command::Upsert {
-                kind: "text",
-                id: "label",
-                ..
-            }
+            Command::Upsert { kind, id, .. } if kind == "text" && id == "label"
         ));
         assert!(matches!(&cmds[4], Command::Pop));
     }
@@ -1312,7 +1393,7 @@ mod tests {
     fn anon_id_allowed_in_upsert() {
         let cmds = parse("+view _").unwrap();
         match &cmds[0] {
-            Command::Upsert { id, .. } => assert_eq!(*id, "_"),
+            Command::Upsert { id, .. } => assert_eq!(id, "_"),
             _ => panic!("expected Upsert"),
         }
     }
@@ -1359,7 +1440,7 @@ mod tests {
     fn qualified_id() {
         let cmds = parse("+view notes-app:sidebar").unwrap();
         match &cmds[0] {
-            Command::Upsert { id, .. } => assert_eq!(*id, "notes-app:sidebar"),
+            Command::Upsert { id, .. } => assert_eq!(id, "notes-app:sidebar"),
             _ => panic!("expected Upsert"),
         }
     }
@@ -1370,12 +1451,10 @@ mod tests {
     fn dot_qualified_type() {
         let cmds = parse("+org.mybrowser.WebView wv1").unwrap();
         match &cmds[0] {
-            Command::Upsert { kind, .. } => assert_eq!(*kind, "org.mybrowser.WebView"),
+            Command::Upsert { kind, .. } => assert_eq!(kind, "org.mybrowser.WebView"),
             _ => panic!("expected Upsert"),
         }
     }
-
-    // -- Request/Response tests are above in sub/unsub/request_expand sections --
 
     // -- Round-trip test (emitter → parser) -----------------------------------
 
@@ -1407,8 +1486,8 @@ mod tests {
 
         match &cmds[0] {
             Command::Upsert { kind, id, props } => {
-                assert_eq!(*kind, "view");
-                assert_eq!(*id, "sidebar");
+                assert_eq!(kind, "view");
+                assert_eq!(id, "sidebar");
                 assert_eq!(props[0], Prop::val("class", "w-64"));
             }
             _ => panic!("expected Upsert"),
@@ -1416,8 +1495,8 @@ mod tests {
         assert!(matches!(&cmds[1], Command::Push));
         match &cmds[2] {
             Command::Upsert { kind, id, props } => {
-                assert_eq!(*kind, "text");
-                assert_eq!(*id, "label");
+                assert_eq!(kind, "text");
+                assert_eq!(id, "label");
                 assert_eq!(props[0], Prop::val("content", "Hello"));
             }
             _ => panic!("expected Upsert"),
@@ -1453,36 +1532,38 @@ mod tests {
         assert!(matches!(
             &cmds[0],
             Command::Event {
-                kind: EventKind::Click,
+                kind,
                 seq: 0,
-                id: "save",
+                id,
                 ..
-            }
+            } if kind == &EventKind::Click && id == "save"
         ));
         assert!(matches!(
             &cmds[1],
             Command::Ack {
-                kind: EventKind::Click,
+                kind,
                 seq: 0,
                 ..
-            }
+            } if kind == &EventKind::Click
         ));
         match &cmds[2] {
             Command::Request {
-                kind: RequestKind::Claim,
-                seq: 0,
-                targets,
-                ..
-            } => assert_eq!(targets, &["button"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Claim);
+                assert_eq!(*seq, 0);
+                assert_eq!(targets[0], "button");
+            }
             _ => panic!("expected Claim"),
         }
         match &cmds[3] {
             Command::Request {
-                kind: RequestKind::Unclaim,
-                seq: 1,
-                targets,
-                ..
-            } => assert_eq!(targets, &["slider"]),
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Unclaim);
+                assert_eq!(*seq, 1);
+                assert_eq!(targets[0], "slider");
+            }
             _ => panic!("expected Unclaim"),
         }
     }

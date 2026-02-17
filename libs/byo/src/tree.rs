@@ -154,21 +154,36 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
     /// Produces `+kind id props...` as a byte string suitable for
     /// re-emission via the emitter.
     pub fn reduced_command(&self, id: &K) -> Option<Vec<u8>> {
-        let obj = self.objects.get(id)?;
         let mut buf = Vec::new();
+        if self.write_reduced_command(id, &mut buf) {
+            Some(buf)
+        } else {
+            None
+        }
+    }
+
+    /// Append the reduced state of an object to `buf`.
+    ///
+    /// Writes `+kind id props...` into the provided buffer. Returns `true`
+    /// if the object was found and written, `false` if not found.
+    /// The caller can reuse the buffer across calls with `buf.clear()`.
+    pub fn write_reduced_command(&self, id: &K, buf: &mut Vec<u8>) -> bool {
+        let Some(obj) = self.objects.get(id) else {
+            return false;
+        };
         write!(buf, "+{} {}", obj.kind, obj.id).unwrap();
         for (key, value) in &obj.props {
             match value {
                 PropValue::Str(s) => {
                     write!(buf, " {key}=").unwrap();
-                    write_value(&mut buf, s).unwrap();
+                    write_value(buf, s).unwrap();
                 }
                 PropValue::Flag => {
                     write!(buf, " {key}").unwrap();
                 }
             }
         }
-        Some(buf)
+        true
     }
 
     /// Collect info about all descendants (depth-first).
@@ -240,7 +255,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
     /// `make_data` receives `(kind, id)` and returns per-object data.
     pub fn apply(
         &mut self,
-        commands: &[Command<'_>],
+        commands: &[Command],
         make_key: impl Fn(&str) -> K,
         mut make_data: impl FnMut(&str, &str) -> D,
     ) {
@@ -309,7 +324,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
 /// Convert parsed props to a storage map.
 ///
 /// [`Prop::Remove`] is a no-op in upsert context.
-pub fn props_to_map(props: &[Prop<'_>]) -> IndexMap<String, PropValue> {
+pub fn props_to_map(props: &[Prop]) -> IndexMap<String, PropValue> {
     let mut map = IndexMap::new();
     for prop in props {
         match prop {
@@ -326,7 +341,7 @@ pub fn props_to_map(props: &[Prop<'_>]) -> IndexMap<String, PropValue> {
 }
 
 /// Convert parsed props to patch operations (set + remove).
-pub fn props_to_patch(props: &[Prop<'_>]) -> (IndexMap<String, PropValue>, Vec<String>) {
+pub fn props_to_patch(props: &[Prop]) -> (IndexMap<String, PropValue>, Vec<String>) {
     let mut set = IndexMap::new();
     let mut remove = Vec::new();
     for prop in props {

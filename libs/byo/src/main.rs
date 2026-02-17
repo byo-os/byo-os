@@ -322,7 +322,7 @@ fn write_records(cmds: &[Command], out: &mut (impl Write + ?Sized), json: bool) 
 
 /// For a command at index `i`, check if Push/Pop children follow.
 /// Returns (children slice or None, next index to process).
-fn collect_children<'a>(cmds: &'a [Command<'a>], i: usize) -> (Option<&'a [Command<'a>]>, usize) {
+fn collect_children(cmds: &[Command], i: usize) -> (Option<&[Command]>, usize) {
     let next = i + 1;
     if matches!(cmds[i], Command::Upsert { .. } | Command::Patch { .. })
         && next < cmds.len()

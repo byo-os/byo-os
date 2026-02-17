@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 
-use crate::id::{QualifiedId, qualify};
+use crate::id::{QualifiedId, qualify_into};
 use crate::process::ProcessId;
 use crate::router::RouterMsg;
 
@@ -139,7 +139,7 @@ impl PendingBatch {
     /// Claimed-type destroys are collected instead of emitted (handled by router).
     fn rewrite_commands(
         &self,
-        commands: &[byo::Command<'_>],
+        commands: &[byo::Command],
         client: &str,
         claims: &HashMap<String, ProcessId>,
         buf: &mut Vec<u8>,
@@ -149,6 +149,7 @@ impl PendingBatch {
         let mut skip_depth: Option<usize> = None;
         let mut skip_next_children = false;
         let mut depth: usize = 0;
+        let mut qid_buf = String::new();
 
         for cmd in commands {
             // If we're inside a daemon-owned subtree, skip until we pop back.
@@ -179,11 +180,11 @@ impl PendingBatch {
 
             match cmd {
                 byo::Command::Upsert { kind, id, props } => {
-                    let qid_str = qualify(client, id);
+                    qualify_into(&mut qid_buf, client, id);
 
-                    if *id != "_" && self.expansions.contains_key(&qid_str) {
+                    if *id != "_" && self.expansions.contains_key(&*qid_buf) {
                         // Splice in the daemon expansion — recursively rewrite it.
-                        let (_, expansion, _) = &self.expansions[&qid_str];
+                        let (_, expansion, _) = &self.expansions[&*qid_buf];
                         if let Ok(exp_str) = std::str::from_utf8(expansion)
                             && let Ok(exp_cmds) = byo::parser::parse(exp_str)
                         {
@@ -196,24 +197,24 @@ impl PendingBatch {
                         }
                         // If next command is Push, skip the children block.
                         skip_next_children = true;
-                    } else if claims.contains_key(*kind) && *id != "_" {
+                    } else if claims.contains_key(&**kind) && *id != "_" {
                         // Daemon-owned but no expansion (shouldn't happen
                         // if pending == 0, but handle gracefully).
                         skip_next_children = true;
                     } else {
-                        write_upsert(buf, kind, &qid_str, props);
+                        write_upsert(buf, kind, &qid_buf, props);
                     }
                 }
                 byo::Command::Destroy { kind, id } => {
-                    let qid_str = qualify(client, id);
-                    if claims.contains_key(*kind) && *id != "_" {
+                    qualify_into(&mut qid_buf, client, id);
+                    if claims.contains_key(&**kind) && *id != "_" {
                         // Claimed type: collect for cascade destroy by the router.
                         // Don't emit — compositor doesn't have this object.
-                        if let Some(qid) = QualifiedId::parse(&qid_str) {
+                        if let Some(qid) = QualifiedId::parse(&qid_buf) {
                             claimed_destroys.push(qid);
                         }
                     } else {
-                        let _ = write!(buf, "\n-{kind} {qid_str}");
+                        let _ = write!(buf, "\n-{kind} {qid_buf}");
                     }
                 }
                 byo::Command::Push => {
@@ -225,14 +226,14 @@ impl PendingBatch {
                     buf.extend_from_slice(b"\n}");
                 }
                 byo::Command::Patch { kind, id, props } => {
-                    if claims.contains_key(*kind) && *id != "_" {
+                    if claims.contains_key(&**kind) && *id != "_" {
                         // Claimed type: don't emit patch to compositor.
                         // Re-expansion is handled by the router.
                         // If next command is Push (children), skip them.
                         skip_next_children = true;
                     } else {
-                        let qid_str = qualify(client, id);
-                        write_patch(buf, kind, &qid_str, props);
+                        qualify_into(&mut qid_buf, client, id);
+                        write_patch(buf, kind, &qid_buf, props);
                     }
                 }
                 byo::Command::Event { .. }
@@ -250,20 +251,20 @@ impl PendingBatch {
 }
 
 /// Write `+kind qid props...` directly to a buffer.
-pub(crate) fn write_upsert(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo::Prop<'_>]) {
+pub(crate) fn write_upsert(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo::Prop]) {
     let _ = write!(buf, "\n+{kind} {qid}");
     write_props(buf, props);
 }
 
 /// Write `@kind qid props...` directly to a buffer.
-pub(crate) fn write_patch(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo::Prop<'_>]) {
+pub(crate) fn write_patch(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo::Prop]) {
     let _ = write!(buf, "\n@{kind} {qid}");
     write_props(buf, props);
 }
 
 /// Write props in wire format. Delegates to the canonical implementation
 /// in [`byo::emitter::write_props`].
-pub(crate) fn write_props(buf: &mut Vec<u8>, props: &[byo::Prop<'_>]) {
+pub(crate) fn write_props(buf: &mut Vec<u8>, props: &[byo::Prop]) {
     byo::emitter::write_props(&mut *buf, props).unwrap();
 }
 
@@ -277,18 +278,19 @@ pub(crate) fn write_value(buf: &mut Vec<u8>, value: &str) {
 ///
 /// Walks each command and qualifies bare IDs. Already-qualified IDs
 /// (containing `:`) are left unchanged.
-pub fn qualify_and_serialize(commands: &[byo::Command<'_>], client: &str) -> Vec<u8> {
+pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8> {
     let mut buf = Vec::new();
+    let mut qid_buf = String::new();
 
     for cmd in commands {
         match cmd {
             byo::Command::Upsert { kind, id, props } => {
-                let qid_str = qualify(client, id);
-                write_upsert(&mut buf, kind, &qid_str, props);
+                qualify_into(&mut qid_buf, client, id);
+                write_upsert(&mut buf, kind, &qid_buf, props);
             }
             byo::Command::Destroy { kind, id } => {
-                let qid_str = qualify(client, id);
-                let _ = write!(buf, "\n-{kind} {qid_str}");
+                qualify_into(&mut qid_buf, client, id);
+                let _ = write!(buf, "\n-{kind} {qid_buf}");
             }
             byo::Command::Push => {
                 buf.extend_from_slice(b" {");
@@ -297,8 +299,8 @@ pub fn qualify_and_serialize(commands: &[byo::Command<'_>], client: &str) -> Vec
                 buf.extend_from_slice(b"\n}");
             }
             byo::Command::Patch { kind, id, props } => {
-                let qid_str = qualify(client, id);
-                write_patch(&mut buf, kind, &qid_str, props);
+                qualify_into(&mut qid_buf, client, id);
+                write_patch(&mut buf, kind, &qid_buf, props);
             }
             byo::Command::Event { .. }
             | byo::Command::Ack { .. }

@@ -91,7 +91,7 @@ pub fn assert_eq_bytes(actual: &[u8], expected: &str) {
 /// Commands are compared in order, but props within each command are
 /// compared as unordered sets (using a bitmask scan). Useful for the
 /// rare case where prop ordering is non-deterministic.
-pub fn commands_eq_unordered(a: &[Command<'_>], b: &[Command<'_>]) -> bool {
+pub fn commands_eq_unordered(a: &[Command], b: &[Command]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -100,7 +100,7 @@ pub fn commands_eq_unordered(a: &[Command<'_>], b: &[Command<'_>]) -> bool {
         .all(|(ca, cb)| cmd_eq_unordered(ca, cb))
 }
 
-fn cmd_eq_unordered<'a>(a: &Command<'a>, b: &Command<'a>) -> bool {
+fn cmd_eq_unordered(a: &Command, b: &Command) -> bool {
     match (a, b) {
         (
             Command::Upsert {
@@ -206,7 +206,7 @@ fn cmd_eq_unordered<'a>(a: &Command<'a>, b: &Command<'a>) -> bool {
 }
 
 /// Bitmask-based unordered prop comparison.
-fn props_eq_unordered(a: &[crate::protocol::Prop<'_>], b: &[crate::protocol::Prop<'_>]) -> bool {
+fn props_eq_unordered(a: &[crate::protocol::Prop], b: &[crate::protocol::Prop]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -235,7 +235,7 @@ fn props_eq_unordered(a: &[crate::protocol::Prop<'_>], b: &[crate::protocol::Pro
     true
 }
 
-fn format_prop(p: &crate::protocol::Prop<'_>) -> String {
+fn format_prop(p: &crate::protocol::Prop) -> String {
     format!("{p:?}")
 }
 

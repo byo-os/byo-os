@@ -10,3 +10,4 @@ macros = ["dep:byo-macros"]
 [dependencies]
 byo-macros = { workspace = true, optional = true }
 indexmap.workspace = true
+bytes.workspace = true

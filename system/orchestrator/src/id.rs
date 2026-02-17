@@ -92,6 +92,22 @@ pub fn qualify(client: &str, id: &str) -> String {
     }
 }
 
+/// Qualify a local ID into a reusable buffer, avoiding per-call allocation.
+///
+/// Clears `buf` and writes the qualified ID into it. Same semantics as
+/// [`qualify`]: anonymous/already-qualified IDs are written as-is.
+pub fn qualify_into(buf: &mut String, client: &str, id: &str) {
+    buf.clear();
+    if id == "_" || id.contains(':') {
+        buf.push_str(id);
+    } else {
+        buf.reserve(client.len() + 1 + id.len());
+        buf.push_str(client);
+        buf.push(':');
+        buf.push_str(id);
+    }
+}
+
 /// Dequalify a qualified ID for sending to a client.
 ///
 /// If the ID starts with `client:`, strips the prefix. Otherwise returns
@@ -154,6 +170,36 @@ mod tests {
     #[test]
     fn qualify_already_qualified() {
         assert_eq!(qualify("notes-app", "controls:save"), "controls:save");
+    }
+
+    #[test]
+    fn qualify_into_local_id() {
+        let mut buf = String::new();
+        qualify_into(&mut buf, "notes-app", "sidebar");
+        assert_eq!(buf, "notes-app:sidebar");
+    }
+
+    #[test]
+    fn qualify_into_already_qualified() {
+        let mut buf = String::new();
+        qualify_into(&mut buf, "notes-app", "controls:save");
+        assert_eq!(buf, "controls:save");
+    }
+
+    #[test]
+    fn qualify_into_anonymous() {
+        let mut buf = String::new();
+        qualify_into(&mut buf, "app", "_");
+        assert_eq!(buf, "_");
+    }
+
+    #[test]
+    fn qualify_into_reuses_buffer() {
+        let mut buf = String::new();
+        qualify_into(&mut buf, "app", "first");
+        assert_eq!(buf, "app:first");
+        qualify_into(&mut buf, "other", "second");
+        assert_eq!(buf, "other:second");
     }
 
     #[test]

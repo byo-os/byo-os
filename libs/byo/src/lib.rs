@@ -5,6 +5,7 @@
 //! over stdin/stdout.
 
 pub mod assert;
+pub mod byte_str;
 pub mod emitter;
 pub mod lexer;
 pub mod parser;
@@ -13,6 +14,7 @@ pub mod scanner;
 pub mod tree;
 pub mod types;
 
+pub use byte_str::{ByteStr, ByteString};
 pub use protocol::*;
 
 #[cfg(feature = "macros")]

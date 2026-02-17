@@ -221,13 +221,14 @@ impl Router {
 
             // Determine routing: check for daemon-claimed types.
             let mut expand_msgs = Vec::new();
+            let mut reduced_buf = Vec::new();
 
             for cmd in &commands {
                 match cmd {
                     Command::Upsert { kind, id, props }
-                        if *id != "_" && self.claims.get(*kind).is_some_and(|&s| s != from) =>
+                        if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
                     {
-                        let subscriber = self.claims[*kind];
+                        let subscriber = self.claims[&**kind];
                         let qid = QualifiedId::new(&client, id);
                         let expand_seq = self.next_expand_seq(subscriber);
 
@@ -238,19 +239,20 @@ impl Router {
                         expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
                     }
                     Command::Patch { kind, id, .. }
-                        if *id != "_" && self.claims.get(*kind).is_some_and(|&s| s != from) =>
+                        if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
                     {
                         // Patch on a claimed type: re-expand with full reduced state.
-                        let subscriber = self.claims[*kind];
+                        let subscriber = self.claims[&**kind];
                         let qid = QualifiedId::new(&client, id);
 
-                        if let Some(reduced) = self.state.reduced_command(&qid) {
+                        reduced_buf.clear();
+                        if self.state.write_reduced_command(&qid, &mut reduced_buf) {
                             let expand_seq = self.next_expand_seq(subscriber);
                             let mut expand_buf = Vec::new();
                             let _ = write!(
                                 expand_buf,
                                 "\n?expand {expand_seq} {}",
-                                String::from_utf8_lossy(&reduced).trim_start_matches('+')
+                                String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
                             );
                             expand_msgs.push((
                                 subscriber, qid, expand_seq, expand_buf, true, // re-expand
@@ -310,7 +312,7 @@ impl Router {
     /// remain intact for `handle_cascade_destroys` to collect descendant
     /// info and emit proper destroy commands. Those nodes are destroyed by
     /// `handle_cascade_destroys` after cascade processing is complete.
-    fn update_state(&mut self, commands: &[Command<'_>], owner: ProcessId, client: &str) {
+    fn update_state(&mut self, commands: &[Command], owner: ProcessId, client: &str) {
         let mut parent_stack: Vec<QualifiedId> = Vec::new();
         let mut last_qid: Option<QualifiedId> = None;
 
@@ -331,7 +333,7 @@ impl Router {
                 Command::Destroy { kind, id } => {
                     // Skip destroys on claimed types — their state is needed
                     // by handle_cascade_destroys for descendant cleanup.
-                    if self.claims.contains_key(*kind) && *id != "_" {
+                    if self.claims.contains_key(&**kind) && *id != "_" {
                         continue;
                     }
                     let qid = QualifiedId::new(client, id);
@@ -448,14 +450,16 @@ impl Router {
             .map(|o| (o.id.clone(), o.kind.clone()))
             .collect();
 
+        let mut reduced_buf = Vec::new();
         for (qid, _kind) in &objects {
-            if let Some(reduced) = self.state.reduced_command(qid) {
+            reduced_buf.clear();
+            if self.state.write_reduced_command(qid, &mut reduced_buf) {
                 let expand_seq = self.next_expand_seq(from);
                 let mut expand_buf = Vec::new();
                 let _ = write!(
                     expand_buf,
                     "\n?expand {expand_seq} {}",
-                    String::from_utf8_lossy(&reduced).trim_start_matches('+')
+                    String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
                 );
                 self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)))
                     .await;
@@ -528,7 +532,7 @@ impl Router {
         from: ProcessId,
         client: &str,
         seq: u64,
-        body: &Option<Vec<Command<'_>>>,
+        body: &Option<Vec<Command>>,
     ) {
         // Look up the current depth of this expansion before recording.
         let current_depth = self
@@ -567,7 +571,7 @@ impl Router {
         &mut self,
         from: ProcessId,
         seq: u64,
-        body_cmds: &[Command<'_>],
+        body_cmds: &[Command],
         daemon_client: &str,
         current_depth: u32,
     ) {
@@ -579,7 +583,7 @@ impl Router {
         for cmd in body_cmds {
             if let Command::Upsert { kind, id, props } = cmd
                 && *id != "_"
-                && let Some(&subscriber) = self.claims.get(*kind)
+                && let Some(&subscriber) = self.claims.get(&**kind)
             {
                 let qid = QualifiedId::new(daemon_client, id);
                 let expand_seq = self.next_expand_seq(subscriber);
@@ -1017,7 +1021,7 @@ impl Router {
 /// top level (outside any observed context) has observed children that need
 /// to be placed under their nearest observed ancestor.
 fn project_commands(
-    commands: &[Command<'_>],
+    commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
 ) -> Vec<u8> {
@@ -1036,7 +1040,7 @@ fn project_commands(
 /// level), non-observed objects with observed children need state-tree lookup
 /// to find the correct observed ancestor to wrap them under.
 fn project_at_level(
-    commands: &[Command<'_>],
+    commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,
@@ -1046,7 +1050,7 @@ fn project_at_level(
     while *i < commands.len() {
         match &commands[*i] {
             Command::Upsert { kind, id, props } => {
-                let is_observed = observed_types.contains(*kind);
+                let is_observed = observed_types.contains(&**kind);
                 *i += 1;
 
                 let has_children = *i < commands.len() && matches!(commands[*i], Command::Push);
@@ -1076,7 +1080,7 @@ fn project_at_level(
                 }
             }
             Command::Destroy { kind, id } => {
-                if observed_types.contains(*kind) {
+                if observed_types.contains(&**kind) {
                     let mut em = Emitter::new(&mut *buf);
                     let _ = em.destroy(kind, id);
                 } else {
@@ -1087,7 +1091,7 @@ fn project_at_level(
                 *i += 1;
             }
             Command::Patch { kind, id, props } => {
-                let is_observed = observed_types.contains(*kind);
+                let is_observed = observed_types.contains(&**kind);
                 *i += 1;
 
                 let has_children = *i < commands.len() && matches!(commands[*i], Command::Push);
@@ -1126,7 +1130,7 @@ fn project_at_level(
 
 /// Recurse into children, returning the projected bytes (empty if nothing observed).
 fn collect_children(
-    commands: &[Command<'_>],
+    commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,
@@ -1141,7 +1145,7 @@ fn collect_children(
 ///
 /// If no observed ancestor exists, children are emitted at the top level.
 fn project_under_ancestor(
-    commands: &[Command<'_>],
+    commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,

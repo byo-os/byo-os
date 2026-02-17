@@ -57,12 +57,12 @@ pub fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
 /// [`Prop::Remove`] writes `~key` on the wire. In upsert/event context
 /// this is a no-op for the receiver, but we emit it unconditionally to
 /// keep the emitter simple.
-pub fn write_props<W: io::Write>(w: &mut W, props: &[Prop<'_>]) -> io::Result<()> {
+pub fn write_props<W: io::Write>(w: &mut W, props: &[Prop]) -> io::Result<()> {
     for prop in props {
         match prop {
             Prop::Value { key, value } => {
                 write!(w, " {key}=")?;
-                write_value(w, value.as_ref())?;
+                write_value(w, value)?;
             }
             Prop::Boolean { key } => {
                 write!(w, " {key}")?;
@@ -187,7 +187,7 @@ impl<W: io::Write> Emitter<W> {
     // -- Object commands -----------------------------------------------------
 
     /// `+type id props...` — Create or full-replace an object.
-    pub fn upsert(&mut self, kind: &str, id: &str, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn upsert(&mut self, kind: &str, id: &str, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n+{kind} {id}")?;
         write_props(&mut self.writer, props)
     }
@@ -223,7 +223,7 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         id: &str,
-        props: &[Prop<'_>],
+        props: &[Prop],
         children: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n+{kind} {id}")?;
@@ -239,7 +239,7 @@ impl<W: io::Write> Emitter<W> {
     }
 
     /// `@type id props...` — Patch props on an existing object.
-    pub fn patch(&mut self, kind: &str, id: &str, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn patch(&mut self, kind: &str, id: &str, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n@{kind} {id}")?;
         write_props(&mut self.writer, props)
     }
@@ -249,7 +249,7 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         id: &str,
-        props: &[Prop<'_>],
+        props: &[Prop],
         children: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n@{kind} {id}")?;
@@ -262,13 +262,13 @@ impl<W: io::Write> Emitter<W> {
     // -- Events --------------------------------------------------------------
 
     /// `!kind seq id props...` — Emit an event.
-    pub fn event(&mut self, kind: &str, seq: u64, id: &str, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn event(&mut self, kind: &str, seq: u64, id: &str, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n!{kind} {seq} {id}")?;
         write_props(&mut self.writer, props)
     }
 
     /// `!ack kind seq props...` — Acknowledge a received event.
-    pub fn ack(&mut self, kind: &str, seq: u64, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn ack(&mut self, kind: &str, seq: u64, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n!ack {kind} {seq}")?;
         write_props(&mut self.writer, props)
     }
@@ -344,7 +344,7 @@ impl<W: io::Write> Emitter<W> {
     }
 
     /// `?expand seq id props...` — Request daemon expansion.
-    pub fn expand(&mut self, seq: u64, id: &str, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn expand(&mut self, seq: u64, id: &str, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n?expand {seq} {id}")?;
         write_props(&mut self.writer, props)
     }
@@ -366,7 +366,7 @@ impl<W: io::Write> Emitter<W> {
         kind: &str,
         seq: u64,
         target: &str,
-        props: &[Prop<'_>],
+        props: &[Prop],
     ) -> io::Result<()> {
         write!(self.writer, "\n?{kind} {seq} {target}")?;
         write_props(&mut self.writer, props)
@@ -377,7 +377,7 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         seq: u64,
-        props: &[Prop<'_>],
+        props: &[Prop],
         body: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n.{kind} {seq}")?;
@@ -388,7 +388,7 @@ impl<W: io::Write> Emitter<W> {
     }
 
     /// `.kind seq props...` — Generic response without body.
-    pub fn response(&mut self, kind: &str, seq: u64, props: &[Prop<'_>]) -> io::Result<()> {
+    pub fn response(&mut self, kind: &str, seq: u64, props: &[Prop]) -> io::Result<()> {
         write!(self.writer, "\n.{kind} {seq}")?;
         write_props(&mut self.writer, props)
     }
@@ -417,7 +417,7 @@ impl<W: io::Write> Emitter<W> {
     /// assert!(out.contains("+view root"));
     /// assert!(out.contains("+text child"));
     /// ```
-    pub fn commands(&mut self, cmds: &[Command<'_>]) -> io::Result<()> {
+    pub fn commands(&mut self, cmds: &[Command]) -> io::Result<()> {
         for cmd in cmds {
             match cmd {
                 Command::Upsert { kind, id, props } => {
@@ -809,20 +809,31 @@ mod tests {
 
     #[test]
     fn prop_constructors() {
-        use std::borrow::Cow;
+        use crate::byte_str::ByteStr;
         assert_eq!(
             Prop::val("k", "v"),
             Prop::Value {
-                key: "k",
-                value: Cow::Borrowed("v"),
+                key: ByteStr::from("k"),
+                value: ByteStr::from("v"),
             }
         );
-        assert_eq!(Prop::flag("k"), Prop::Boolean { key: "k" });
-        assert_eq!(Prop::remove("k"), Prop::Remove { key: "k" });
+        assert_eq!(
+            Prop::flag("k"),
+            Prop::Boolean {
+                key: ByteStr::from("k")
+            }
+        );
+        assert_eq!(
+            Prop::remove("k"),
+            Prop::Remove {
+                key: ByteStr::from("k")
+            }
+        );
     }
 
     #[test]
     fn event_kind_as_str() {
+        use crate::byte_str::ByteStr;
         use crate::protocol::EventKind;
         assert_eq!(EventKind::Click.as_str(), "click");
         assert_eq!(EventKind::KeyDown.as_str(), "keydown");
@@ -833,27 +844,35 @@ mod tests {
         assert_eq!(EventKind::Blur.as_str(), "blur");
         assert_eq!(EventKind::Resize.as_str(), "resize");
         assert_eq!(
-            EventKind::Other("com.example.foo").as_str(),
+            EventKind::Other(ByteStr::from("com.example.foo")).as_str(),
             "com.example.foo"
         );
     }
 
     #[test]
     fn request_kind_as_str() {
+        use crate::byte_str::ByteStr;
         use crate::protocol::RequestKind;
         assert_eq!(RequestKind::Claim.as_str(), "claim");
         assert_eq!(RequestKind::Unclaim.as_str(), "unclaim");
         assert_eq!(RequestKind::Observe.as_str(), "observe");
         assert_eq!(RequestKind::Unobserve.as_str(), "unobserve");
         assert_eq!(RequestKind::Expand.as_str(), "expand");
-        assert_eq!(RequestKind::Other("render-frame").as_str(), "render-frame");
+        assert_eq!(
+            RequestKind::Other(ByteStr::from("render-frame")).as_str(),
+            "render-frame"
+        );
     }
 
     #[test]
     fn response_kind_as_str() {
+        use crate::byte_str::ByteStr;
         use crate::protocol::ResponseKind;
         assert_eq!(ResponseKind::Expand.as_str(), "expand");
-        assert_eq!(ResponseKind::Other("render-frame").as_str(), "render-frame");
+        assert_eq!(
+            ResponseKind::Other(ByteStr::from("render-frame")).as_str(),
+            "render-frame"
+        );
     }
 
     #[test]
@@ -937,7 +956,12 @@ mod tests {
                 kind: crate::protocol::RequestKind::Observe,
                 targets,
                 ..
-            } => assert_eq!(targets, &["view", "text", "layer"]),
+            } => {
+                assert_eq!(targets.len(), 3);
+                assert_eq!(targets[0], "view");
+                assert_eq!(targets[1], "text");
+                assert_eq!(targets[2], "layer");
+            }
             _ => panic!("expected Observe"),
         }
     }
