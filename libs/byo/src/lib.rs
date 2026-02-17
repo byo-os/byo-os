@@ -9,12 +9,14 @@ pub mod byte_str;
 pub mod emitter;
 pub mod lexer;
 pub mod parser;
+pub mod props;
 pub mod protocol;
 pub mod scanner;
 pub mod tree;
 pub mod types;
 
 pub use byte_str::{ByteStr, ByteString};
+pub use props::{FromProps, ReadProp, ToProps, WriteProp};
 pub use protocol::*;
 
 #[cfg(feature = "macros")]
@@ -87,3 +89,15 @@ pub use byo_macros::byo_str;
 /// byo_assert_eq!(actual, +view sidebar class="w-64");
 /// ```
 pub use byo_macros::byo_assert_eq;
+
+#[cfg(feature = "macros")]
+pub use byo_macros::FromProps;
+
+#[cfg(feature = "macros")]
+pub use byo_macros::ToProps;
+
+#[cfg(feature = "macros")]
+pub use byo_macros::ReadProp;
+
+#[cfg(feature = "macros")]
+pub use byo_macros::WriteProp;

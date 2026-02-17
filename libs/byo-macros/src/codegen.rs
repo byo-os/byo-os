@@ -525,6 +525,9 @@ impl Codegen {
             IrProp::Remove { key } => {
                 quote! { #vec_ident.push(::byo::Prop::remove(#key)); }
             }
+            IrProp::Spread { expr } => {
+                quote! { #vec_ident.extend(::byo::props::ToProps::to_props(&#expr)); }
+            }
             IrProp::Conditional {
                 condition,
                 then_props,
@@ -552,7 +555,7 @@ impl Codegen {
     }
 }
 
-/// Check if any prop is dynamic (interpolation or conditional).
+/// Check if any prop is dynamic (interpolation, conditional, or spread).
 fn has_dynamic_props(props: &[IrProp]) -> bool {
     props.iter().any(|p| {
         matches!(
@@ -561,6 +564,7 @@ fn has_dynamic_props(props: &[IrProp]) -> bool {
                 value: IrValue::Interpolation(_),
                 ..
             } | IrProp::Conditional { .. }
+                | IrProp::Spread { .. }
         )
     })
 }

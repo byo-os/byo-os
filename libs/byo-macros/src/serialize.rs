@@ -187,6 +187,13 @@ fn serialize_props(props: &[IrProp], out: &mut String) -> Result<(), String> {
                 out.push_str(" ~");
                 out.push_str(key);
             }
+            IrProp::Spread { .. } => {
+                return Err(
+                    "spread props ({..expr}) are not supported in byo_str!/byo_assert_eq! \
+                     (compile-time only); use byo!() or byo_write!() instead"
+                        .to_string(),
+                );
+            }
             IrProp::Conditional { .. } => {
                 return Err(
                     "byo_str!/byo_assert_eq! does not support conditional props".to_string()

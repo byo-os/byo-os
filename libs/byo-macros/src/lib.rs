@@ -5,6 +5,7 @@
 //! Re-exported from the `byo` crate (behind the `macros` feature, on by default).
 
 mod codegen;
+mod derive_props;
 mod ir;
 mod parse;
 mod serialize;
@@ -120,6 +121,34 @@ pub fn byo_assert_eq(input: TokenStream) -> TokenStream {
         ::byo::assert::assert_eq(&#actual_expr, #canonical)
     };
     ts.into()
+}
+
+/// Derive `FromProps` for a struct — builds the struct from a `&[Prop]` slice.
+#[proc_macro_derive(FromProps, attributes(prop))]
+pub fn derive_from_props(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    derive_props::derive_from_props(input).into()
+}
+
+/// Derive `ToProps` for a struct — converts the struct into a `Vec<Prop>`.
+#[proc_macro_derive(ToProps, attributes(prop))]
+pub fn derive_to_props(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    derive_props::derive_to_props(input).into()
+}
+
+/// Derive `ReadProp` for a unit enum — parses a prop value into a variant.
+#[proc_macro_derive(ReadProp, attributes(prop))]
+pub fn derive_read_prop(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    derive_props::derive_read_prop(input).into()
+}
+
+/// Derive `WriteProp` for a unit enum — encodes a variant as a prop value.
+#[proc_macro_derive(WriteProp, attributes(prop))]
+pub fn derive_write_prop(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    derive_props::derive_write_prop(input).into()
 }
 
 fn syn_err(msg: String) -> TokenStream {

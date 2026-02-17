@@ -20,6 +20,8 @@ pub enum IrProp {
     Boolean { key: String },
     /// `~key` (remove)
     Remove { key: String },
+    /// `{..expr}` — spread props from an IntoProps impl
+    Spread { expr: TokenStream },
     /// `if cond { props... } [else { props... }]`
     Conditional {
         condition: TokenStream,

@@ -31,6 +31,15 @@ fn spans_adjacent(prev: &TokenTree, next: &TokenTree) -> bool {
     end.line == start.line && end.column == start.column
 }
 
+/// Check if token slice starts with `..` (spread prefix).
+fn is_spread_prefix(tokens: &[TokenTree]) -> bool {
+    matches!(
+        (tokens.first(), tokens.get(1)),
+        (Some(TokenTree::Punct(p1)), Some(TokenTree::Punct(p2)))
+            if p1.as_char() == '.' && p2.as_char() == '.'
+    )
+}
+
 /// Parser state wrapping a peekable iterator over `TokenTree`.
 struct Parser {
     tokens: Vec<TokenTree>,
@@ -286,10 +295,18 @@ impl Parser {
                 break;
             }
 
-            // `{` as children block — only when NOT preceded by `=`
+            // `{` — either spread `{..expr}` or children block
             if let Some(TokenTree::Group(g)) = self.peek()
                 && g.delimiter() == Delimiter::Brace
             {
+                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                if is_spread_prefix(&inner) {
+                    self.pos += 1;
+                    let expr: TokenStream = inner.into_iter().skip(2).collect();
+                    props.push(IrProp::Spread { expr });
+                    continue;
+                }
+                // Otherwise: children block
                 let stream = g.stream();
                 self.pos += 1;
                 let mut child_parser = Parser::new(stream, self.real_spans);
@@ -1156,5 +1173,56 @@ mod tests {
     #[test]
     fn ack_children_rejected() {
         assert_parse_err(quote! { !ack click 0 { +view child } }, "children block");
+    }
+
+    #[test]
+    fn parse_spread_in_prop_position() {
+        let input = quote! { +view sidebar {..props} };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Upsert {
+                props, children, ..
+            } => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(&props[0], IrProp::Spread { .. }));
+                assert!(children.is_none());
+            }
+            _ => panic!("expected Upsert"),
+        }
+    }
+
+    #[test]
+    fn parse_spread_with_children() {
+        let input = quote! { +view sidebar {..props} { +text child } };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Upsert {
+                props,
+                children: Some(ch),
+                ..
+            } => {
+                assert_eq!(props.len(), 1);
+                assert!(matches!(&props[0], IrProp::Spread { .. }));
+                assert_eq!(ch.len(), 1);
+            }
+            _ => panic!("expected Upsert with spread + children"),
+        }
+    }
+
+    #[test]
+    fn parse_spread_with_other_props() {
+        let input = quote! { +view sidebar class="w-64" {..extra} hidden };
+        let cmds = parse(input, false).unwrap();
+        match &cmds[0] {
+            IrCommand::Upsert { props, .. } => {
+                assert_eq!(props.len(), 3);
+                assert!(matches!(&props[0], IrProp::Value { key, .. } if key == "class"));
+                assert!(matches!(&props[1], IrProp::Spread { .. }));
+                assert!(matches!(&props[2], IrProp::Boolean { key } if key == "hidden"));
+            }
+            _ => panic!("expected Upsert"),
+        }
     }
 }

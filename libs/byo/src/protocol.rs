@@ -114,6 +114,13 @@ impl Prop {
     pub fn remove(key: impl Into<ByteStr>) -> Self {
         Self::Remove { key: key.into() }
     }
+
+    /// Returns the key name, regardless of variant.
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Value { key, .. } | Self::Boolean { key } | Self::Remove { key } => key,
+        }
+    }
 }
 
 /// A parsed BYO/OS protocol command.
