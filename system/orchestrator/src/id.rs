@@ -78,9 +78,10 @@ impl fmt::Display for QualifiedId {
 /// Qualify a local ID with a client name.
 ///
 /// If the ID is already qualified (contains `:`), returns it unchanged.
+/// Anonymous IDs (`_`) are returned as-is — they are never qualified.
 /// Otherwise, prepends `client:`.
 pub fn qualify(client: &str, id: &str) -> String {
-    if id.contains(':') {
+    if id == "_" || id.contains(':') {
         id.to_owned()
     } else {
         let mut s = String::with_capacity(client.len() + 1 + id.len());

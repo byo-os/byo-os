@@ -1,18 +1,11 @@
-mod batch;
-mod config;
-mod id;
-mod process;
-mod router;
-mod state;
-
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use config::Config;
-use process::{ProcessId, spawn_process};
-use router::{Router, RouterMsg};
+use byo_orchestrator::config::Config;
+use byo_orchestrator::process::{ProcessId, spawn_process};
+use byo_orchestrator::router::{Router, RouterMsg};
 
 #[tokio::main]
 async fn main() {

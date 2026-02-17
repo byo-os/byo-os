@@ -64,8 +64,8 @@ pub struct Router {
     name_to_id: HashMap<String, ProcessId>,
 }
 
-impl Router {
-    pub fn new() -> Self {
+impl Default for Router {
+    fn default() -> Self {
         Self {
             processes: HashMap::new(),
             claims: HashMap::new(),
@@ -77,6 +77,12 @@ impl Router {
             pending_batches: Vec::new(),
             name_to_id: HashMap::new(),
         }
+    }
+}
+
+impl Router {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register a process with the router.
@@ -296,6 +302,11 @@ impl Router {
     }
 
     /// Update the state tree from parsed commands.
+    ///
+    /// Destroys of claimed types are skipped here because their state must
+    /// remain intact for `handle_cascade_destroys` to collect descendant
+    /// info and emit proper destroy commands. Those nodes are destroyed by
+    /// `handle_cascade_destroys` after cascade processing is complete.
     fn update_state(&mut self, commands: &[Command<'_>], owner: ProcessId, client: &str) {
         let mut parent_stack: Vec<QualifiedId> = Vec::new();
         let mut last_qid: Option<QualifiedId> = None;
@@ -314,7 +325,12 @@ impl Router {
                     }
                     last_qid = Some(qid);
                 }
-                Command::Destroy { id, .. } => {
+                Command::Destroy { kind, id } => {
+                    // Skip destroys on claimed types — their state is needed
+                    // by handle_cascade_destroys for descendant cleanup.
+                    if self.claims.contains_key(*kind) && *id != "_" {
+                        continue;
+                    }
                     let qid = QualifiedId::new(client, id);
                     self.state.destroy(&qid);
                 }
@@ -516,7 +532,8 @@ impl Router {
             .unwrap_or(0);
 
         // Record the expansion body bytes if present, with IDs qualified
-        // under the daemon's client name.
+        // under the daemon's client name. The body from the parser contains
+        // just the inner commands (no wrapping Push/Pop).
         if let Some(body_cmds) = body {
             let expansion_buf = crate::batch::qualify_and_serialize(body_cmds, client);
 
@@ -1186,6 +1203,12 @@ fn emit_observed_descendant_destroys(
     }
 }
 
+/// Strip the outer Push/Pop wrapper from a `.expand` response body.
+///
+/// The parser's `parse_mandatory_children` always wraps the body in a
+/// Push (for `{`) and Pop (for `}`). These represent the response container,
+/// not structural nesting within the expansion content. This function returns
+/// the inner slice without that wrapper.
 /// Convert parsed props to a state-storage IndexMap.
 fn props_to_map(props: &[Prop<'_>]) -> IndexMap<String, PropValue> {
     let mut map = IndexMap::new();
