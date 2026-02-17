@@ -237,7 +237,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
     /// Tracks parent stack for Push/Pop. Skips anonymous (`_`) objects.
     ///
     /// `make_key` converts bare `&str` IDs to `K`.
-    /// `make_data` receives `(kind, id)` and returns per-node data.
+    /// `make_data` receives `(kind, id)` and returns per-object data.
     pub fn apply(
         &mut self,
         commands: &[Command<'_>],

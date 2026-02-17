@@ -43,7 +43,7 @@ async fn disjoint_observers() {
     let comp_msg = recv_byo_raw(&mut compositor_rx);
     byo_assert_eq!(comp_msg, +view app:root);
 
-    // Step 4b: TextSvc should receive only the text node at top level.
+    // Step 4b: TextSvc should receive only the text object at top level.
     // View is not observed, so it's skipped. Text floats to top level.
     let text_msg = recv_byo_raw(&mut textsvc_rx);
     byo_assert_eq!(text_msg, +text app:label content="Hello");

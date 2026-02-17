@@ -618,11 +618,11 @@ impl Router {
         }
     }
 
-    /// Update the state tree with expansion nodes from a completed batch.
+    /// Update the state tree with expansion objects from a completed batch.
     ///
-    /// Expansion nodes become **children** of the source node in the state
+    /// Expansion objects become **children** of the source object in the state
     /// tree. This means cascade destroy of the source automatically cleans
-    /// up all expansion nodes, and the tree relationship itself encodes the
+    /// up all expansion objects, and the tree relationship itself encodes the
     /// expansion link (no `expanded_from` field needed).
     fn update_expansion_state(&mut self, batch: &PendingBatch) {
         for (source_qid_str, (daemon_pid, expansion_bytes, _is_re_expand)) in &batch.expansions {
@@ -658,7 +658,7 @@ impl Router {
                         let map = props_to_map(props);
                         self.state.upsert(kind, &qid, &map, *daemon_pid);
 
-                        // Parent: root-level expansion nodes → source node,
+                        // Parent: root-level expansion objects → source object,
                         // nested → their push parent within the expansion.
                         if let Some(parent) = parent_stack.last() {
                             self.state.set_parent(&qid, parent);
@@ -709,9 +709,9 @@ impl Router {
     ) -> Vec<u8> {
         use std::io::Write;
 
-        // Collect old expansion nodes (all descendants of the source node).
+        // Collect old expansion objects (all descendants of the source object).
         let descendants = self.state.descendants_info(source_qid);
-        let old_nodes: HashMap<QualifiedId, IndexMap<String, PropValue>> = descendants
+        let old_objects: HashMap<QualifiedId, IndexMap<String, PropValue>> = descendants
             .iter()
             .filter_map(|(qid, _, _)| self.state.get(qid).map(|o| (qid.clone(), o.props.clone())))
             .collect();
@@ -752,8 +752,8 @@ impl Router {
                     seen_qids.insert(qid.clone());
                     let new_props = props_to_map(props);
 
-                    if let Some(old_props) = old_nodes.get(&qid) {
-                        // Existing node — compute delta.
+                    if let Some(old_props) = old_objects.get(&qid) {
+                        // Existing object — compute delta.
                         let mut delta_props: Vec<u8> = Vec::new();
                         let mut has_changes = false;
 
@@ -786,7 +786,7 @@ impl Router {
                             delta.extend_from_slice(&delta_props);
                         }
                     } else {
-                        // New node — emit create.
+                        // New object — emit create.
                         crate::batch::write_upsert(&mut delta, kind, &qid.to_string(), props);
                     }
 
@@ -813,8 +813,8 @@ impl Router {
             }
         }
 
-        // Emit destroys for nodes that are in old but not in new.
-        for qid in old_nodes.keys() {
+        // Emit destroys for objects that are in old but not in new.
+        for qid in old_objects.keys() {
             if !seen_qids.contains(qid) {
                 if let Some(kind) = old_kinds.get(qid) {
                     let _ = write!(delta, "\n-{kind} {qid}");
@@ -828,13 +828,13 @@ impl Router {
 
     /// Handle cascade destroys for claimed-type objects.
     ///
-    /// Since expansion nodes are children of the source node in the state
-    /// tree, destroying the source cascades to all expansion nodes
+    /// Since expansion objects are children of the source object in the state
+    /// tree, destroying the source cascades to all expansion objects
     /// automatically. We just need to:
     /// 1. Collect descendant info for compositor destroy commands and daemon notifications
     /// 2. Emit `-kind qid` for direct expansion children (compositor cascades the rest)
-    /// 3. Notify owning daemons about destroyed nodes
-    /// 4. Destroy the source node (cascades to all children)
+    /// 3. Notify owning daemons about destroyed objects
+    /// 4. Destroy the source object (cascades to all children)
     async fn handle_cascade_destroys(
         &mut self,
         claimed_destroys: &[QualifiedId],
@@ -868,7 +868,7 @@ impl Router {
                     .await;
             }
 
-            // Destroy the source node — cascades to all children/expansion nodes.
+            // Destroy the source object — cascades to all children/expansion objects.
             self.state.destroy(source_qid);
         }
     }
@@ -1011,9 +1011,9 @@ impl Router {
 }
 
 /// Project a sequence of commands through a type filter, keeping only
-/// observed types and re-parenting observed children of non-observed nodes.
+/// observed types and re-parenting observed children of non-observed objects.
 ///
-/// Uses the state tree for ancestor lookup when a non-observed node at the
+/// Uses the state tree for ancestor lookup when a non-observed object at the
 /// top level (outside any observed context) has observed children that need
 /// to be placed under their nearest observed ancestor.
 fn project_commands(
@@ -1031,9 +1031,9 @@ fn project_commands(
 /// nesting level (delimited by Push/Pop).
 ///
 /// `in_observed_context` is true when we're inside the children block of an
-/// observed node — in that case, flattening non-observed nodes is safe because
+/// observed object — in that case, flattening non-observed objects is safe because
 /// the children naturally end up under the observed parent. When false (top
-/// level), non-observed nodes with observed children need state-tree lookup
+/// level), non-observed objects with observed children need state-tree lookup
 /// to find the correct observed ancestor to wrap them under.
 fn project_at_level(
     commands: &[Command<'_>],
@@ -1066,7 +1066,7 @@ fn project_at_level(
                         // Inside an observed parent — flatten children here.
                         project_at_level(commands, observed_types, state, i, buf, true);
                     } else {
-                        // Top level, non-observed node — wrap children under
+                        // Top level, non-observed object — wrap children under
                         // nearest observed ancestor from the state tree.
                         project_under_ancestor(commands, observed_types, state, i, buf, id);
                     }
@@ -1136,7 +1136,7 @@ fn collect_children(
     child_buf
 }
 
-/// Project children of a non-observed node, wrapping them under the node's
+/// Project children of a non-observed object, wrapping them under the object's
 /// nearest observed ancestor from the state tree.
 ///
 /// If no observed ancestor exists, children are emitted at the top level.
@@ -1172,7 +1172,7 @@ fn project_under_ancestor(
 }
 
 /// Emit `-kind qid` for each observed descendant of a non-observed destroyed
-/// node, deepest-first so the observer can cascade correctly.
+/// object, deepest-first so the observer can cascade correctly.
 fn emit_observed_descendant_destroys(
     state: &ObjectTree,
     id: &str,

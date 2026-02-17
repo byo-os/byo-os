@@ -22,7 +22,7 @@ use crate::process::ProcessId;
 pub use tree::PropValue;
 
 /// The orchestrator's object tree, keyed on [`QualifiedId`] with
-/// [`ProcessId`] as per-node data (the owning process).
+/// [`ProcessId`] as per-object data (the owning process).
 pub type ObjectTree = tree::ObjectTree<QualifiedId, ProcessId>;
 
 /// A single object in the orchestrator's tree.
@@ -64,8 +64,8 @@ pub fn project_tree(tree: &ObjectTree, observed_types: &HashSet<String>) -> Vec<
 
 /// Recursively project a subtree rooted at `qid`.
 ///
-/// If the node's type is observed, emit it as a `+kind qid props...`
-/// with any observed descendants as children. If the node's type is
+/// If the object's type is observed, emit it as a `+kind qid props...`
+/// with any observed descendants as children. If the object's type is
 /// NOT observed, skip it and recurse into its children (they attach
 /// to the parent context).
 fn project_subtree(
@@ -79,7 +79,7 @@ fn project_subtree(
     };
 
     if observed_types.contains(&obj.kind) {
-        // Emit this node.
+        // Emit this object.
         write_reduced_upsert(buf, obj);
 
         if has_observed_descendants(tree, qid, observed_types) {
@@ -90,7 +90,7 @@ fn project_subtree(
             buf.extend_from_slice(b"\n}");
         }
     } else {
-        // Skip this node, recurse into children.
+        // Skip this object, recurse into children.
         for child in &obj.children {
             project_subtree(tree, child, observed_types, buf);
         }

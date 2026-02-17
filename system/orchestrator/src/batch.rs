@@ -208,7 +208,7 @@ impl PendingBatch {
                     let qid_str = qualify(client, id);
                     if claims.contains_key(*kind) && *id != "_" {
                         // Claimed type: collect for cascade destroy by the router.
-                        // Don't emit — compositor doesn't have this node.
+                        // Don't emit — compositor doesn't have this object.
                         if let Some(qid) = QualifiedId::parse(&qid_str) {
                             claimed_destroys.push(qid);
                         }
@@ -568,7 +568,7 @@ mod tests {
         claims.insert("button".to_string(), pid(2));
 
         let (result, claimed_destroys) = batch.rewrite(&claims);
-        // Should produce empty output (compositor doesn't have this node).
+        // Should produce empty output (compositor doesn't have this object).
         assert!(result.is_empty());
         // Should have collected the QID.
         assert_eq!(claimed_destroys.len(), 1);
