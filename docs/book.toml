@@ -1,0 +1,12 @@
+[book]
+title = "BYO/OS Documentation"
+authors = ["BYO/OS Contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "build"
+
+[output.html]
+git-repository-url = "https://github.com/user/byo-os"
+edit-url-template = "https://github.com/user/byo-os/edit/main/docs/{path}"

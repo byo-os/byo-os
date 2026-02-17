@@ -8,6 +8,10 @@
 *.swo
 *~
 
+# mdbook output
+/docs/build/
+
 # OS
 .DS_Store
 Thumbs.db
+.playwright-mcp
