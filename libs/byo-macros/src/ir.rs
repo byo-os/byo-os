@@ -59,11 +59,13 @@ pub enum IrCommand {
         seq: IrValue,
         props: Vec<IrProp>,
     },
-    /// `?kind seq target props...`
+    /// `?kind seq target(s) props...`
+    /// Subscription commands use `targets` for one or more types.
+    /// Expand/other use a single target (ID).
     Request {
         kind: IrValue,
         seq: IrValue,
-        target: IrValue,
+        targets: Vec<IrValue>,
         props: Vec<IrProp>,
     },
     /// `.kind seq props... [{ children }]`

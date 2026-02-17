@@ -159,10 +159,7 @@ async fn reader_task(
         .await;
 }
 
-async fn writer_task(
-    mut stdin: tokio::process::ChildStdin,
-    mut rx: mpsc::Receiver<WriteMsg>,
-) {
+async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<WriteMsg>) {
     while let Some(msg) = rx.recv().await {
         let result = match msg {
             WriteMsg::Byo(payload) => {
@@ -174,8 +171,7 @@ async fn writer_task(
                 stdin.write_all(&frame).await
             }
             WriteMsg::Graphics(payload) => {
-                let mut frame =
-                    Vec::with_capacity(APC_START.len() + 1 + payload.len() + ST.len());
+                let mut frame = Vec::with_capacity(APC_START.len() + 1 + payload.len() + ST.len());
                 frame.extend_from_slice(APC_START);
                 frame.push(GRAPHICS_PROTOCOL_ID);
                 frame.extend_from_slice(&payload);

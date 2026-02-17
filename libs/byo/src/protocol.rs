@@ -158,11 +158,14 @@ pub enum Command<'a> {
         seq: u64,
         props: Vec<Prop<'a>>,
     },
-    /// `?kind seq target props...` — Request (sub, unsub, expand, custom).
+    /// `?kind seq target(s) props...` — Request (sub, unsub, expand, custom).
+    /// Subscription commands (claim, unclaim, observe, unobserve) use
+    /// `targets` for one or more type names. Expand/other use a single
+    /// target (ID).
     Request {
         kind: RequestKind<'a>,
         seq: u64,
-        target: &'a str,
+        targets: Vec<&'a str>,
         props: Vec<Prop<'a>>,
     },
     /// `.kind seq props... [{ body }]` — Response (expand, custom).

@@ -26,10 +26,11 @@ other_event = type seqnum id prop*
 # -- Requests --
 
 request      = '?' (claim_req | unclaim_req | observe_req | unobserve_req | other_req)
-claim_req    = 'claim' seqnum type
-unclaim_req  = 'unclaim' seqnum type
-observe_req  = 'observe' seqnum type
-unobserve_req = 'unobserve' seqnum type
+claim_req    = 'claim' seqnum types
+unclaim_req  = 'unclaim' seqnum types
+observe_req  = 'observe' seqnum types
+unobserve_req = 'unobserve' seqnum types
+types        = type (',' type)*
 other_req    = type seqnum id prop*
 
 # -- Responses --
@@ -50,7 +51,7 @@ dqchar     = [^"\\] | escape
 sqstring   = "'" sqchar* "'"
 sqchar     = [^'\\] | escape
 escape     = '\\' ["'\\/nrt0]
-bare       = [^\s{}="'~\\+\-@!?.] [^\s{}="'~\\]*
+bare       = [^\s{}="'~\\,+\-@!?.] [^\s{}="'~\\,]*
 
 # -- Atoms --
 

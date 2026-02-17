@@ -67,6 +67,8 @@ pub enum Token<'a> {
     Tilde,
     /// `=` — prop assignment
     Eq,
+    /// `,` — separator (multi-type subscriptions)
+    Comma,
     /// Bare word: type names, IDs, sequence numbers, unquoted values.
     Word(&'a str),
     /// Quoted string (decoded). Borrowed if no escapes, owned if escapes present.
@@ -263,6 +265,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
                 });
                 i += 1;
             }
+            b',' => {
+                tokens.push(Spanned {
+                    token: Token::Comma,
+                    span: Span { start, end: i + 1 },
+                });
+                i += 1;
+            }
             b'"' | b'\'' => {
                 let quote = bytes[i];
                 i += 1; // skip opening quote
@@ -361,7 +370,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
 /// are valid inside bare words (e.g. `notes-app:save`, `w-64`). They're
 /// only recognized as operators at token start via the main match arm.
 fn is_special_or_ws(b: u8) -> bool {
-    b.is_ascii_whitespace() || matches!(b, b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\')
+    b.is_ascii_whitespace() || matches!(b, b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\' | b',')
 }
 
 /// Decodes backslash escape sequences in a string slice.
@@ -416,7 +425,7 @@ mod tests {
     #[test]
     fn single_char_operators() {
         assert_eq!(
-            toks("+ - @ ! ? . { } ~ ="),
+            toks("+ - @ ! ? . { } ~ = ,"),
             vec![
                 Token::Plus,
                 Token::Minus,
@@ -428,6 +437,7 @@ mod tests {
                 Token::RBrace,
                 Token::Tilde,
                 Token::Eq,
+                Token::Comma,
             ]
         );
     }
@@ -640,6 +650,33 @@ mod tests {
             toks("-view item3"),
             vec![Token::Minus, Token::Word("view"), Token::Word("item3")]
         );
+    }
+
+    #[test]
+    fn comma_token() {
+        assert_eq!(
+            toks("view,text,layer"),
+            vec![
+                Token::Word("view"),
+                Token::Comma,
+                Token::Word("text"),
+                Token::Comma,
+                Token::Word("layer"),
+            ]
+        );
+    }
+
+    #[test]
+    fn comma_terminates_word() {
+        assert_eq!(
+            toks("view,text"),
+            vec![Token::Word("view"), Token::Comma, Token::Word("text")]
+        );
+    }
+
+    #[test]
+    fn comma_in_quoted_string() {
+        assert_eq!(toks("\"a,b\""), vec![Token::Str(Cow::Borrowed("a,b"))]);
     }
 
     #[test]

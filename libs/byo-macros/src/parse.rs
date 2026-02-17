@@ -590,7 +590,7 @@ impl Parser {
 
     /// Parse a request command after the `?` has been consumed.
     fn parse_request_command(&mut self) -> Result<IrCommand, String> {
-        // claim/unclaim/observe/unobserve: ?claim seq type, etc.
+        // claim/unclaim/observe/unobserve: ?claim seq type[,type,...], etc.
         if self.peek_keyword("claim")
             || self.peek_keyword("unclaim")
             || self.peek_keyword("observe")
@@ -599,11 +599,15 @@ impl Parser {
             let kind_str = self.expect_ident("expected request kind")?;
             let kind = IrValue::Literal(kind_str);
             let seq = self.parse_seq()?;
-            let target = self.parse_type()?;
+            let mut targets = vec![self.parse_type()?];
+            while self.peek_punct(',') {
+                self.pos += 1; // consume ','
+                targets.push(self.parse_type()?);
+            }
             return Ok(IrCommand::Request {
                 kind,
                 seq,
-                target,
+                targets,
                 props: Vec::new(),
             });
         }
@@ -619,7 +623,7 @@ impl Parser {
         Ok(IrCommand::Request {
             kind,
             seq,
-            target,
+            targets: vec![target],
             props,
         })
     }
@@ -798,12 +802,34 @@ mod tests {
         let input = quote! { ?claim 0 button ?unclaim 1 slider };
         let cmds = parse(input, false).unwrap();
         assert_eq!(cmds.len(), 2);
-        assert!(
-            matches!(&cmds[0], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "claim" && s == "0" && t == "button")
-        );
-        assert!(
-            matches!(&cmds[1], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "unclaim" && s == "1" && t == "slider")
-        );
+        match &cmds[0] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "claim");
+                assert_eq!(s, "0");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "button"));
+            }
+            _ => panic!("expected Claim request"),
+        }
+        match &cmds[1] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "unclaim");
+                assert_eq!(s, "1");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "slider"));
+            }
+            _ => panic!("expected Unclaim request"),
+        }
     }
 
     #[test]
@@ -811,12 +837,75 @@ mod tests {
         let input = quote! { ?observe 0 view ?unobserve 1 text };
         let cmds = parse(input, false).unwrap();
         assert_eq!(cmds.len(), 2);
-        assert!(
-            matches!(&cmds[0], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "observe" && s == "0" && t == "view")
-        );
-        assert!(
-            matches!(&cmds[1], IrCommand::Request { kind: IrValue::Literal(k), seq: IrValue::Literal(s), target: IrValue::Literal(t), .. } if k == "unobserve" && s == "1" && t == "text")
-        );
+        match &cmds[0] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "observe");
+                assert_eq!(s, "0");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "view"));
+            }
+            _ => panic!("expected Observe request"),
+        }
+        match &cmds[1] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                seq: IrValue::Literal(s),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "unobserve");
+                assert_eq!(s, "1");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "text"));
+            }
+            _ => panic!("expected Unobserve request"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_type_observe() {
+        let input = quote! { ?observe 0 view, text, layer };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "observe");
+                assert_eq!(targets.len(), 3);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "view"));
+                assert!(matches!(&targets[1], IrValue::Literal(t) if t == "text"));
+                assert!(matches!(&targets[2], IrValue::Literal(t) if t == "layer"));
+            }
+            _ => panic!("expected multi-type Observe"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_type_claim() {
+        let input = quote! { ?claim 0 button, slider };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Request {
+                kind: IrValue::Literal(k),
+                targets,
+                ..
+            } => {
+                assert_eq!(k, "claim");
+                assert_eq!(targets.len(), 2);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "button"));
+                assert!(matches!(&targets[1], IrValue::Literal(t) if t == "slider"));
+            }
+            _ => panic!("expected multi-type Claim"),
+        }
     }
 
     #[test]
@@ -828,12 +917,13 @@ mod tests {
             IrCommand::Request {
                 kind: IrValue::Literal(k),
                 seq: IrValue::Literal(s),
-                target: IrValue::Literal(t),
+                targets,
                 props,
             } => {
                 assert_eq!(k, "expand");
                 assert_eq!(s, "0");
-                assert_eq!(t, "save");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "save"));
                 assert_eq!(props.len(), 1);
             }
             _ => panic!("expected Request"),

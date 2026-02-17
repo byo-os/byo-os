@@ -57,7 +57,9 @@ impl QualifiedId {
     }
 
     fn colon_pos(&self) -> usize {
-        self.0.find(':').expect("QualifiedId invariant: contains ':'")
+        self.0
+            .find(':')
+            .expect("QualifiedId invariant: contains ':'")
     }
 }
 

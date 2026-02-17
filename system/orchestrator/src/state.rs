@@ -5,7 +5,8 @@
 //! a single `+` with the final props. This enables daemon crash recovery
 //! and late daemon startup replay.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 
 use indexmap::IndexMap;
 
@@ -28,10 +29,6 @@ pub struct ObjectState {
     pub children: Vec<QualifiedId>,
     pub parent: Option<QualifiedId>,
     pub owner: ProcessId,
-    /// If this object was produced by daemon expansion, the source object QID.
-    /// `None` for objects directly created by apps.
-    #[allow(dead_code)]
-    pub expanded_from: Option<QualifiedId>,
 }
 
 /// The full object tree maintained by the orchestrator.
@@ -58,7 +55,6 @@ impl ObjectTree {
             existing.kind = kind.to_owned();
             existing.props = props.clone();
             existing.owner = owner;
-            // Note: expanded_from is preserved on re-upsert
         } else {
             self.objects.insert(
                 qid.clone(),
@@ -69,7 +65,6 @@ impl ObjectTree {
                     children: Vec::new(),
                     parent: None,
                     owner,
-                    expanded_from: None,
                 },
             );
         }
@@ -77,12 +72,7 @@ impl ObjectTree {
 
     /// Patch (merge) props onto an existing object.
     /// `set` adds/updates props, `remove` removes props.
-    pub fn patch(
-        &mut self,
-        qid: &QualifiedId,
-        set: &IndexMap<String, PropValue>,
-        remove: &[&str],
-    ) {
+    pub fn patch(&mut self, qid: &QualifiedId, set: &IndexMap<String, PropValue>, remove: &[&str]) {
         if let Some(obj) = self.objects.get_mut(qid) {
             for (k, v) in set {
                 obj.props.insert(k.clone(), v.clone());
@@ -161,10 +151,7 @@ impl ObjectTree {
 
     /// Get all objects of a given type.
     pub fn objects_of_type(&self, kind: &str) -> Vec<&ObjectState> {
-        self.objects
-            .values()
-            .filter(|o| o.kind == kind)
-            .collect()
+        self.objects.values().filter(|o| o.kind == kind).collect()
     }
 
     /// Get an object by QID.
@@ -179,7 +166,6 @@ impl ObjectTree {
     pub fn reduced_command(&self, qid: &QualifiedId) -> Option<Vec<u8>> {
         let obj = self.objects.get(qid)?;
         let mut buf = Vec::new();
-        use std::io::Write;
         write!(buf, "+{} {}", obj.kind, obj.qid).unwrap();
         for (key, value) in &obj.props {
             match value {
@@ -195,52 +181,130 @@ impl ObjectTree {
         Some(buf)
     }
 
-    /// Set the `expanded_from` link on a node.
-    pub fn set_expanded_from(&mut self, qid: &QualifiedId, source: &QualifiedId) {
-        if let Some(obj) = self.objects.get_mut(qid) {
-            obj.expanded_from = Some(source.clone());
+    /// Collect info about all descendants (depth-first).
+    ///
+    /// Returns `(qid, kind, owner)` tuples for each descendant,
+    /// useful for notification before a destroy cascades.
+    pub fn descendants_info(&self, qid: &QualifiedId) -> Vec<(QualifiedId, String, ProcessId)> {
+        let mut result = Vec::new();
+        if let Some(obj) = self.objects.get(qid) {
+            for child in &obj.children {
+                if let Some(child_obj) = self.objects.get(child) {
+                    result.push((child.clone(), child_obj.kind.clone(), child_obj.owner));
+                }
+                result.extend(self.descendants_info(child));
+            }
+        }
+        result
+    }
+
+    /// Walk up parent links to find the nearest ancestor whose type is
+    /// in `observed_types`.
+    pub fn nearest_observed_ancestor(
+        &self,
+        qid: &QualifiedId,
+        observed_types: &HashSet<String>,
+    ) -> Option<QualifiedId> {
+        let obj = self.objects.get(qid)?;
+        let mut current = obj.parent.clone()?;
+        loop {
+            let ancestor = self.objects.get(&current)?;
+            if observed_types.contains(&ancestor.kind) {
+                return Some(current);
+            }
+            current = ancestor.parent.clone()?;
         }
     }
 
-    /// Find all nodes expanded from a source QID.
-    pub fn expansions_of(&self, source: &QualifiedId) -> Vec<&ObjectState> {
+    /// Project the full state tree for a set of observed types.
+    ///
+    /// Walks all root nodes (objects with no parent) top-down, emitting only
+    /// observed types. Non-observed nodes are skipped but their children are
+    /// recursed into, naturally re-parenting observed descendants under their
+    /// nearest observed ancestor via `@ancestor id { +child ... }`.
+    pub fn project_tree(&self, observed_types: &HashSet<String>) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Find all root nodes (no parent).
+        let mut roots: Vec<&QualifiedId> = self
+            .objects
+            .values()
+            .filter(|o| o.parent.is_none())
+            .map(|o| &o.qid)
+            .collect();
+        roots.sort_by_key(|a| a.to_string());
+
+        for root in roots {
+            self.project_subtree(root, observed_types, &mut buf);
+        }
+        buf
+    }
+
+    /// Recursively project a subtree rooted at `qid`.
+    ///
+    /// If the node's type is observed, emit it as a `+kind qid props...`
+    /// with any observed descendants as children. If the node's type is
+    /// NOT observed, skip it and recurse into its children (they attach
+    /// to the parent context).
+    fn project_subtree(
+        &self,
+        qid: &QualifiedId,
+        observed_types: &HashSet<String>,
+        buf: &mut Vec<u8>,
+    ) {
+        let Some(obj) = self.objects.get(qid) else {
+            return;
+        };
+
+        if observed_types.contains(&obj.kind) {
+            // Emit this node.
+            write_reduced_upsert(buf, obj);
+
+            if self.has_observed_descendants(qid, observed_types) {
+                buf.extend_from_slice(b" {");
+                for child in &obj.children {
+                    self.project_subtree(child, observed_types, buf);
+                }
+                buf.extend_from_slice(b"\n}");
+            }
+        } else {
+            // Skip this node, recurse into children.
+            for child in &obj.children {
+                self.project_subtree(child, observed_types, buf);
+            }
+        }
+    }
+
+    /// Returns true if `qid` has any descendants whose type is in `observed_types`.
+    fn has_observed_descendants(
+        &self,
+        qid: &QualifiedId,
+        observed_types: &HashSet<String>,
+    ) -> bool {
+        let Some(obj) = self.objects.get(qid) else {
+            return false;
+        };
+        for child in &obj.children {
+            if let Some(child_obj) = self.objects.get(child)
+                && observed_types.contains(&child_obj.kind)
+            {
+                return true;
+            }
+            if self.has_observed_descendants(child, observed_types) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get all root-level QIDs (objects with no parent).
+    #[allow(dead_code)]
+    pub fn roots(&self) -> Vec<&QualifiedId> {
         self.objects
             .values()
-            .filter(|o| o.expanded_from.as_ref() == Some(source))
+            .filter(|o| o.parent.is_none())
+            .map(|o| &o.qid)
             .collect()
-    }
-
-    /// Recursively destroy all expansion nodes for a source.
-    /// Follows the chain: if an expansion node is itself a source for
-    /// further expansions, those are destroyed too (arbitrary depth).
-    /// Returns (qid, kind, owner) tuples for notification.
-    pub fn cascade_destroy_expansions(
-        &mut self,
-        source: &QualifiedId,
-    ) -> Vec<(QualifiedId, String, ProcessId)> {
-        // Collect expansion QIDs first.
-        let expansion_qids: Vec<QualifiedId> = self
-            .expansions_of(source)
-            .iter()
-            .map(|o| o.qid.clone())
-            .collect();
-
-        let mut destroyed = Vec::new();
-
-        for qid in expansion_qids {
-            // Recurse: this expansion node may itself be a source.
-            destroyed.extend(self.cascade_destroy_expansions(&qid));
-
-            // Collect info before destroying.
-            if let Some(obj) = self.objects.get(&qid) {
-                destroyed.push((qid.clone(), obj.kind.clone(), obj.owner));
-            }
-
-            // Remove from tree.
-            self.destroy(&qid);
-        }
-
-        destroyed
     }
 
     /// Number of objects in the tree.
@@ -252,6 +316,22 @@ impl ObjectTree {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
+    }
+}
+
+/// Write a `+kind qid props...` for a reduced object state.
+fn write_reduced_upsert(buf: &mut Vec<u8>, obj: &ObjectState) {
+    let _ = write!(buf, "\n+{} {}", obj.kind, obj.qid);
+    for (key, value) in &obj.props {
+        match value {
+            PropValue::Str(s) => {
+                let _ = write!(buf, " {key}=");
+                write_quoted_value(buf, s);
+            }
+            PropValue::Flag => {
+                let _ = write!(buf, " {key}");
+            }
+        }
     }
 }
 
@@ -338,7 +418,12 @@ mod tests {
         let mut tree = ObjectTree::new();
         let id = qid("app", "sidebar");
 
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), pid(1));
+        tree.upsert(
+            "view",
+            &id,
+            &props(&[("class", "w-64"), ("order", "0")]),
+            pid(1),
+        );
         tree.upsert("view", &id, &props(&[("class", "w-32")]), pid(1));
 
         let obj = tree.get(&id).unwrap();
@@ -369,7 +454,12 @@ mod tests {
         let mut tree = ObjectTree::new();
         let id = qid("app", "sidebar");
 
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), pid(1));
+        tree.upsert(
+            "view",
+            &id,
+            &props(&[("class", "w-64"), ("order", "0")]),
+            pid(1),
+        );
         tree.patch(&id, &props(&[("order", "1")]), &[]);
 
         let obj = tree.get(&id).unwrap();
@@ -382,7 +472,12 @@ mod tests {
         let mut tree = ObjectTree::new();
         let id = qid("app", "sidebar");
 
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("tooltip", "hi")]), pid(1));
+        tree.upsert(
+            "view",
+            &id,
+            &props(&[("class", "w-64"), ("tooltip", "hi")]),
+            pid(1),
+        );
         tree.patch(&id, &IndexMap::new(), &["tooltip"]);
 
         let obj = tree.get(&id).unwrap();
@@ -481,7 +576,12 @@ mod tests {
     fn reduced_command_output() {
         let mut tree = ObjectTree::new();
         let id = qid("app", "sidebar");
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), pid(1));
+        tree.upsert(
+            "view",
+            &id,
+            &props(&[("class", "w-64"), ("order", "0")]),
+            pid(1),
+        );
 
         let bytes = tree.reduced_command(&id).unwrap();
         let s = String::from_utf8(bytes).unwrap();
@@ -548,108 +648,128 @@ mod tests {
         assert_eq!(p.children.len(), 1);
     }
 
-    #[test]
-    fn expanded_from_initialized_none() {
-        let mut tree = ObjectTree::new();
-        let id = qid("app", "sidebar");
-        tree.upsert("view", &id, &IndexMap::new(), pid(1));
-        assert!(tree.get(&id).unwrap().expanded_from.is_none());
+    fn types(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn set_expanded_from_links_correctly() {
+    fn project_all_observed() {
         let mut tree = ObjectTree::new();
-        let source = qid("app", "save");
-        let expansion = qid("controls", "save-root");
-        tree.upsert("button", &source, &IndexMap::new(), pid(1));
-        tree.upsert("view", &expansion, &IndexMap::new(), pid(2));
-        tree.set_expanded_from(&expansion, &source);
+        tree.upsert(
+            "view",
+            &qid("app", "root"),
+            &props(&[("class", "w-64")]),
+            pid(1),
+        );
+        tree.upsert(
+            "text",
+            &qid("app", "label"),
+            &props(&[("content", "Hi")]),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "label"), &qid("app", "root"));
 
-        let obj = tree.get(&expansion).unwrap();
-        assert_eq!(obj.expanded_from, Some(source));
+        let observed = types(&["view", "text"]);
+        let result = tree.project_tree(&observed);
+        let s = String::from_utf8(result).unwrap();
+        assert!(s.contains("+view app:root"));
+        assert!(s.contains("+text app:label"));
+        assert!(s.contains("{"));
+        assert!(s.contains("}"));
     }
 
     #[test]
-    fn expansions_of_returns_correct_set() {
+    fn project_skip_intermediate() {
+        // view → button → text
+        // Observe view + text, skip button
         let mut tree = ObjectTree::new();
-        let source = qid("app", "save");
-        let exp1 = qid("controls", "save-root");
-        let exp2 = qid("controls", "save-label");
-        let other = qid("app", "footer");
+        tree.upsert("view", &qid("app", "root"), &IndexMap::new(), pid(1));
+        tree.upsert("button", &qid("app", "btn"), &IndexMap::new(), pid(1));
+        tree.upsert("text", &qid("app", "label"), &IndexMap::new(), pid(1));
+        tree.set_parent(&qid("app", "btn"), &qid("app", "root"));
+        tree.set_parent(&qid("app", "label"), &qid("app", "btn"));
 
-        tree.upsert("button", &source, &IndexMap::new(), pid(1));
-        tree.upsert("view", &exp1, &IndexMap::new(), pid(2));
-        tree.upsert("text", &exp2, &IndexMap::new(), pid(2));
-        tree.upsert("view", &other, &IndexMap::new(), pid(1));
-
-        tree.set_expanded_from(&exp1, &source);
-        tree.set_expanded_from(&exp2, &source);
-
-        let expansions = tree.expansions_of(&source);
-        assert_eq!(expansions.len(), 2);
-        let qids: Vec<_> = expansions.iter().map(|o| &o.qid).collect();
-        assert!(qids.contains(&&exp1));
-        assert!(qids.contains(&&exp2));
+        let observed = types(&["view", "text"]);
+        let result = tree.project_tree(&observed);
+        let s = String::from_utf8(result).unwrap();
+        // text should be re-parented under view
+        assert!(s.contains("+view app:root"));
+        assert!(s.contains("+text app:label"));
+        assert!(!s.contains("button"));
     }
 
     #[test]
-    fn cascade_destroy_expansions_simple() {
+    fn project_no_observed_root() {
+        // button → text (only text observed)
         let mut tree = ObjectTree::new();
-        let source = qid("app", "save");
-        let exp1 = qid("controls", "save-root");
-        let exp2 = qid("controls", "save-label");
+        tree.upsert("button", &qid("app", "btn"), &IndexMap::new(), pid(1));
+        tree.upsert("text", &qid("app", "label"), &IndexMap::new(), pid(1));
+        tree.set_parent(&qid("app", "label"), &qid("app", "btn"));
 
-        tree.upsert("button", &source, &IndexMap::new(), pid(1));
-        tree.upsert("view", &exp1, &IndexMap::new(), pid(2));
-        tree.upsert("text", &exp2, &IndexMap::new(), pid(2));
-        tree.set_expanded_from(&exp1, &source);
-        tree.set_expanded_from(&exp2, &source);
-
-        let destroyed = tree.cascade_destroy_expansions(&source);
-        assert_eq!(destroyed.len(), 2);
-        // Source still exists.
-        assert!(tree.get(&source).is_some());
-        // Expansion nodes removed.
-        assert!(tree.get(&exp1).is_none());
-        assert!(tree.get(&exp2).is_none());
+        let observed = types(&["text"]);
+        let result = tree.project_tree(&observed);
+        let s = String::from_utf8(result).unwrap();
+        assert!(s.contains("+text app:label"));
+        assert!(!s.contains("button"));
     }
 
     #[test]
-    fn cascade_destroy_expansions_nested() {
+    fn project_empty_filter() {
         let mut tree = ObjectTree::new();
-        let source = qid("app", "save");
-        let exp1 = qid("controls", "save-root");
-        // exp1 is itself a source for further expansion
-        let exp2 = qid("text", "save-text");
+        tree.upsert("view", &qid("app", "root"), &IndexMap::new(), pid(1));
 
-        tree.upsert("button", &source, &IndexMap::new(), pid(1));
-        tree.upsert("view", &exp1, &IndexMap::new(), pid(2));
-        tree.upsert("text", &exp2, &IndexMap::new(), pid(3));
-        tree.set_expanded_from(&exp1, &source);
-        tree.set_expanded_from(&exp2, &exp1);
-
-        let destroyed = tree.cascade_destroy_expansions(&source);
-        // Should destroy both: exp2 (nested) and exp1
-        assert_eq!(destroyed.len(), 2);
-        assert!(tree.get(&exp1).is_none());
-        assert!(tree.get(&exp2).is_none());
-        assert!(tree.get(&source).is_some());
+        let observed: HashSet<String> = HashSet::new();
+        let result = tree.project_tree(&observed);
+        assert!(result.is_empty());
     }
 
     #[test]
-    fn cascade_destroy_returns_correct_owners() {
+    fn nearest_observed_ancestor_found() {
         let mut tree = ObjectTree::new();
-        let source = qid("app", "save");
-        let exp1 = qid("controls", "save-root");
+        tree.upsert("view", &qid("app", "root"), &IndexMap::new(), pid(1));
+        tree.upsert("button", &qid("app", "btn"), &IndexMap::new(), pid(1));
+        tree.upsert("text", &qid("app", "label"), &IndexMap::new(), pid(1));
+        tree.set_parent(&qid("app", "btn"), &qid("app", "root"));
+        tree.set_parent(&qid("app", "label"), &qid("app", "btn"));
 
-        tree.upsert("button", &source, &IndexMap::new(), pid(1));
-        tree.upsert("view", &exp1, &IndexMap::new(), pid(2));
-        tree.set_expanded_from(&exp1, &source);
+        let observed = types(&["view"]);
+        let ancestor = tree.nearest_observed_ancestor(&qid("app", "label"), &observed);
+        assert_eq!(ancestor, Some(qid("app", "root")));
+    }
 
-        let destroyed = tree.cascade_destroy_expansions(&source);
-        assert_eq!(destroyed.len(), 1);
-        assert_eq!(destroyed[0].0, exp1);
-        assert_eq!(destroyed[0].1, "view");
-        assert_eq!(destroyed[0].2, pid(2));
+    #[test]
+    fn nearest_observed_ancestor_not_found() {
+        let mut tree = ObjectTree::new();
+        tree.upsert("button", &qid("app", "btn"), &IndexMap::new(), pid(1));
+        tree.upsert("text", &qid("app", "label"), &IndexMap::new(), pid(1));
+        tree.set_parent(&qid("app", "label"), &qid("app", "btn"));
+
+        let observed = types(&["view"]);
+        let ancestor = tree.nearest_observed_ancestor(&qid("app", "label"), &observed);
+        assert_eq!(ancestor, None);
+    }
+
+    #[test]
+    fn descendants_info_collects_all() {
+        let mut tree = ObjectTree::new();
+        let root = qid("app", "save");
+        let child = qid("controls", "save-root");
+        let grandchild = qid("controls", "save-label");
+
+        tree.upsert("button", &root, &IndexMap::new(), pid(1));
+        tree.upsert("view", &child, &IndexMap::new(), pid(2));
+        tree.upsert("text", &grandchild, &IndexMap::new(), pid(2));
+        tree.set_parent(&child, &root);
+        tree.set_parent(&grandchild, &child);
+
+        let info = tree.descendants_info(&root);
+        assert_eq!(info.len(), 2);
+        // Direct child first, then grandchild.
+        assert_eq!(info[0].0, child);
+        assert_eq!(info[0].1, "view");
+        assert_eq!(info[0].2, pid(2));
+        assert_eq!(info[1].0, grandchild);
+        assert_eq!(info[1].1, "text");
+        assert_eq!(info[1].2, pid(2));
     }
 }

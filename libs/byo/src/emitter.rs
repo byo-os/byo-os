@@ -19,6 +19,7 @@ fn is_bare(value: &str) -> bool {
                 && b != b'\''
                 && b != b'~'
                 && b != b'\\'
+                && b != b','
         })
 }
 
@@ -111,6 +112,44 @@ impl<W: io::Write> Emitter<W> {
     /// Consumes the emitter and returns the inner writer.
     pub fn into_inner(self) -> W {
         self.writer
+    }
+
+    /// Write pre-serialized BYO command bytes verbatim.
+    ///
+    /// Use this to splice a previously-built buffer into the output stream.
+    /// Intended for use inside `_with` closures to inject pre-computed
+    /// children, e.g.:
+    ///
+    /// ```
+    /// # use byo::emitter::Emitter;
+    /// # let mut buf = Vec::new();
+    /// # let mut em = Emitter::new(&mut buf);
+    /// // Build children into a buffer first...
+    /// let child_buf = b"\n+view child class=inner";
+    ///
+    /// // ...then splice via raw() inside a _with closure:
+    /// em.upsert_with("view", "root", &[], |em| em.raw(child_buf)).unwrap();
+    /// # let out = String::from_utf8(buf).unwrap();
+    /// # assert!(out.contains("+view root"));
+    /// # assert!(out.contains("{"));
+    /// # assert!(out.contains("+view child"));
+    /// # assert!(out.contains("}"));
+    /// ```
+    ///
+    /// In debug builds, the bytes are parsed and validated to catch
+    /// malformed content early. In release builds, they are written
+    /// verbatim with no overhead.
+    pub fn raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(debug_assertions)]
+        {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                debug_assert!(
+                    crate::parser::parse(s).is_ok(),
+                    "raw() received invalid BYO payload: {s:?}"
+                );
+            }
+        }
+        self.writer.write_all(bytes)
     }
 
     // -- Batch framing -------------------------------------------------------
@@ -241,9 +280,33 @@ impl<W: io::Write> Emitter<W> {
         write!(self.writer, "\n?claim {seq} {target_type}")
     }
 
+    /// `?claim seq type,type,...` — Claim multiple types (fire-and-forget).
+    pub fn claim_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n?claim {seq} ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
     /// `?unclaim seq type` — Release claim on an object type (fire-and-forget).
     pub fn unclaim(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
         write!(self.writer, "\n?unclaim {seq} {target_type}")
+    }
+
+    /// `?unclaim seq type,type,...` — Release claim on multiple types (fire-and-forget).
+    pub fn unclaim_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n?unclaim {seq} ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
     }
 
     /// `?observe seq type` — Observe final output for an object type (fire-and-forget).
@@ -251,9 +314,33 @@ impl<W: io::Write> Emitter<W> {
         write!(self.writer, "\n?observe {seq} {target_type}")
     }
 
+    /// `?observe seq type,type,...` — Observe multiple types (fire-and-forget).
+    pub fn observe_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n?observe {seq} ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
     /// `?unobserve seq type` — Stop observing an object type (fire-and-forget).
     pub fn unobserve(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
         write!(self.writer, "\n?unobserve {seq} {target_type}")
+    }
+
+    /// `?unobserve seq type,type,...` — Stop observing multiple types (fire-and-forget).
+    pub fn unobserve_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n?unobserve {seq} ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
     }
 
     /// `?expand seq id props...` — Request daemon expansion.
@@ -366,11 +453,31 @@ impl<W: io::Write> Emitter<W> {
                 Command::Request {
                     kind,
                     seq,
-                    target,
+                    targets,
                     props,
                 } => {
-                    write!(self.writer, "\n?{} {seq} {target}", kind.as_str())?;
-                    write_props(&mut self.writer, props)?;
+                    write!(self.writer, "\n?{} {seq}", kind.as_str())?;
+                    match kind {
+                        crate::protocol::RequestKind::Claim
+                        | crate::protocol::RequestKind::Unclaim
+                        | crate::protocol::RequestKind::Observe
+                        | crate::protocol::RequestKind::Unobserve => {
+                            for (i, t) in targets.iter().enumerate() {
+                                if i > 0 {
+                                    write!(self.writer, ",")?;
+                                } else {
+                                    write!(self.writer, " ")?;
+                                }
+                                write!(self.writer, "{t}")?;
+                            }
+                        }
+                        _ => {
+                            if let Some(target) = targets.first() {
+                                write!(self.writer, " {target}")?;
+                            }
+                            write_props(&mut self.writer, props)?;
+                        }
+                    }
                 }
                 Command::Response {
                     kind,
@@ -553,13 +660,8 @@ mod tests {
 
     #[test]
     fn expand_request() {
-        let out = emit(|em| {
-            em.expand(0, "notes-app:save", &[Prop::val("kind", "button")])
-        });
-        assert_eq!(
-            out,
-            "\x1b_B\n?expand 0 notes-app:save kind=button\n\x1b\\"
-        );
+        let out = emit(|em| em.expand(0, "notes-app:save", &[Prop::val("kind", "button")]));
+        assert_eq!(out, "\x1b_B\n?expand 0 notes-app:save kind=button\n\x1b\\");
     }
 
     #[test]
@@ -578,19 +680,13 @@ mod tests {
     #[test]
     fn generic_request() {
         let out = emit(|em| em.request("render-frame", 0, "viewport", &[]));
-        assert_eq!(
-            out,
-            "\x1b_B\n?render-frame 0 viewport\n\x1b\\"
-        );
+        assert_eq!(out, "\x1b_B\n?render-frame 0 viewport\n\x1b\\");
     }
 
     #[test]
     fn generic_response_no_body() {
         let out = emit(|em| em.response("render-frame", 0, &[Prop::val("status", "ok")]));
-        assert_eq!(
-            out,
-            "\x1b_B\n.render-frame 0 status=ok\n\x1b\\"
-        );
+        assert_eq!(out, "\x1b_B\n.render-frame 0 status=ok\n\x1b\\");
     }
 
     #[test]
@@ -757,10 +853,7 @@ mod tests {
     fn response_kind_as_str() {
         use crate::protocol::ResponseKind;
         assert_eq!(ResponseKind::Expand.as_str(), "expand");
-        assert_eq!(
-            ResponseKind::Other("render-frame").as_str(),
-            "render-frame"
-        );
+        assert_eq!(ResponseKind::Other("render-frame").as_str(), "render-frame");
     }
 
     #[test]
@@ -810,5 +903,48 @@ mod tests {
     fn commands_empty() {
         let out = emit(|em| em.commands(&[]));
         assert_eq!(out, "\x1b_B\n\x1b\\");
+    }
+
+    #[test]
+    fn observe_many_output() {
+        let out = emit(|em| em.observe_many(0, &["view", "text", "layer"]));
+        assert_eq!(out, "\x1b_B\n?observe 0 view,text,layer\n\x1b\\");
+    }
+
+    #[test]
+    fn claim_many_output() {
+        let out = emit(|em| em.claim_many(0, &["button", "slider"]));
+        assert_eq!(out, "\x1b_B\n?claim 0 button,slider\n\x1b\\");
+    }
+
+    #[test]
+    fn commands_round_trip_multi_type() {
+        use crate::parser::parse;
+
+        let cmds = parse("?observe 0 view,text,layer").unwrap();
+        let out = emit(|em| em.commands(&cmds));
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds2 = parse(payload).unwrap();
+        assert_eq!(cmds.len(), cmds2.len());
+        match &cmds2[0] {
+            Command::Request {
+                kind: crate::protocol::RequestKind::Observe,
+                targets,
+                ..
+            } => assert_eq!(targets, &["view", "text", "layer"]),
+            _ => panic!("expected Observe"),
+        }
+    }
+
+    #[test]
+    fn value_with_comma_quoted() {
+        let out = emit(|em| em.upsert("view", "x", &[Prop::val("data", "a,b")]));
+        assert_eq!(out, "\x1b_B\n+view x data=\"a,b\"\n\x1b\\");
     }
 }

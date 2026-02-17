@@ -246,11 +246,21 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             "claim" | "unclaim" | "observe" | "unobserve" => {
                 let kind = RequestKind::from_wire(word);
                 let seq = self.expect_seqnum()?;
-                let target = self.expect_type()?;
+                let mut targets = vec![self.expect_type()?];
+                while matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::Comma,
+                        ..
+                    })
+                ) {
+                    self.advance(); // consume comma
+                    targets.push(self.expect_type()?);
+                }
                 cmds.push(Command::Request {
                     kind,
                     seq,
-                    target,
+                    targets,
                     props: Vec::new(),
                 });
                 Ok(())
@@ -263,7 +273,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 cmds.push(Command::Request {
                     kind,
                     seq,
-                    target: id,
+                    targets: vec![id],
                     props,
                 });
                 Ok(())
@@ -305,11 +315,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 ) {
                     let mut body = Vec::new();
                     self.parse_children(&mut body)?;
-                    if body.is_empty() {
-                        None
-                    } else {
-                        Some(body)
-                    }
+                    if body.is_empty() { None } else { Some(body) }
                 } else {
                     None
                 };
@@ -325,10 +331,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     }
 
     /// Parse a mandatory children block (used by `.expand`).
-    fn parse_mandatory_children(
-        &mut self,
-        cmds: &mut Vec<Command<'a>>,
-    ) -> Result<(), ParseError> {
+    fn parse_mandatory_children(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
         match self.peek() {
             Some(Spanned {
                 token: Token::LBrace,
@@ -648,6 +651,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             Token::RBrace => "'}'".into(),
             Token::Tilde => "'~'".into(),
             Token::Eq => "'='".into(),
+            Token::Comma => "','".into(),
             Token::Word(w) => format!("word {w:?}"),
             Token::Str(s) => format!("string {s:?}"),
         }
@@ -920,57 +924,102 @@ mod tests {
     #[test]
     fn claim() {
         let cmds = parse("?claim 0 button").unwrap();
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Claim,
                 seq: 0,
-                target: "button",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["button"]),
+            _ => panic!("expected Claim request"),
+        }
     }
 
     #[test]
     fn unclaim() {
         let cmds = parse("?unclaim 2 checkbox").unwrap();
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Unclaim,
                 seq: 2,
-                target: "checkbox",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["checkbox"]),
+            _ => panic!("expected Unclaim request"),
+        }
     }
 
     #[test]
     fn observe() {
         let cmds = parse("?observe 0 view").unwrap();
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Observe,
                 seq: 0,
-                target: "view",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["view"]),
+            _ => panic!("expected Observe request"),
+        }
     }
 
     #[test]
     fn unobserve() {
         let cmds = parse("?unobserve 1 text").unwrap();
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Unobserve,
                 seq: 1,
-                target: "text",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["text"]),
+            _ => panic!("expected Unobserve request"),
+        }
+    }
+
+    #[test]
+    fn multi_type_observe() {
+        let cmds = parse("?observe 0 view,text,layer").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Request {
+                kind: RequestKind::Observe,
+                seq: 0,
+                targets,
+                ..
+            } => assert_eq!(targets, &["view", "text", "layer"]),
+            _ => panic!("expected multi-type Observe"),
+        }
+    }
+
+    #[test]
+    fn multi_type_observe_spaces() {
+        let cmds = parse("?observe 0 view, text, layer").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Request {
+                kind: RequestKind::Observe,
+                seq: 0,
+                targets,
+                ..
+            } => assert_eq!(targets, &["view", "text", "layer"]),
+            _ => panic!("expected multi-type Observe with spaces"),
+        }
+    }
+
+    #[test]
+    fn multi_type_claim() {
+        let cmds = parse("?claim 0 button,slider,checkbox").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Request {
+                kind: RequestKind::Claim,
+                seq: 0,
+                targets,
+                ..
+            } => assert_eq!(targets, &["button", "slider", "checkbox"]),
+            _ => panic!("expected multi-type Claim"),
+        }
     }
 
     #[test]
@@ -980,12 +1029,12 @@ mod tests {
             Command::Request {
                 kind,
                 seq,
-                target,
+                targets,
                 props,
             } => {
                 assert_eq!(*kind, RequestKind::Expand);
                 assert_eq!(*seq, 0);
-                assert_eq!(*target, "notes-app:save");
+                assert_eq!(targets, &["notes-app:save"]);
                 assert_eq!(props[0], Prop::val("kind", "button"));
                 assert_eq!(props[1], Prop::val("label", "Save"));
             }
@@ -1000,12 +1049,12 @@ mod tests {
             Command::Request {
                 kind,
                 seq,
-                target,
+                targets,
                 props,
             } => {
                 assert_eq!(*kind, RequestKind::Other("render-frame"));
                 assert_eq!(*seq, 0);
-                assert_eq!(*target, "viewport");
+                assert_eq!(targets, &["viewport"]);
                 assert!(props.is_empty());
             }
             _ => panic!("expected Request"),
@@ -1067,15 +1116,15 @@ mod tests {
     fn sub_parses_as_other_request() {
         // ?sub is no longer a keyword — parses as Other("sub") via generic path
         let cmds = parse("?sub 0 button").unwrap();
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Other("sub"),
                 seq: 0,
-                target: "button",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["button"]),
+            _ => panic!("expected Other(sub) request"),
+        }
     }
 
     // -- Multi-command batches ------------------------------------------------
@@ -1093,33 +1142,33 @@ mod tests {
     fn mixed_batch() {
         let cmds = parse("?claim 0 button ?claim 1 slider ?claim 2 checkbox").unwrap();
         assert_eq!(cmds.len(), 3);
-        assert!(matches!(
-            &cmds[0],
+        match &cmds[0] {
             Command::Request {
                 kind: RequestKind::Claim,
                 seq: 0,
-                target: "button",
+                targets,
                 ..
-            }
-        ));
-        assert!(matches!(
-            &cmds[1],
+            } => assert_eq!(targets, &["button"]),
+            _ => panic!("expected Claim"),
+        }
+        match &cmds[1] {
             Command::Request {
                 kind: RequestKind::Claim,
                 seq: 1,
-                target: "slider",
+                targets,
                 ..
-            }
-        ));
-        assert!(matches!(
-            &cmds[2],
+            } => assert_eq!(targets, &["slider"]),
+            _ => panic!("expected Claim"),
+        }
+        match &cmds[2] {
             Command::Request {
                 kind: RequestKind::Claim,
                 seq: 2,
-                target: "checkbox",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["checkbox"]),
+            _ => panic!("expected Claim"),
+        }
     }
 
     #[test]
@@ -1415,24 +1464,24 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(
-            &cmds[2],
+        match &cmds[2] {
             Command::Request {
                 kind: RequestKind::Claim,
                 seq: 0,
-                target: "button",
+                targets,
                 ..
-            }
-        ));
-        assert!(matches!(
-            &cmds[3],
+            } => assert_eq!(targets, &["button"]),
+            _ => panic!("expected Claim"),
+        }
+        match &cmds[3] {
             Command::Request {
                 kind: RequestKind::Unclaim,
                 seq: 1,
-                target: "slider",
+                targets,
                 ..
-            }
-        ));
+            } => assert_eq!(targets, &["slider"]),
+            _ => panic!("expected Unclaim"),
+        }
     }
 
     #[test]

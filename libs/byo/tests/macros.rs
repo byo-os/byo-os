@@ -170,9 +170,7 @@ fn observe_unobserve() {
 
 #[test]
 fn request_expand() {
-    let out = emit(|em| {
-        byo_write!(em, ?expand 0 save kind=button label="Save")
-    });
+    let out = emit(|em| byo_write!(em, ?expand 0 save kind=button label="Save"));
     let p = payload(&out);
     assert!(p.contains("?expand 0 save kind=button label=Save"));
 }
@@ -196,18 +194,14 @@ fn response_expand() {
 
 #[test]
 fn generic_request() {
-    let out = emit(|em| {
-        byo_write!(em, ?"render-frame" 0 viewport)
-    });
+    let out = emit(|em| byo_write!(em, ?"render-frame" 0 viewport));
     let p = payload(&out);
     assert!(p.contains("?render-frame 0 viewport"));
 }
 
 #[test]
 fn generic_response_no_body() {
-    let out = emit(|em| {
-        byo_write!(em, ."render-frame" 0 status=ok)
-    });
+    let out = emit(|em| byo_write!(em, ."render-frame" 0 status=ok));
     let p = payload(&out);
     assert!(p.contains(".render-frame 0 status=ok"));
 }

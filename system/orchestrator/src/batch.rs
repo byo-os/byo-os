@@ -60,12 +60,7 @@ impl PendingBatch {
     }
 
     /// Register a re-expansion request (patch on claimed type).
-    pub fn add_pending_re_expand(
-        &mut self,
-        subscriber: ProcessId,
-        seq: u64,
-        qid: QualifiedId,
-    ) {
+    pub fn add_pending_re_expand(&mut self, subscriber: ProcessId, seq: u64, qid: QualifiedId) {
         self.pending_expands.push(PendingExpand {
             subscriber,
             seq,
@@ -113,10 +108,7 @@ impl PendingBatch {
     /// The `claims` map tells us which types are daemon-claimed.
     /// Rewrite result: the rewritten payload bytes plus any claimed-type
     /// destroys that need cascade handling by the router.
-    pub fn rewrite(
-        &self,
-        claims: &HashMap<String, ProcessId>,
-    ) -> (Vec<u8>, Vec<QualifiedId>) {
+    pub fn rewrite(&self, claims: &HashMap<String, ProcessId>) -> (Vec<u8>, Vec<QualifiedId>) {
         let payload_str = match std::str::from_utf8(&self.raw) {
             Ok(s) => s,
             Err(_) => return (self.raw.clone(), Vec::new()),
@@ -195,13 +187,7 @@ impl PendingBatch {
                             && let Ok(exp_cmds) = byo::parser::parse(exp_str)
                         {
                             // Empty client: expansion IDs are already qualified.
-                            self.rewrite_commands(
-                                &exp_cmds,
-                                "",
-                                claims,
-                                buf,
-                                claimed_destroys,
-                            );
+                            self.rewrite_commands(&exp_cmds, "", claims, buf, claimed_destroys);
                         } else {
                             // Fallback: splice raw bytes.
                             buf.extend_from_slice(b"\n");
@@ -456,8 +442,7 @@ mod tests {
 
     #[test]
     fn pending_batch_matches_by_subscriber_seq() {
-        let mut batch =
-            PendingBatch::new(pid(1), "app".into(), b"+button a +slider b".to_vec());
+        let mut batch = PendingBatch::new(pid(1), "app".into(), b"+button a +slider b".to_vec());
         batch.add_pending_expand(pid(2), 0, qid("app", "a"), 0);
         batch.add_pending_expand(pid(3), 0, qid("app", "b"), 0);
         assert!(!batch.is_ready());
@@ -474,8 +459,7 @@ mod tests {
 
     #[test]
     fn complete_expand_wrong_seq_returns_none() {
-        let mut batch =
-            PendingBatch::new(pid(1), "app".into(), b"+button save".to_vec());
+        let mut batch = PendingBatch::new(pid(1), "app".into(), b"+button save".to_vec());
         batch.add_pending_expand(pid(2), 5, qid("app", "save"), 0);
         assert!(batch.complete_expand(pid(2), 99).is_none());
         assert!(!batch.is_ready());
@@ -554,8 +538,7 @@ mod tests {
 
     #[test]
     fn qualify_and_serialize_nested() {
-        let commands =
-            byo::parser::parse("+view root { +text label content=Hello }").unwrap();
+        let commands = byo::parser::parse("+view root { +text label content=Hello }").unwrap();
         let result = qualify_and_serialize(&commands, "controls");
         let s = String::from_utf8(result).unwrap();
         assert!(s.contains("+view controls:root"));
@@ -632,11 +615,7 @@ mod tests {
     #[test]
     fn rewrite_claimed_destroy_collected() {
         // App sends `-button save` — should be collected as claimed destroy.
-        let batch = PendingBatch::new(
-            pid(1),
-            "app".into(),
-            b"-button save".to_vec(),
-        );
+        let batch = PendingBatch::new(pid(1), "app".into(), b"-button save".to_vec());
 
         let mut claims = HashMap::new();
         claims.insert("button".to_string(), pid(2));
@@ -653,11 +632,7 @@ mod tests {
     #[test]
     fn rewrite_native_destroy_emitted() {
         // App sends `-view sidebar` — native type, should be emitted.
-        let batch = PendingBatch::new(
-            pid(1),
-            "app".into(),
-            b"-view sidebar".to_vec(),
-        );
+        let batch = PendingBatch::new(pid(1), "app".into(), b"-view sidebar".to_vec());
 
         let claims = HashMap::new();
         let (result, claimed_destroys) = batch.rewrite(&claims);
