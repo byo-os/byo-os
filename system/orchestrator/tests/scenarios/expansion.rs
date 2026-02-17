@@ -1,3 +1,4 @@
+use byo::byo_assert_eq;
 use byo::protocol::{Command, Prop, RequestKind};
 
 use crate::{assert_no_message, mock_process, pid, recv_byo_raw, send_byo, try_recv_byo};
@@ -69,26 +70,7 @@ async fn basic_expansion() {
         "controls should have received ?expand, but channel is empty"
     );
     let expand_msg = expand_msg_opt.unwrap();
-    // The ?expand message uses a direct format from the router:
-    // `\n?expand SEQ QID kind=TYPE props...`
-    // This raw format might not parse cleanly with the BYO parser, so
-    // verify content via string assertions.
-    assert!(
-        expand_msg.contains("?expand"),
-        "expected ?expand in message, got: {expand_msg}"
-    );
-    assert!(
-        expand_msg.contains("app:save"),
-        "expected qualified ID app:save, got: {expand_msg}"
-    );
-    assert!(
-        expand_msg.contains("kind=button"),
-        "expected kind=button, got: {expand_msg}"
-    );
-    assert!(
-        expand_msg.contains("label=Save") || expand_msg.contains("label=\"Save\""),
-        "expected label=Save, got: {expand_msg}"
-    );
+    byo_assert_eq!(expand_msg, ?expand 0 app:save kind=button label="Save");
 
     // Step 5: Controls responds with expansion.
     send_byo(
@@ -226,12 +208,6 @@ async fn expansion_with_native_siblings() {
         "expected +view app:child3, got: {s}"
     );
     assert!(matches!(&cmds[5], Command::Pop));
-
-    // No +button should appear anywhere.
-    assert!(
-        !s.contains("+button"),
-        "button should not appear in output: {s}"
-    );
 }
 
 /// Test 11: Expansion blocks subsequent output from the same app.
@@ -372,22 +348,9 @@ async fn multiple_expansions_one_batch() {
 
     // Now compositor should receive the full rewritten batch.
     let s = recv_byo_raw(&mut compositor_rx);
-    let cmds = byo::parser::parse(&s).unwrap();
-
-    // Both buttons should be replaced by their expansions.
-    assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Command::Upsert { id, .. } if *id == "controls:save-root")),
-        "expected controls:save-root in output: {s}"
-    );
-    assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Command::Upsert { id, .. } if *id == "controls:cancel-root")),
-        "expected controls:cancel-root in output: {s}"
-    );
-    assert!(
-        !s.contains("+button"),
-        "button should not appear in output: {s}"
+    byo_assert_eq!(s,
+        +view controls:save-root class="btn-save"
+        +view controls:cancel-root class="btn-cancel"
     );
 }
 

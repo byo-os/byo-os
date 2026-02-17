@@ -39,36 +39,10 @@ async fn late_claim_replays() {
 
     // Step 4: Router should replay reduced state as `?expand` to controls.
     // The replay format from handle_claim is the reduced command with `+`
-    // stripped, embedded after `?expand SEQ`. We verify the raw content
-    // because the qualified ID (app:save) appears in a position that's
-    // specific to the replay format.
+    // stripped, embedded after `?expand SEQ`:
+    //   `\n?expand SEQ type qid props...`
     let s = recv_byo_raw(&mut controls_rx);
-
-    // Should contain the ?expand keyword.
-    assert!(
-        s.contains("?expand"),
-        "expected ?expand in replay, got: {s}"
-    );
-    // Should contain seq 0 (first expand for this subscriber).
-    assert!(
-        s.contains("?expand 0"),
-        "expected ?expand 0 in replay, got: {s}"
-    );
-    // Should contain the object type.
-    assert!(
-        s.contains("button"),
-        "expected 'button' type in replay, got: {s}"
-    );
-    // Should contain the qualified ID.
-    assert!(
-        s.contains("app:save"),
-        "expected qualified ID 'app:save' in replay, got: {s}"
-    );
-    // Should contain the prop from the original upsert.
-    assert!(
-        s.contains("label=Save") || s.contains("label=\"Save\""),
-        "expected label=Save prop in replay, got: {s}"
-    );
+    assert_eq!(s, "\n?expand 0 button app:save label=Save");
 
     // No further messages.
     assert_no_message(&mut controls_rx);

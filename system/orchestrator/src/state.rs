@@ -375,6 +375,7 @@ fn write_quoted_value(buf: &mut Vec<u8>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use byo::assert::assert_eq_bytes;
 
     fn pid(n: u32) -> ProcessId {
         ProcessId(n)
@@ -597,9 +598,7 @@ mod tests {
         tree.upsert("view", &id, &p, pid(1));
 
         let bytes = tree.reduced_command(&id).unwrap();
-        let s = String::from_utf8(bytes).unwrap();
-        assert!(s.contains("hidden"));
-        assert!(s.contains("class=w-64"));
+        assert_eq_bytes(&bytes, "+view app:sidebar class=w-64 hidden");
     }
 
     #[test]
@@ -671,11 +670,10 @@ mod tests {
 
         let observed = types(&["view", "text"]);
         let result = tree.project_tree(&observed);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:root"));
-        assert!(s.contains("+text app:label"));
-        assert!(s.contains("{"));
-        assert!(s.contains("}"));
+        assert_eq_bytes(
+            &result,
+            "+view app:root class=w-64 { +text app:label content=Hi }",
+        );
     }
 
     #[test]
@@ -691,11 +689,8 @@ mod tests {
 
         let observed = types(&["view", "text"]);
         let result = tree.project_tree(&observed);
-        let s = String::from_utf8(result).unwrap();
-        // text should be re-parented under view
-        assert!(s.contains("+view app:root"));
-        assert!(s.contains("+text app:label"));
-        assert!(!s.contains("button"));
+        // text should be re-parented under view (button skipped)
+        assert_eq_bytes(&result, "+view app:root { +text app:label }");
     }
 
     #[test]
@@ -708,9 +703,8 @@ mod tests {
 
         let observed = types(&["text"]);
         let result = tree.project_tree(&observed);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+text app:label"));
-        assert!(!s.contains("button"));
+        // button skipped, only text emitted
+        assert_eq_bytes(&result, "+text app:label");
     }
 
     #[test]

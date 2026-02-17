@@ -55,6 +55,17 @@ pub const GRAPHICS_PROTOCOL_ID: u8 = b'G';
 /// Anonymous object ID (`_`). Cannot be updated, deleted, or referenced.
 pub const ANON: &str = "_";
 
+/// Strip APC framing (`ESC _ B ... \n ESC \`) from a BYO payload string.
+///
+/// Returns the inner payload if framing is present, or the original
+/// string unchanged if not.
+pub fn strip_apc(s: &str) -> &str {
+    s.strip_prefix("\x1b_B")
+        .and_then(|s| s.strip_suffix("\x1b\\"))
+        .and_then(|s| s.strip_suffix('\n'))
+        .unwrap_or(s)
+}
+
 /// A property on an object.
 ///
 /// Used by all command types. In upsert (`+`) and event (`!`) contexts,
@@ -123,7 +134,7 @@ impl<'a> Prop<'a> {
 /// | `Ack`     | `!ack type seq props` | Acknowledge a received event         |
 /// | `Request` | `?kind seq target`    | Request (sub, unsub, expand, custom) |
 /// | `Response`| `.kind seq props body`| Response (expand, custom)            |
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command<'a> {
     /// `+type id props...` — Create or update (full replace, idempotent).
     /// ID is `_` for anonymous objects.

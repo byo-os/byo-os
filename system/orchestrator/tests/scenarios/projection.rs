@@ -1,3 +1,4 @@
+use byo::byo_assert_eq;
 use byo::protocol::Command;
 
 use crate::{assert_no_message, mock_process, pid, recv_byo_raw, send_byo};
@@ -40,55 +41,12 @@ async fn disjoint_observers() {
     // Step 4a: Compositor should receive only the view, with no children block
     // since text is not in its observed set.
     let comp_msg = recv_byo_raw(&mut compositor_rx);
-    let comp_cmds = byo::parser::parse(&comp_msg).unwrap();
-    assert_eq!(
-        comp_cmds.len(),
-        1,
-        "compositor should get exactly 1 command (view, no children block), got {}: {comp_msg}",
-        comp_cmds.len()
-    );
-    assert!(
-        matches!(
-            &comp_cmds[0],
-            Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:root"
-        ),
-        "expected +view app:root, got: {comp_msg}"
-    );
-    // No text should appear.
-    assert!(
-        !comp_msg.contains("text"),
-        "compositor should not see text: {comp_msg}"
-    );
-    // No braces (no children block) since text was the only child and it's filtered out.
-    assert!(
-        !comp_msg.contains('{'),
-        "compositor should not have children block: {comp_msg}"
-    );
+    byo_assert_eq!(comp_msg, +view app:root);
 
     // Step 4b: TextSvc should receive only the text node at top level.
     // View is not observed, so it's skipped. Text floats to top level.
     let text_msg = recv_byo_raw(&mut textsvc_rx);
-    let text_cmds = byo::parser::parse(&text_msg).unwrap();
-    assert_eq!(
-        text_cmds.len(),
-        1,
-        "textsvc should get exactly 1 command, got {}: {text_msg}",
-        text_cmds.len()
-    );
-    assert!(
-        matches!(
-            &text_cmds[0],
-            Command::Upsert { kind, id, props }
-            if *kind == "text" && *id == "app:label"
-               && props.iter().any(|p| matches!(p, byo::Prop::Value { key, value } if *key == "content" && value.as_ref() == "Hello"))
-        ),
-        "expected +text app:label content=Hello, got: {text_msg}"
-    );
-    // No view should appear.
-    assert!(
-        !text_msg.contains("view"),
-        "textsvc should not see view: {text_msg}"
-    );
+    byo_assert_eq!(text_msg, +text app:label content="Hello");
 
     // No further messages to either observer.
     assert_no_message(&mut compositor_rx);
@@ -178,11 +136,6 @@ async fn semi_disjoint_observers() {
         "expected +view app:child, got: {a11y_msg}"
     );
     assert!(matches!(&a11y_cmds[3], Command::Pop));
-    // No text should appear anywhere in a11y's output.
-    assert!(
-        !a11y_msg.contains("text"),
-        "a11y should not see text: {a11y_msg}"
-    );
 
     assert_no_message(&mut compositor_rx);
     assert_no_message(&mut a11y_rx);
@@ -247,10 +200,6 @@ async fn unobserved_wraps_under_ancestor() {
         "expected +view app:child class=inner, got: {s1}"
     );
     assert!(matches!(&cmds1[3], Command::Pop));
-    assert!(
-        !s1.contains("panel"),
-        "panel should not appear in first output: {s1}"
-    );
 
     // Step 3: App patches the panel to add a new view child.
     // Panel is at top level of this batch, not observed.
@@ -279,10 +228,6 @@ async fn unobserved_wraps_under_ancestor() {
         "expected +view app:child2, got: {s2}"
     );
     assert!(matches!(&cmds2[3], Command::Pop));
-    assert!(
-        !s2.contains("panel"),
-        "panel should not appear in second output: {s2}"
-    );
 
     assert_no_message(&mut compositor_rx);
 }

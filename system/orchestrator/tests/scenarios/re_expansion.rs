@@ -74,23 +74,11 @@ async fn patch_triggers_re_expansion() {
     send_byo(&mut router, pid(3), "@button save label=\"New\"").await;
 
     // Step 3: Controls should receive a new ?expand with reduced state.
-    // The re-expand format uses the reduced_command (not parseable by the
-    // standard parser due to qualified ID in props position), so we check raw.
+    // The re-expand format uses the reduced command with `+` stripped:
+    //   `\n?expand SEQ type qid props...`
+    // The label was merged from the patch (New replaces Save).
     let expand_msg = recv_byo_raw(&mut controls_rx);
-    assert!(
-        expand_msg.contains("?expand"),
-        "expected ?expand in re-expansion, got: {expand_msg}"
-    );
-    // Sequence number should be 1 (0 was used for initial expansion).
-    assert!(
-        expand_msg.contains("?expand 1"),
-        "expected ?expand 1, got: {expand_msg}"
-    );
-    // Should contain the merged label (New, not Save).
-    assert!(
-        expand_msg.contains("label=New") || expand_msg.contains("label=\"New\""),
-        "expected label=New in reduced state, got: {expand_msg}"
-    );
+    assert_eq!(expand_msg, "\n?expand 1 button app:save label=New");
 
     // Step 4: Controls responds with new expansion (only text content changed).
     send_byo(

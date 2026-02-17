@@ -1,5 +1,7 @@
 use std::io;
 
+use byo::strip_apc;
+use byo::byo_assert_eq;
 use byo::byo_write;
 use byo::emitter::Emitter;
 use byo::parser::parse;
@@ -12,16 +14,6 @@ fn emit(f: impl FnOnce(&mut Emitter<&mut Vec<u8>>) -> io::Result<()>) -> String 
     String::from_utf8(buf).unwrap()
 }
 
-/// Extract the payload (between APC start and ST) from emitter output.
-fn payload(s: &str) -> &str {
-    s.strip_prefix("\x1b_B")
-        .unwrap()
-        .strip_suffix("\x1b\\")
-        .unwrap()
-        .strip_suffix('\n')
-        .unwrap()
-}
-
 // ---------------------------------------------------------------------------
 // Static upsert
 // ---------------------------------------------------------------------------
@@ -29,25 +21,25 @@ fn payload(s: &str) -> &str {
 #[test]
 fn static_upsert() {
     let out = emit(|em| byo_write!(em, +view sidebar class="w-64"));
-    assert_eq!(payload(&out), "\n+view sidebar class=w-64");
+    assert_eq!(strip_apc(&out), "\n+view sidebar class=w-64");
 }
 
 #[test]
 fn static_upsert_boolean_flag() {
     let out = emit(|em| byo_write!(em, +view sidebar hidden));
-    assert_eq!(payload(&out), "\n+view sidebar hidden");
+    assert_eq!(strip_apc(&out), "\n+view sidebar hidden");
 }
 
 #[test]
 fn static_upsert_no_props() {
     let out = emit(|em| byo_write!(em, +view sidebar));
-    assert_eq!(payload(&out), "\n+view sidebar");
+    assert_eq!(strip_apc(&out), "\n+view sidebar");
 }
 
 #[test]
 fn static_upsert_anonymous() {
     let out = emit(|em| byo_write!(em, +view _));
-    assert_eq!(payload(&out), "\n+view _");
+    assert_eq!(strip_apc(&out), "\n+view _");
 }
 
 // ---------------------------------------------------------------------------
@@ -63,10 +55,11 @@ fn upsert_with_children() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view root class=p-4 {"));
-    assert!(p.contains("+text label content=Hello"));
-    assert!(p.contains("}"));
+    byo_assert_eq!(out,
+        +view root class="p-4" {
+            +text label content="Hello"
+        }
+    );
 }
 
 #[test]
@@ -80,10 +73,13 @@ fn nested_children() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view root {"));
-    assert!(p.contains("+view child {"));
-    assert!(p.contains("+text leaf content=deep"));
+    byo_assert_eq!(out,
+        +view root {
+            +view child {
+                +text leaf content="deep"
+            }
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +89,7 @@ fn nested_children() {
 #[test]
 fn destroy() {
     let out = emit(|em| byo_write!(em, -view sidebar));
-    assert_eq!(payload(&out), "\n-view sidebar");
+    assert_eq!(strip_apc(&out), "\n-view sidebar");
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +99,7 @@ fn destroy() {
 #[test]
 fn patch_with_remove() {
     let out = emit(|em| byo_write!(em, @view sidebar hidden ~tooltip));
-    assert_eq!(payload(&out), "\n@view sidebar hidden ~tooltip");
+    assert_eq!(strip_apc(&out), "\n@view sidebar hidden ~tooltip");
 }
 
 #[test]
@@ -115,9 +111,11 @@ fn patch_with_children() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("@view sidebar {"));
-    assert!(p.contains("+view item4 class=px-4"));
+    byo_assert_eq!(out,
+        @view sidebar {
+            +view item4 class="px-4"
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -127,19 +125,19 @@ fn patch_with_children() {
 #[test]
 fn event() {
     let out = emit(|em| byo_write!(em, !click 0 save));
-    assert_eq!(payload(&out), "\n!click 0 save");
+    assert_eq!(strip_apc(&out), "\n!click 0 save");
 }
 
 #[test]
 fn event_with_props() {
     let out = emit(|em| byo_write!(em, !keydown 0 editor key="a" mod="ctrl"));
-    assert_eq!(payload(&out), "\n!keydown 0 editor key=a mod=ctrl");
+    assert_eq!(strip_apc(&out), "\n!keydown 0 editor key=a mod=ctrl");
 }
 
 #[test]
 fn ack() {
     let out = emit(|em| byo_write!(em, !ack click 0 handled=true));
-    assert_eq!(payload(&out), "\n!ack click 0 handled=true");
+    assert_eq!(strip_apc(&out), "\n!ack click 0 handled=true");
 }
 
 #[test]
@@ -150,9 +148,10 @@ fn claim_unclaim() {
             ?unclaim 1 slider
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("?claim 0 button"));
-    assert!(p.contains("?unclaim 1 slider"));
+    byo_assert_eq!(out,
+        ?claim 0 button
+        ?unclaim 1 slider
+    );
 }
 
 #[test]
@@ -163,16 +162,16 @@ fn observe_unobserve() {
             ?unobserve 1 text
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("?observe 0 view"));
-    assert!(p.contains("?unobserve 1 text"));
+    byo_assert_eq!(out,
+        ?observe 0 view
+        ?unobserve 1 text
+    );
 }
 
 #[test]
 fn request_expand() {
     let out = emit(|em| byo_write!(em, ?expand 0 save kind=button label="Save"));
-    let p = payload(&out);
-    assert!(p.contains("?expand 0 save kind=button label=Save"));
+    byo_assert_eq!(out, ?expand 0 save kind=button label="Save");
 }
 
 #[test]
@@ -186,24 +185,25 @@ fn response_expand() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains(".expand 0 {"));
-    assert!(p.contains("+view root class=btn {"));
-    assert!(p.contains("+text label content=Save"));
+    byo_assert_eq!(out,
+        .expand 0 {
+            +view root class="btn" {
+                +text label content="Save"
+            }
+        }
+    );
 }
 
 #[test]
 fn generic_request() {
     let out = emit(|em| byo_write!(em, ?"render-frame" 0 viewport));
-    let p = payload(&out);
-    assert!(p.contains("?render-frame 0 viewport"));
+    byo_assert_eq!(out, ?"render-frame" 0 viewport);
 }
 
 #[test]
 fn generic_response_no_body() {
     let out = emit(|em| byo_write!(em, ."render-frame" 0 status=ok));
-    let p = payload(&out);
-    assert!(p.contains(".render-frame 0 status=ok"));
+    byo_assert_eq!(out, ."render-frame" 0 status=ok);
 }
 
 #[test]
@@ -215,9 +215,11 @@ fn generic_response_with_body() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains(".render-frame 0 status=ok {"));
-    assert!(p.contains("+view frame"));
+    byo_assert_eq!(out,
+        ."render-frame" 0 status=ok {
+            +view frame
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -228,28 +230,28 @@ fn generic_response_with_body() {
 fn interpolated_value() {
     let cls = "w-64";
     let out = emit(|em| byo_write!(em, +view sidebar class={cls}));
-    assert_eq!(payload(&out), "\n+view sidebar class=w-64");
+    assert_eq!(strip_apc(&out), "\n+view sidebar class=w-64");
 }
 
 #[test]
 fn interpolated_id() {
     let my_id = "sidebar";
     let out = emit(|em| byo_write!(em, +view {my_id}));
-    assert_eq!(payload(&out), "\n+view sidebar");
+    assert_eq!(strip_apc(&out), "\n+view sidebar");
 }
 
 #[test]
 fn interpolated_type() {
     let kind = "layer";
     let out = emit(|em| byo_write!(em, +{kind} content));
-    assert_eq!(payload(&out), "\n+layer content");
+    assert_eq!(strip_apc(&out), "\n+layer content");
 }
 
 #[test]
 fn interpolated_format_expr() {
     let n = 42;
     let out = emit(|em| byo_write!(em, +view sidebar class={format!("w-{n}")}));
-    assert_eq!(payload(&out), "\n+view sidebar class=w-42");
+    assert_eq!(strip_apc(&out), "\n+view sidebar class=w-42");
 }
 
 // ---------------------------------------------------------------------------
@@ -268,8 +270,7 @@ fn if_command_true() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view child"));
+    byo::assert::assert_eq(&out, "\n+view root {\n+view child\n}");
 }
 
 #[test]
@@ -284,8 +285,7 @@ fn if_command_false() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(!p.contains("+view child"));
+    byo::assert::assert_eq(&out, "\n+view root {\n}");
 }
 
 #[test]
@@ -302,9 +302,7 @@ fn if_else_command() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view spinner"));
-    assert!(!p.contains("+view content"));
+    byo::assert::assert_eq(&out, "\n+view root {\n+view spinner\n}");
 }
 
 // ---------------------------------------------------------------------------
@@ -319,10 +317,10 @@ fn conditional_props_true() {
             +view sidebar class="w-64" if disabled { disabled class="opacity-50" }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("class=w-64")); // hmm this gets overridden; actually emitter emits both
-    assert!(p.contains("disabled"));
-    assert!(p.contains("class=opacity-50"));
+    byo::assert::assert_eq(
+        &out,
+        "\n+view sidebar class=w-64 disabled class=opacity-50",
+    );
 }
 
 #[test]
@@ -333,9 +331,7 @@ fn conditional_props_false() {
             +view sidebar class="w-64" if disabled { disabled }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("class=w-64"));
-    assert!(!p.contains("disabled"));
+    byo::assert::assert_eq(&out, "\n+view sidebar class=w-64");
 }
 
 // ---------------------------------------------------------------------------
@@ -354,10 +350,10 @@ fn for_loop() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("content=alpha"));
-    assert!(p.contains("content=beta"));
-    assert!(p.contains("content=gamma"));
+    byo::assert::assert_eq(
+        &out,
+        "\n+view list {\n+text _ content=alpha\n+text _ content=beta\n+text _ content=gamma\n}",
+    );
 }
 
 #[test]
@@ -370,9 +366,7 @@ fn for_loop_with_format_id() {
             }
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view item-a"));
-    assert!(p.contains("+view item-b"));
+    byo::assert::assert_eq(&out, "\n+view item-a\n+view item-b");
 }
 
 // ---------------------------------------------------------------------------
@@ -388,10 +382,11 @@ fn multiple_commands() {
             -view c
         )
     });
-    let p = payload(&out);
-    assert!(p.contains("+view a"));
-    assert!(p.contains("+view b"));
-    assert!(p.contains("-view c"));
+    byo_assert_eq!(out,
+        +view a
+        +view b
+        -view c
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -401,15 +396,13 @@ fn multiple_commands() {
 #[test]
 fn string_literal_type() {
     let out = emit(|em| byo_write!(em, +"org.example.Widget" myid label="Test"));
-    let p = payload(&out);
-    assert!(p.contains("+org.example.Widget myid label=Test"));
+    byo_assert_eq!(out, +org.example.Widget myid label="Test");
 }
 
 #[test]
 fn string_literal_id() {
     let out = emit(|em| byo_write!(em, +view "my-sidebar" class="w-64"));
-    let p = payload(&out);
-    assert!(p.contains("+view my-sidebar class=w-64"));
+    byo_assert_eq!(out, +view my-sidebar class="w-64");
 }
 
 // ---------------------------------------------------------------------------
@@ -430,8 +423,7 @@ fn round_trip_parse() {
             ?claim 0 button
         )
     });
-    let p = payload(&out);
-    let cmds = parse(p).unwrap();
+    let cmds = parse(strip_apc(&out)).unwrap();
     // Upsert + Push + Text + Pop + Destroy + Patch + Event + Ack + Request = 9
     assert_eq!(cmds.len(), 9);
 }
@@ -443,8 +435,7 @@ fn round_trip_parse() {
 #[test]
 fn quoted_value_with_spaces() {
     let out = emit(|em| byo_write!(em, +text label content="Hello, world"));
-    let p = payload(&out);
-    assert!(p.contains("content=\"Hello, world\""));
+    byo_assert_eq!(out, +text label content="Hello, world");
 }
 
 // ---------------------------------------------------------------------------
@@ -454,50 +445,43 @@ fn quoted_value_with_spaces() {
 #[test]
 fn compound_type_name() {
     let out = emit(|em| byo_write!(em, +org.example.Widget myid label="Test"));
-    let p = payload(&out);
-    assert!(p.contains("+org.example.Widget myid label=Test"));
+    byo_assert_eq!(out, +org.example.Widget myid label="Test");
 }
 
 #[test]
 fn compound_id_with_hyphen() {
     let out = emit(|em| byo_write!(em, +view my-sidebar class="w-64"));
-    let p = payload(&out);
-    assert!(p.contains("+view my-sidebar class=w-64"));
+    byo_assert_eq!(out, +view my-sidebar class="w-64");
 }
 
 #[test]
 fn qualified_id() {
     let out = emit(|em| byo_write!(em, +view notes-app:save));
-    let p = payload(&out);
-    assert!(p.contains("+view notes-app:save"));
+    byo_assert_eq!(out, +view notes-app:save);
 }
 
 #[test]
 fn compound_prop_value() {
     let out = emit(|em| byo_write!(em, +view sidebar class=w-64));
-    let p = payload(&out);
-    assert!(p.contains("class=w-64"));
+    byo_assert_eq!(out, +view sidebar class=w-64);
 }
 
 #[test]
 fn tailwind_slash_value() {
     let out = emit(|em| byo_write!(em, +view sidebar class=bg-zinc-700/50));
-    let p = payload(&out);
-    assert!(p.contains("class=bg-zinc-700/50"));
+    byo_assert_eq!(out, +view sidebar class=bg-zinc-700/50);
 }
 
 #[test]
 fn destroy_compound_id() {
     let out = emit(|em| byo_write!(em, -view my-sidebar));
-    let p = payload(&out);
-    assert!(p.contains("-view my-sidebar"));
+    byo_assert_eq!(out, -view my-sidebar);
 }
 
 #[test]
 fn patch_qualified_id() {
     let out = emit(|em| byo_write!(em, @view notes-app:save hidden));
-    let p = payload(&out);
-    assert!(p.contains("@view notes-app:save hidden"));
+    byo_assert_eq!(out, @view notes-app:save hidden);
 }
 
 // ---------------------------------------------------------------------------

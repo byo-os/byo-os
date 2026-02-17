@@ -352,37 +352,13 @@ async fn daemon_replay_reduced() {
     send_byo(&mut router, pid(2), "?claim 0 button").await;
 
     // Step 4: Controls should receive ?expand with fully reduced state.
+    // The replay format from handle_claim is the reduced command with `+`
+    // stripped, embedded after `?expand SEQ`:
+    //   `\n?expand SEQ type qid props...`
+    // Props are in IndexMap insertion order (label first, variant second),
+    // with label updated to "New" by the patch.
     let s = recv_byo_raw(&mut controls_rx);
-
-    // The replay format from handle_claim uses reduced_command with `+` stripped.
-    // We check raw content for the presence of merged props.
-    assert!(
-        s.contains("?expand"),
-        "expected ?expand in daemon replay, got: {s}"
-    );
-
-    // Should contain the patched label ("New", not "Save").
-    assert!(
-        s.contains("label=New") || s.contains("label=\"New\""),
-        "expected label=New (patched) in reduced state, got: {s}"
-    );
-    // Should NOT contain the old label value.
-    assert!(
-        !s.contains("label=Save") && !s.contains("label=\"Save\""),
-        "label should be New (patched), not Save (original), got: {s}"
-    );
-
-    // Should contain variant from original upsert (preserved by patch).
-    assert!(
-        s.contains("variant=primary") || s.contains("variant=\"primary\""),
-        "expected variant=primary (from upsert) in reduced state, got: {s}"
-    );
-
-    // Should contain the qualified ID.
-    assert!(
-        s.contains("app:save"),
-        "expected qualified ID app:save in replay, got: {s}"
-    );
+    assert_eq!(s, "\n?expand 0 button app:save label=New variant=primary");
 
     // No further messages.
     assert_no_message(&mut controls_rx);

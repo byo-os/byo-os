@@ -1249,6 +1249,7 @@ fn props_to_patch(props: &[Prop<'_>]) -> (IndexMap<String, PropValue>, Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use byo::assert::assert_eq_bytes;
 
     #[test]
     fn project_all_types_observed() {
@@ -1256,12 +1257,10 @@ mod tests {
         let commands = parse("+view app:root { +text app:label content=Hello }").unwrap();
         let types: HashSet<String> = ["view", "text"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:root"), "got: {s}");
-        assert!(s.contains("+text app:label"), "got: {s}");
-        assert!(s.contains("content=Hello"), "got: {s}");
-        assert!(s.contains("{"), "got: {s}");
-        assert!(s.contains("}"), "got: {s}");
+        assert_eq_bytes(
+            &result,
+            r#"+view app:root { +text app:label content=Hello }"#,
+        );
     }
 
     #[test]
@@ -1272,12 +1271,7 @@ mod tests {
                 .unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:root"), "got: {s}");
-        assert!(!s.contains("+text"), "got: {s}");
-        assert!(!s.contains("+image"), "got: {s}");
-        // No observed children → no braces.
-        assert!(!s.contains("{"), "got: {s}");
+        assert_eq_bytes(&result, "+view app:root");
     }
 
     #[test]
@@ -1289,13 +1283,7 @@ mod tests {
                 .unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:root"), "got: {s}");
-        assert!(!s.contains("+panel"), "got: {s}");
-        // child should be re-parented under root.
-        assert!(s.contains("+view app:child"), "got: {s}");
-        assert!(s.contains("class=inner"), "got: {s}");
-        assert!(s.contains("{"), "got: {s}");
+        assert_eq_bytes(&result, "+view app:root { +view app:child class=inner }");
     }
 
     #[test]
@@ -1304,9 +1292,7 @@ mod tests {
         let commands = parse("-view app:sidebar -text app:label").unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("-view app:sidebar"), "got: {s}");
-        assert!(!s.contains("-text"), "got: {s}");
+        assert_eq_bytes(&result, "-view app:sidebar");
     }
 
     #[test]
@@ -1315,10 +1301,7 @@ mod tests {
         let commands = parse("@view app:sidebar hidden @text app:label content=New").unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("@view app:sidebar"), "got: {s}");
-        assert!(s.contains("hidden"), "got: {s}");
-        assert!(!s.contains("@text"), "got: {s}");
+        assert_eq_bytes(&result, "@view app:sidebar hidden");
     }
 
     #[test]
@@ -1342,12 +1325,7 @@ mod tests {
         let commands = parse("+view a { +panel b { +panel c { +view d } } }").unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view a"), "got: {s}");
-        assert!(s.contains("+view d"), "got: {s}");
-        assert!(!s.contains("+panel"), "got: {s}");
-        // d is a child of a (through flattening).
-        assert!(s.contains("{"), "got: {s}");
+        assert_eq_bytes(&result, "+view a { +view d }");
     }
 
     #[test]
@@ -1357,11 +1335,7 @@ mod tests {
             parse("@view app:root { +text app:label content=Hello +view app:child }").unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("@view app:root"), "got: {s}");
-        assert!(s.contains("+view app:child"), "got: {s}");
-        // text is not observed.
-        assert!(!s.contains("+text"), "got: {s}");
+        assert_eq_bytes(&result, "@view app:root { +view app:child }");
     }
 
     #[test]
@@ -1383,14 +1357,7 @@ mod tests {
         let commands = parse("@panel app:container { +view app:child class=inner }").unwrap();
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-
-        // Should NOT contain @panel.
-        assert!(!s.contains("panel"), "got: {s}");
-        // Should wrap under the observed ancestor.
-        assert!(s.contains("@view app:root"), "got: {s}");
-        assert!(s.contains("+view app:child"), "got: {s}");
-        assert!(s.contains("class=inner"), "got: {s}");
+        assert_eq_bytes(&result, "@view app:root { +view app:child class=inner }");
     }
 
     #[test]
@@ -1413,20 +1380,7 @@ mod tests {
         let commands = parse("-panel app:container").unwrap();
         let types: HashSet<String> = ["view", "text"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        let s = String::from_utf8(result).unwrap();
-
-        // Should NOT contain -panel.
-        assert!(!s.contains("-panel"), "got: {s}");
-        // Should contain destroys for observed descendants, deepest first.
-        assert!(s.contains("-text app:label"), "got: {s}");
-        assert!(s.contains("-view app:child"), "got: {s}");
-        // Verify order: label (deeper) before child.
-        let label_pos = s.find("-text app:label").unwrap();
-        let child_pos = s.find("-view app:child").unwrap();
-        assert!(
-            label_pos < child_pos,
-            "deepest-first: label ({label_pos}) should come before child ({child_pos}), got: {s}"
-        );
+        assert_eq_bytes(&result, "-text app:label -view app:child");
     }
 
     #[test]

@@ -413,6 +413,7 @@ impl OutputQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use byo::assert::assert_eq_bytes;
 
     fn pid(n: u32) -> ProcessId {
         ProcessId(n)
@@ -470,9 +471,7 @@ mod tests {
         let batch = PendingBatch::new(pid(1), "app".into(), b"+view sidebar class=w-64".to_vec());
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:sidebar"));
-        assert!(s.contains("class=w-64"));
+        assert_eq_bytes(&result, "+view app:sidebar class=w-64");
     }
 
     #[test]
@@ -492,15 +491,10 @@ mod tests {
         );
 
         let (result, _) = batch.rewrite(&subs);
-        let s = String::from_utf8(result).unwrap();
-        // Should contain the expansion instead of +button.
-        assert!(s.contains("controls:save-root"));
-        assert!(s.contains("class=btn"));
-        // Should contain the native view with qualified ID.
-        assert!(s.contains("+view app:root"));
-        assert!(s.contains("+view app:footer"));
-        // Should NOT contain +button.
-        assert!(!s.contains("+button"));
+        assert_eq_bytes(
+            &result,
+            "+view app:root { +view controls:save-root class=btn +view app:footer }",
+        );
     }
 
     #[test]
@@ -512,12 +506,10 @@ mod tests {
         );
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view app:root"));
-        assert!(s.contains("{"));
-        assert!(s.contains("+view app:child1"));
-        assert!(s.contains("+view app:child2"));
-        assert!(s.contains("}"));
+        assert_eq_bytes(
+            &result,
+            "+view app:root { +view app:child1 +view app:child2 }",
+        );
     }
 
     #[test]
@@ -531,40 +523,32 @@ mod tests {
     fn qualify_and_serialize_basic() {
         let commands = byo::parser::parse("+view root class=w-64").unwrap();
         let result = qualify_and_serialize(&commands, "controls");
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view controls:root"));
-        assert!(s.contains("class=w-64"));
+        assert_eq_bytes(&result, "+view controls:root class=w-64");
     }
 
     #[test]
     fn qualify_and_serialize_nested() {
         let commands = byo::parser::parse("+view root { +text label content=Hello }").unwrap();
         let result = qualify_and_serialize(&commands, "controls");
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("+view controls:root"));
-        assert!(s.contains("+text controls:label"));
-        assert!(s.contains("content=Hello"));
-        assert!(s.contains("{"));
-        assert!(s.contains("}"));
+        assert_eq_bytes(
+            &result,
+            "+view controls:root { +text controls:label content=Hello }",
+        );
     }
 
     #[test]
     fn qualify_and_serialize_already_qualified() {
         let commands = byo::parser::parse("+view app:sidebar").unwrap();
         let result = qualify_and_serialize(&commands, "controls");
-        let s = String::from_utf8(result).unwrap();
         // Already-qualified IDs are left unchanged.
-        assert!(s.contains("+view app:sidebar"));
+        assert_eq_bytes(&result, "+view app:sidebar");
     }
 
     #[test]
     fn qualify_and_serialize_destroy_and_patch() {
         let commands = byo::parser::parse("-view old @view sidebar hidden").unwrap();
         let result = qualify_and_serialize(&commands, "controls");
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("-view controls:old"));
-        assert!(s.contains("@view controls:sidebar"));
-        assert!(s.contains("hidden"));
+        assert_eq_bytes(&result, "-view controls:old @view controls:sidebar hidden");
     }
 
     #[test]
@@ -598,18 +582,10 @@ mod tests {
         );
 
         let (result, _) = batch.rewrite(&claims);
-        let s = String::from_utf8(result).unwrap();
-
-        // Should contain the root view.
-        assert!(s.contains("+view app:root"));
-        // Should contain the controls expansion.
-        assert!(s.contains("+view controls:save-root"));
-        // Should NOT contain +button or +icon.
-        assert!(!s.contains("+button"));
-        assert!(!s.contains("+icon"));
-        // Should contain the nested icon expansion.
-        assert!(s.contains("+image icons:check-img"));
-        assert!(s.contains("src=check.png"));
+        assert_eq_bytes(
+            &result,
+            "+view app:root { +view controls:save-root { +image icons:check-img src=check.png } }",
+        );
     }
 
     #[test]
@@ -621,9 +597,8 @@ mod tests {
         claims.insert("button".to_string(), pid(2));
 
         let (result, claimed_destroys) = batch.rewrite(&claims);
-        let s = String::from_utf8(result).unwrap();
-        // Should NOT emit -button (compositor doesn't have this node).
-        assert!(!s.contains("-button"));
+        // Should produce empty output (compositor doesn't have this node).
+        assert!(result.is_empty());
         // Should have collected the QID.
         assert_eq!(claimed_destroys.len(), 1);
         assert_eq!(claimed_destroys[0], qid("app", "save"));
@@ -636,8 +611,7 @@ mod tests {
 
         let claims = HashMap::new();
         let (result, claimed_destroys) = batch.rewrite(&claims);
-        let s = String::from_utf8(result).unwrap();
-        assert!(s.contains("-view app:sidebar"));
+        assert_eq_bytes(&result, "-view app:sidebar");
         assert!(claimed_destroys.is_empty());
     }
 }

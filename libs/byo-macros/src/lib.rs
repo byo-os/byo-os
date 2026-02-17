@@ -7,6 +7,7 @@
 mod codegen;
 mod ir;
 mod parse;
+mod serialize;
 
 use proc_macro::TokenStream;
 
@@ -49,6 +50,76 @@ pub fn byo_write(input: TokenStream) -> TokenStream {
         Err(e) => return syn_err(e),
     };
     codegen::gen_byo_write(em_expr, &cmds).into()
+}
+
+/// Serialize BYO DSL to a `&'static str` at compile time.
+///
+/// Same syntax as `byo!` but produces a string literal instead of emitter calls.
+/// Does not support interpolation, conditionals, or loops — all values must be
+/// literals.
+///
+/// ```ignore
+/// let expected: &str = byo_str! { +view sidebar class="w-64" };
+/// ```
+#[proc_macro]
+pub fn byo_str(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    let cmds = match parse::parse(input2, true) {
+        Ok(cmds) => cmds,
+        Err(e) => return syn_err(e),
+    };
+    let canonical = match serialize::serialize_commands(&cmds) {
+        Ok(s) => s,
+        Err(e) => return syn_err(e),
+    };
+    let ts: proc_macro2::TokenStream = quote::quote! { #canonical };
+    ts.into()
+}
+
+/// Assert that actual BYO output matches expected DSL structurally.
+///
+/// First argument is the variable holding actual output (`&str` or `&[u8]`).
+/// Remaining tokens are the expected BYO DSL (literals only).
+///
+/// ```ignore
+/// byo_assert_eq!(output, {
+///     +view sidebar class="w-64" {
+///         +text label content="Hello"
+///     }
+/// });
+/// ```
+#[proc_macro]
+pub fn byo_assert_eq(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    let mut iter = input2.into_iter();
+
+    // First token: the actual string variable
+    let actual_expr: proc_macro2::TokenStream = match iter.next() {
+        Some(tt) => std::iter::once(tt).collect(),
+        None => return syn_err("expected actual output expression".to_string()),
+    };
+
+    // Comma separator
+    match iter.next() {
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ',' => {}
+        _ => return syn_err("expected `,` after actual expression".to_string()),
+    }
+
+    // Remaining tokens: the expected BYO DSL
+    let rest: proc_macro2::TokenStream = iter.collect();
+    let cmds = match parse::parse(rest, true) {
+        Ok(cmds) => cmds,
+        Err(e) => return syn_err(e),
+    };
+    let canonical = match serialize::serialize_commands(&cmds) {
+        Ok(s) => s,
+        Err(e) => return syn_err(e),
+    };
+
+    let ts: proc_macro2::TokenStream = quote::quote! {
+        ::byo::assert::assert_eq(&#actual_expr, #canonical)
+    };
+    ts.into()
 }
 
 fn syn_err(msg: String) -> TokenStream {

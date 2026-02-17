@@ -4,6 +4,7 @@
 //! All communication in BYO/OS happens via ECMA-48 APC escape sequences
 //! over stdin/stdout.
 
+pub mod assert;
 pub mod emitter;
 pub mod lexer;
 pub mod parser;
@@ -54,3 +55,32 @@ pub use byo_macros::byo;
 /// assert!(out.contains("+text label"));
 /// ```
 pub use byo_macros::byo_write;
+
+#[cfg(feature = "macros")]
+/// Serialize BYO DSL to a `&'static str` at compile time.
+///
+/// Same syntax as `byo!` but produces a string literal instead of emitter
+/// calls. Does not support interpolation, conditionals, or loops.
+///
+/// ```
+/// use byo::byo_str;
+///
+/// let expected: &str = byo_str!(+view sidebar class="w-64");
+/// assert!(expected.contains("+view sidebar"));
+/// ```
+pub use byo_macros::byo_str;
+
+#[cfg(feature = "macros")]
+/// Assert that actual BYO output matches expected DSL structurally.
+///
+/// First argument is the actual output (`&str`). Remaining tokens are the
+/// expected BYO DSL (literals only). Parses both sides and compares
+/// structurally; panics with a clear diff on mismatch.
+///
+/// ```
+/// use byo::byo_assert_eq;
+///
+/// let actual = "\n+view sidebar class=\"w-64\"";
+/// byo_assert_eq!(actual, +view sidebar class="w-64");
+/// ```
+pub use byo_macros::byo_assert_eq;

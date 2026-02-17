@@ -1,3 +1,4 @@
+use byo::byo_assert_eq;
 use byo::protocol::{Command, Prop, RequestKind};
 
 use crate::{assert_no_message, mock_process, pid, recv_byo_raw, send_byo, try_recv_byo};
@@ -147,10 +148,6 @@ async fn two_daemon_a_to_b() {
     );
     assert!(matches!(&cmds[3], Command::Pop));
 
-    // No +button or +icon should appear in the output.
-    assert!(!s.contains("+button"), "button should not appear: {s}");
-    assert!(!s.contains("+icon"), "icon should not appear: {s}");
-
     assert_no_message(&mut compositor_rx);
 }
 
@@ -272,11 +269,6 @@ async fn three_daemon_a_to_b_to_c() {
     assert!(matches!(&cmds[5], Command::Pop));
     assert!(matches!(&cmds[6], Command::Pop));
 
-    // No daemon types should appear in output.
-    assert!(!s.contains("+widget"), "widget should not appear: {s}");
-    assert!(!s.contains("+gadget"), "gadget should not appear: {s}");
-    assert!(!s.contains("+thing"), "thing should not appear: {s}");
-
     assert_no_message(&mut compositor_rx);
 }
 
@@ -377,37 +369,15 @@ async fn circular_a_to_b_to_a() {
     send_byo(&mut router, pid(2), ".expand 1 { +view a-leaf }").await;
 
     // Step 7: All expansions complete. Compositor gets the final rewritten output.
+    // Expected: +view daemona:a-view { +view daemonb:b-view { +view daemona:a-leaf } }
     let s = recv_byo_raw(&mut compositor_rx);
-    let cmds = byo::parser::parse(&s).unwrap();
-
-    // Verify the output contains all the view nodes.
-    assert!(
-        s.contains("daemona:a-view"),
-        "expected daemona:a-view in output: {s}"
-    );
-    assert!(
-        s.contains("daemonb:b-view"),
-        "expected daemonb:b-view in output: {s}"
-    );
-    assert!(
-        s.contains("daemona:a-leaf"),
-        "expected daemona:a-leaf in output: {s}"
-    );
-
-    // All commands should be view type (no daemon types remaining).
-    for cmd in &cmds {
-        match cmd {
-            Command::Upsert { kind, .. } => {
-                assert_eq!(*kind, "view", "expected only view commands, got: {s}");
+    byo_assert_eq!(s,
+        +view daemona:a-view {
+            +view daemonb:b-view {
+                +view daemona:a-leaf
             }
-            Command::Push | Command::Pop => {}
-            _ => panic!("unexpected command type in output: {s}"),
         }
-    }
-
-    // No type-a or type-b should appear in the output.
-    assert!(!s.contains("+type-a"), "type-a should not appear: {s}");
-    assert!(!s.contains("+type-b"), "type-b should not appear: {s}");
+    );
 
     assert_no_message(&mut compositor_rx);
 }
@@ -506,9 +476,6 @@ async fn self_referential_a_to_a() {
     );
     assert!(matches!(&cmds[3], Command::Pop));
 
-    // No +widget should appear in the output.
-    assert!(!s.contains("+widget"), "widget should not appear: {s}");
-
     assert_no_message(&mut compositor_rx);
 }
 
@@ -589,14 +556,22 @@ async fn depth_limit_exceeded() {
 
     // Step 7: Compositor should have received the output.
     let s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
 
-    // Verify the output contains +view nodes from the expansion chain.
-    assert!(s.contains("+view"), "expected +view nodes in output: {s}");
-
-    // The output should contain view nodes from the various levels.
+    // Verify output contains view upserts from the expansion chain.
+    let view_upserts: Vec<_> = cmds
+        .iter()
+        .filter(|c| matches!(c, Command::Upsert { kind, .. } if *kind == "view"))
+        .collect();
     assert!(
-        s.contains("daemona:level0"),
-        "expected daemona:level0 in output: {s}"
+        !view_upserts.is_empty(),
+        "expected +view nodes in output, got: {s}"
+    );
+    // The first expanded level should be present.
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::Upsert { id, .. } if *id == "daemona:level0")),
+        "expected daemona:level0 in output, got: {s}"
     );
 
     // Batch completed without hanging — the test itself reaching this point proves it.
