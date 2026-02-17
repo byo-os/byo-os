@@ -647,7 +647,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         let span = self.here_span();
         let word = self.expect_word("sequence number")?;
         word.parse::<u64>().map_err(|_| ParseError {
-            kind: ParseErrorKind::InvalidSeqnum,
+            kind: ParseErrorKind::InvalidSeqnum(word.to_string()),
             span,
         })
     }
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn invalid_seqnum() {
         let err = parse("!click abc save").unwrap_err();
-        assert_eq!(err.kind, ParseErrorKind::InvalidSeqnum);
+        assert_eq!(err.kind, ParseErrorKind::InvalidSeqnum("abc".into()));
     }
 
     #[test]

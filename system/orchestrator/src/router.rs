@@ -7,12 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Instant;
 
 use indexmap::IndexMap;
 
 use byo::emitter::Emitter;
 use byo::parser::parse;
-use byo::protocol::{Command, RequestKind, ResponseKind};
+use byo::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 use byo::tree::{PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch, write_props};
@@ -36,6 +37,17 @@ pub enum RouterMsg {
     Disconnected { process: ProcessId },
 }
 
+/// Tracks a forwarded event awaiting an ACK from the destination.
+struct PendingAck {
+    /// The process that originally sent the event.
+    sender: ProcessId,
+    /// The sequence number used by the original sender.
+    sender_seq: u64,
+    /// When the event was forwarded (for future liveness timeout).
+    #[allow(dead_code)]
+    forwarded_at: Instant,
+}
+
 /// The central router that dispatches messages between processes.
 pub struct Router {
     /// All managed processes, keyed by ID.
@@ -56,6 +68,10 @@ pub struct Router {
     pending_batches: Vec<PendingBatch>,
     /// Process name → ProcessId for lookup.
     name_to_id: HashMap<String, ProcessId>,
+    /// Per (destination, event_type): next outbound seq.
+    event_seqs: HashMap<(ProcessId, String), u64>,
+    /// Per (destination, event_type, forwarded_seq): pending ACK info.
+    pending_acks: HashMap<(ProcessId, String, u64), PendingAck>,
 }
 
 impl Default for Router {
@@ -70,6 +86,8 @@ impl Default for Router {
             expand_seqs: HashMap::new(),
             pending_batches: Vec::new(),
             name_to_id: HashMap::new(),
+            event_seqs: HashMap::new(),
+            pending_acks: HashMap::new(),
         }
     }
 }
@@ -177,8 +195,17 @@ impl Router {
                 } => {
                     self.handle_expand_response(from, &client, *seq, body).await;
                 }
-                Command::Ack { seq, .. } => {
-                    let _ = (from, &client, *seq);
+                Command::Event {
+                    kind,
+                    seq,
+                    id,
+                    props,
+                } => {
+                    self.handle_event(from, &client, kind, *seq, id, props)
+                        .await;
+                }
+                Command::Ack { kind, seq, props } => {
+                    self.handle_ack(from, kind, *seq, props).await;
                 }
                 _ => {}
             }
@@ -377,6 +404,15 @@ impl Router {
         // Remove expand seq counter.
         self.expand_seqs.remove(&process);
 
+        // Remove event seq counters for this process.
+        self.event_seqs.retain(|(pid, _), _| *pid != process);
+
+        // Remove pending ACKs:
+        // - where destination is the disconnected process (won't ACK)
+        // - where sender is the disconnected process (no one to forward to)
+        self.pending_acks
+            .retain(|(pid, _, _), ack| *pid != process && ack.sender != process);
+
         // Remove objects owned by this process from the state tree.
         let _removed = crate::state::remove_by_owner(&mut self.state, process);
 
@@ -463,6 +499,88 @@ impl Router {
                 self.observer_types.remove(&from);
             }
         }
+    }
+
+    /// Route an event to the owner of the target object.
+    ///
+    /// Qualifies the target ID, looks up the owner in the state tree,
+    /// remaps the sequence number per-destination, and forwards with
+    /// the dequalified target ID.
+    async fn handle_event(
+        &mut self,
+        from: ProcessId,
+        client: &str,
+        kind: &EventKind,
+        seq: u64,
+        id: &str,
+        props: &[Prop],
+    ) {
+        use crate::id::{dequalify, qualify};
+
+        let qualified_id = qualify(client, id);
+        let qid = match QualifiedId::parse(&qualified_id) {
+            Some(q) => q,
+            None => return, // Can't resolve unqualified target
+        };
+
+        // Look up the owner of this object in the state tree.
+        let target_pid = match self.state.get(&qid) {
+            Some(obj) => obj.data,
+            None => return, // Object doesn't exist — drop silently
+        };
+
+        // Don't route events back to the sender.
+        if target_pid == from {
+            return;
+        }
+
+        // Get the destination's client name for dequalification.
+        let dest_client = match self.client_name(target_pid) {
+            Some(n) => n.to_owned(),
+            None => return,
+        };
+
+        let event_type = kind.as_str();
+        let remapped_seq = self.next_event_seq(target_pid, event_type);
+        let dequalified_target = dequalify(&dest_client, &qualified_id);
+
+        // Serialize the event with remapped seq and dequalified target.
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        let _ = em.event(event_type, remapped_seq, dequalified_target, props);
+
+        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf))).await;
+
+        // Store PendingAck for the return trip.
+        self.pending_acks.insert(
+            (target_pid, event_type.to_owned(), remapped_seq),
+            PendingAck {
+                sender: from,
+                sender_seq: seq,
+                forwarded_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Route an ACK back to the original event sender.
+    ///
+    /// Looks up the pending ACK by (from, event_type, seq), remaps back
+    /// to the original sender's sequence number, and forwards.
+    async fn handle_ack(&mut self, from: ProcessId, kind: &EventKind, seq: u64, props: &[Prop]) {
+        let event_type = kind.as_str().to_owned();
+        let pending = self.pending_acks.remove(&(from, event_type.clone(), seq));
+
+        let Some(pending) = pending else {
+            return; // Stale or unknown ACK — drop silently
+        };
+
+        // Serialize the ACK with the original sender's seq.
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        let _ = em.ack(&event_type, pending.sender_seq, props);
+
+        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)))
+            .await;
     }
 
     /// Resync an observer by replaying the full projected state tree.
@@ -941,6 +1059,17 @@ impl Router {
     /// Get the next expand sequence number for a subscriber.
     fn next_expand_seq(&mut self, subscriber: ProcessId) -> u64 {
         let seq = self.expand_seqs.entry(subscriber).or_insert(0);
+        let current = *seq;
+        *seq += 1;
+        current
+    }
+
+    /// Get the next event sequence number for a (destination, event_type) pair.
+    fn next_event_seq(&mut self, target: ProcessId, event_type: &str) -> u64 {
+        let seq = self
+            .event_seqs
+            .entry((target, event_type.to_owned()))
+            .or_insert(0);
         let current = *seq;
         *seq += 1;
         current

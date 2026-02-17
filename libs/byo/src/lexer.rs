@@ -116,7 +116,7 @@ pub enum ParseErrorKind {
         found: String,
     },
     /// Sequence number is not a valid `u64`.
-    InvalidSeqnum,
+    InvalidSeqnum(String),
     /// `{` without matching `}`.
     UnclosedBrace,
 }
@@ -131,7 +131,9 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::Expected { expected, found } => {
                 write!(f, "expected {expected}, found {found}")
             }
-            ParseErrorKind::InvalidSeqnum => write!(f, "invalid sequence number"),
+            ParseErrorKind::InvalidSeqnum(val) => {
+                write!(f, "invalid sequence number: {val:?}")
+            }
             ParseErrorKind::UnclosedBrace => write!(f, "unclosed '{{' without matching '}}'"),
         }
     }

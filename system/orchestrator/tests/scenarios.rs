@@ -2,6 +2,7 @@ mod scenarios {
     pub mod basic;
     pub mod cascade;
     pub mod disconnect;
+    pub mod event_routing;
     pub mod expansion;
     pub mod late_connection;
     pub mod multi_app;

@@ -388,11 +388,6 @@ impl OutputQueue {
     pub fn drain(&mut self) -> Vec<RouterMsg> {
         self.queue.drain(..).collect()
     }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -502,9 +497,9 @@ mod tests {
 
     #[test]
     fn output_queue_default() {
-        let q = OutputQueue::new();
+        let mut q = OutputQueue::new();
         assert!(!q.is_blocked());
-        assert!(q.is_empty());
+        assert!(q.drain().is_empty());
     }
 
     #[test]
