@@ -616,7 +616,7 @@ impl Router {
     /// up all expansion nodes, and the tree relationship itself encodes the
     /// expansion link (no `expanded_from` field needed).
     fn update_expansion_state(&mut self, batch: &PendingBatch) {
-        for (source_qid_str, (daemon_pid, expansion_bytes)) in &batch.expansions {
+        for (source_qid_str, (daemon_pid, expansion_bytes, _is_re_expand)) in &batch.expansions {
             let Some(source_qid) = QualifiedId::parse(source_qid_str) else {
                 continue;
             };
@@ -879,14 +879,6 @@ impl Router {
             return;
         };
 
-        // Check if this specific expand is a re-expand before completing it.
-        let is_re_expand = self.pending_batches[idx]
-            .pending_expands
-            .iter()
-            .find(|e| e.subscriber == from && e.seq == seq)
-            .map(|e| e.is_re_expand)
-            .unwrap_or(false);
-
         let batch = &mut self.pending_batches[idx];
         // Complete the specific expand and get the QID back.
         // Expansion bytes are recorded separately via record_expansion_output.
@@ -895,10 +887,10 @@ impl Router {
         if batch.is_ready() {
             let batch = self.pending_batches.remove(idx);
 
-            // Reconcile re-expansions: emit minimal diffs for each.
+            // Reconcile re-expansions using the per-expansion flag.
             let mut reconciliation_buf = Vec::new();
-            for (source_qid_str, (daemon_pid, expansion_bytes)) in &batch.expansions {
-                if is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
+            for (source_qid_str, (daemon_pid, expansion_bytes, is_re_expand)) in &batch.expansions {
+                if *is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
                     let delta = self.reconcile_expansion(&source_qid, *daemon_pid, expansion_bytes);
                     reconciliation_buf.extend_from_slice(&delta);
                 }
@@ -906,12 +898,13 @@ impl Router {
 
             let (mut rewritten, claimed_destroys) = batch.rewrite(&self.claims);
 
-            // Update state tree with expansion nodes (for initial expansions).
-            self.update_expansion_state(&batch);
-
-            // Handle cascade destroys (appends destroy commands to rewritten).
+            // Handle cascade destroys BEFORE updating expansion state so that
+            // old expansion children are cleaned up before new ones are added.
             self.handle_cascade_destroys(&claimed_destroys, &mut rewritten)
                 .await;
+
+            // Update state tree with expansion nodes (for initial expansions).
+            self.update_expansion_state(&batch);
 
             // Append reconciliation output.
             rewritten.extend_from_slice(&reconciliation_buf);
@@ -931,7 +924,6 @@ impl Router {
     }
 
     /// Record a daemon's expansion output for a pending batch.
-    #[allow(dead_code)]
     pub fn record_expansion_output(&mut self, from: ProcessId, seq: u64, raw: Vec<u8>) {
         let batch = self
             .pending_batches
@@ -939,15 +931,15 @@ impl Router {
             .find(|b| b.has_pending_expand(from, seq));
 
         if let Some(batch) = batch {
-            // Find the QID associated with this (from, seq) pair.
-            let qid = batch
+            // Find the QID and is_re_expand flag associated with this (from, seq) pair.
+            let expand_info = batch
                 .pending_expands
                 .iter()
                 .find(|e| e.subscriber == from && e.seq == seq)
-                .map(|e| e.qid.clone());
+                .map(|e| (e.qid.clone(), e.is_re_expand));
 
-            if let Some(ref qid) = qid {
-                batch.record_expansion(qid, from, raw);
+            if let Some((ref qid, is_re_expand)) = expand_info {
+                batch.record_expansion(qid, from, raw, is_re_expand);
             }
         }
     }
@@ -989,17 +981,6 @@ impl Router {
             if !projected.is_empty() {
                 self.send_to(target, WriteMsg::Byo(projected)).await;
             }
-        }
-    }
-
-    /// Forward an event to a target process (by object ID namespace).
-    #[allow(dead_code)]
-    pub async fn forward_event_to_owner(&self, qid_str: &str, event_payload: &[u8]) {
-        if let Some(qid) = QualifiedId::parse(qid_str)
-            && let Some(&pid) = self.name_to_id.get(qid.client())
-        {
-            self.send_to(pid, WriteMsg::Byo(event_payload.to_vec()))
-                .await;
         }
     }
 
@@ -1203,12 +1184,6 @@ fn emit_observed_descendant_destroys(
     }
 }
 
-/// Strip the outer Push/Pop wrapper from a `.expand` response body.
-///
-/// The parser's `parse_mandatory_children` always wraps the body in a
-/// Push (for `{`) and Pop (for `}`). These represent the response container,
-/// not structural nesting within the expansion content. This function returns
-/// the inner slice without that wrapper.
 /// Convert parsed props to a state-storage IndexMap.
 fn props_to_map(props: &[Prop<'_>]) -> IndexMap<String, PropValue> {
     let mut map = IndexMap::new();

@@ -6,7 +6,7 @@
 //! for compile-time-checked expected values.
 
 use crate::parser::parse;
-use crate::protocol::{strip_apc, Command};
+use crate::protocol::{Command, strip_apc};
 
 /// Parse both strings and assert structural equality.
 ///

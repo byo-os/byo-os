@@ -1,10 +1,10 @@
 use std::io;
 
-use byo::strip_apc;
 use byo::byo_assert_eq;
 use byo::byo_write;
 use byo::emitter::Emitter;
 use byo::parser::parse;
+use byo::strip_apc;
 
 /// Helper: run byo_write! inside a frame and return the output string.
 fn emit(f: impl FnOnce(&mut Emitter<&mut Vec<u8>>) -> io::Result<()>) -> String {
@@ -317,10 +317,7 @@ fn conditional_props_true() {
             +view sidebar class="w-64" if disabled { disabled class="opacity-50" }
         )
     });
-    byo::assert::assert_eq(
-        &out,
-        "\n+view sidebar class=w-64 disabled class=opacity-50",
-    );
+    byo::assert::assert_eq(&out, "\n+view sidebar class=w-64 disabled class=opacity-50");
 }
 
 #[test]

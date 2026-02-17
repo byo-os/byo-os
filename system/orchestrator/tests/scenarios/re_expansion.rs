@@ -280,3 +280,387 @@ async fn re_expansion_removes_node() {
     // No further messages.
     assert_no_message(&mut compositor_rx);
 }
+
+/// Helper: set up a router with compositor observing view,text, controls claiming
+/// button, and an app. Creates `+button settings label="Settings"` fully expanded,
+/// then returns everything ready for a mixed-expansion batch test.
+///
+/// Returns (router, compositor_rx, controls_rx, _app_rx) with the initial expansion
+/// for `settings` fully complete and all messages consumed.
+async fn setup_two_buttons() -> (
+    Router,
+    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+) {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (controls, mut controls_rx) = mock_process(2, "controls");
+    let (app, _app_rx) = mock_process(3, "app");
+    router.add_process(compositor);
+    router.add_process(controls);
+    router.add_process(app);
+
+    // Compositor observes view and text.
+    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
+
+    // Controls claims button.
+    send_byo(&mut router, pid(2), "?claim 0 button").await;
+
+    // App creates settings button (initial expansion).
+    send_byo(&mut router, pid(3), "+button settings label=\"Settings\"").await;
+
+    // Controls receives ?expand 0.
+    let _expand_msg = recv_byo_raw(&mut controls_rx);
+
+    // Controls responds with initial expansion.
+    send_byo(
+        &mut router,
+        pid(2),
+        ".expand 0 { +view settings-root class=\"btn\" { +text settings-label content=\"Settings\" } }",
+    )
+    .await;
+
+    // Compositor receives the initial expansion result.
+    let _initial = recv_byo_raw(&mut compositor_rx);
+
+    (router, compositor_rx, controls_rx, _app_rx)
+}
+
+/// Test 23b: Mixed batch with initial upsert + re-expansion patch, controls
+/// responds to the initial expansion first, then the re-expansion.
+///
+/// This tests the per-expansion `is_re_expand` flag: the initial expansion
+/// (for `extra`) must NOT be reconciled, while the re-expansion (for
+/// `settings`) MUST be reconciled — regardless of completion order.
+#[tokio::test]
+async fn mixed_upsert_and_patch_completes_in_order() {
+    let (mut router, mut compositor_rx, mut controls_rx, _app_rx) = setup_two_buttons().await;
+
+    // App sends a single batch: create new button + patch existing one.
+    send_byo(
+        &mut router,
+        pid(3),
+        "+button extra label=\"Extra\" @button settings label=\"New\"",
+    )
+    .await;
+
+    // Controls receives two ?expand requests.
+    let expand1 = recv_byo_raw(&mut controls_rx);
+    let expand2 = recv_byo_raw(&mut controls_rx);
+
+    // One should be for extra (initial), one for settings (re-expand with reduced state).
+    assert!(
+        expand1.contains("app:extra") || expand2.contains("app:extra"),
+        "expected ?expand for app:extra, got: {expand1} / {expand2}"
+    );
+    assert!(
+        expand1.contains("app:settings") || expand2.contains("app:settings"),
+        "expected ?expand for app:settings, got: {expand1} / {expand2}"
+    );
+
+    // Find the seq numbers.
+    let (extra_seq, settings_seq) = if expand1.contains("app:extra") {
+        let extra_seq = expand1.split_whitespace().nth(1).unwrap();
+        let settings_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    } else {
+        let settings_seq = expand1.split_whitespace().nth(1).unwrap();
+        let extra_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    };
+
+    // Controls responds to EXTRA first (initial expansion).
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {extra_seq} {{ +view extra-root class=\"btn\" {{ +text extra-label content=\"Extra\" }} }}"
+        ),
+    )
+    .await;
+
+    // Batch is not ready yet — settings still pending.
+    assert_no_message(&mut compositor_rx);
+
+    // Controls responds to SETTINGS (re-expansion).
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {settings_seq} {{ +view settings-root class=\"btn\" {{ +text settings-label content=\"New\" }} }}"
+        ),
+    )
+    .await;
+
+    // Compositor receives the combined output.
+    let s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+
+    // Extra should be created (initial expansion → upsert).
+    let extra_created = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:extra-root")
+    });
+    assert!(
+        extra_created,
+        "expected +view controls:extra-root (initial expansion), got: {s}"
+    );
+
+    // Settings should be reconciled (re-expansion → patch delta only).
+    // The content changed from "Settings" to "New" on the text node.
+    let settings_patched = cmds.iter().any(|c| {
+        matches!(c, Command::Patch { kind, id, .. }
+            if *kind == "text" && *id == "controls:settings-label")
+    });
+    assert!(
+        settings_patched,
+        "expected @text controls:settings-label (reconciliation delta), got: {s}"
+    );
+
+    // Settings root should NOT be a full upsert (it should be a patch or absent).
+    let settings_upserted = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:settings-root")
+    });
+    assert!(
+        !settings_upserted,
+        "settings-root should NOT be a full upsert in reconciliation, got: {s}"
+    );
+
+    assert_no_message(&mut compositor_rx);
+}
+
+/// Test 23c: Same as mixed_upsert_and_patch_completes_in_order but controls
+/// responds to the re-expansion (settings) first, then the initial (extra).
+///
+/// This verifies that completion order doesn't change semantics.
+#[tokio::test]
+async fn mixed_upsert_and_patch_completes_out_of_order() {
+    let (mut router, mut compositor_rx, mut controls_rx, _app_rx) = setup_two_buttons().await;
+
+    // App sends a single batch: create new button + patch existing one.
+    send_byo(
+        &mut router,
+        pid(3),
+        "+button extra label=\"Extra\" @button settings label=\"New\"",
+    )
+    .await;
+
+    // Controls receives two ?expand requests.
+    let expand1 = recv_byo_raw(&mut controls_rx);
+    let expand2 = recv_byo_raw(&mut controls_rx);
+
+    let (extra_seq, settings_seq) = if expand1.contains("app:extra") {
+        let extra_seq = expand1.split_whitespace().nth(1).unwrap();
+        let settings_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    } else {
+        let settings_seq = expand1.split_whitespace().nth(1).unwrap();
+        let extra_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    };
+
+    // Controls responds to SETTINGS first (re-expansion — out of order).
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {settings_seq} {{ +view settings-root class=\"btn\" {{ +text settings-label content=\"New\" }} }}"
+        ),
+    )
+    .await;
+
+    // Batch is not ready yet — extra still pending.
+    assert_no_message(&mut compositor_rx);
+
+    // Controls responds to EXTRA (initial expansion).
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {extra_seq} {{ +view extra-root class=\"btn\" {{ +text extra-label content=\"Extra\" }} }}"
+        ),
+    )
+    .await;
+
+    // Compositor receives the combined output.
+    let s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+
+    // Extra should be created (initial expansion → upsert).
+    let extra_created = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:extra-root")
+    });
+    assert!(
+        extra_created,
+        "expected +view controls:extra-root (initial expansion), got: {s}"
+    );
+
+    // Settings should be reconciled (re-expansion → patch delta only).
+    let settings_patched = cmds.iter().any(|c| {
+        matches!(c, Command::Patch { kind, id, .. }
+            if *kind == "text" && *id == "controls:settings-label")
+    });
+    assert!(
+        settings_patched,
+        "expected @text controls:settings-label (reconciliation delta), got: {s}"
+    );
+
+    // Settings root should NOT be a full upsert.
+    let settings_upserted = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:settings-root")
+    });
+    assert!(
+        !settings_upserted,
+        "settings-root should NOT be a full upsert in reconciliation, got: {s}"
+    );
+
+    assert_no_message(&mut compositor_rx);
+}
+
+/// Test 23d: Mixed batch with patch first, then upsert — verifying command
+/// order in the batch doesn't affect per-expansion flag semantics.
+#[tokio::test]
+async fn mixed_patch_and_upsert() {
+    let (mut router, mut compositor_rx, mut controls_rx, _app_rx) = setup_two_buttons().await;
+
+    // App sends a single batch: patch existing, then create new (reversed order).
+    send_byo(
+        &mut router,
+        pid(3),
+        "@button settings label=\"New\" +button extra label=\"Extra\"",
+    )
+    .await;
+
+    // Controls receives two ?expand requests.
+    let expand1 = recv_byo_raw(&mut controls_rx);
+    let expand2 = recv_byo_raw(&mut controls_rx);
+
+    let (extra_seq, settings_seq) = if expand1.contains("app:extra") {
+        let extra_seq = expand1.split_whitespace().nth(1).unwrap();
+        let settings_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    } else {
+        let settings_seq = expand1.split_whitespace().nth(1).unwrap();
+        let extra_seq = expand2.split_whitespace().nth(1).unwrap();
+        (extra_seq.to_string(), settings_seq.to_string())
+    };
+
+    // Controls responds to both.
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {extra_seq} {{ +view extra-root class=\"btn\" {{ +text extra-label content=\"Extra\" }} }}"
+        ),
+    )
+    .await;
+
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {settings_seq} {{ +view settings-root class=\"btn\" {{ +text settings-label content=\"New\" }} }}"
+        ),
+    )
+    .await;
+
+    // Compositor receives the combined output.
+    let s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+
+    // Extra should be created (initial expansion).
+    let extra_created = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:extra-root")
+    });
+    assert!(
+        extra_created,
+        "expected +view controls:extra-root (initial expansion), got: {s}"
+    );
+
+    // Settings should be reconciled (re-expansion).
+    let settings_patched = cmds.iter().any(|c| {
+        matches!(c, Command::Patch { kind, id, .. }
+            if *kind == "text" && *id == "controls:settings-label")
+    });
+    assert!(
+        settings_patched,
+        "expected @text controls:settings-label (reconciliation delta), got: {s}"
+    );
+
+    // Settings root should NOT be a full upsert.
+    let settings_upserted = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:settings-root")
+    });
+    assert!(
+        !settings_upserted,
+        "settings-root should NOT be a full upsert in reconciliation, got: {s}"
+    );
+
+    assert_no_message(&mut compositor_rx);
+}
+
+/// Test 23e: Destroy then create of the same claimed-type ID in one batch.
+///
+/// The new `+button save` should be treated as an initial expansion (NOT
+/// a re-expansion), since the old one was destroyed in the same batch.
+#[tokio::test]
+async fn destroy_then_create_not_re_expansion() {
+    let (mut router, mut compositor_rx, mut controls_rx, _app_rx) = setup_initial_expansion().await;
+
+    // App destroys the old button and creates a new one with the same ID.
+    send_byo(
+        &mut router,
+        pid(3),
+        "-button save +button save label=\"New Save\"",
+    )
+    .await;
+
+    // Controls receives a ?expand for the new save (initial, not re-expand).
+    let expand_msg = recv_byo_raw(&mut controls_rx);
+    assert!(
+        expand_msg.contains("app:save"),
+        "expected ?expand for app:save, got: {expand_msg}"
+    );
+
+    // Extract the seq number.
+    let seq: &str = expand_msg.split_whitespace().nth(1).unwrap();
+
+    // Controls responds with expansion.
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(
+            ".expand {seq} {{ +view save-root class=\"new-btn\" {{ +text save-label content=\"New Save\" }} }}"
+        ),
+    )
+    .await;
+
+    // Compositor receives output.
+    let s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+
+    // Should have destroys for OLD expansion children (cascade from -button save).
+    let has_destroy = cmds.iter().any(|c| matches!(c, Command::Destroy { .. }));
+    assert!(
+        has_destroy,
+        "expected destroy commands for old expansion children, got: {s}"
+    );
+
+    // Should have the NEW expansion created as upserts (initial expansion).
+    let new_root = cmds.iter().any(|c| {
+        matches!(c, Command::Upsert { kind, id, .. }
+            if *kind == "view" && *id == "controls:save-root")
+    });
+    assert!(
+        new_root,
+        "expected +view controls:save-root (initial expansion for new save), got: {s}"
+    );
+
+    assert_no_message(&mut compositor_rx);
+}

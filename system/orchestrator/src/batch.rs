@@ -22,8 +22,8 @@ pub struct PendingBatch {
     pub raw: Vec<u8>,
     /// Outstanding `!expand` requests.
     pub pending_expands: Vec<PendingExpand>,
-    /// QID → (daemon PID, raw expansion bytes) from daemons.
-    pub expansions: HashMap<String, (ProcessId, Vec<u8>)>,
+    /// QID → (daemon PID, raw expansion bytes, is_re_expand) from daemons.
+    pub expansions: HashMap<String, (ProcessId, Vec<u8>, bool)>,
 }
 
 impl PendingBatch {
@@ -93,9 +93,10 @@ impl PendingBatch {
         qid: &QualifiedId,
         owner: ProcessId,
         expansion_bytes: Vec<u8>,
+        is_re_expand: bool,
     ) {
         self.expansions
-            .insert(qid.to_string(), (owner, expansion_bytes));
+            .insert(qid.to_string(), (owner, expansion_bytes, is_re_expand));
     }
 
     /// Rewrite the batch: re-parse the original payload, splice expansions,
@@ -182,7 +183,7 @@ impl PendingBatch {
 
                     if *id != "_" && self.expansions.contains_key(&qid_str) {
                         // Splice in the daemon expansion — recursively rewrite it.
-                        let (_, expansion) = &self.expansions[&qid_str];
+                        let (_, expansion, _) = &self.expansions[&qid_str];
                         if let Ok(exp_str) = std::str::from_utf8(expansion)
                             && let Ok(exp_cmds) = byo::parser::parse(exp_str)
                         {
@@ -437,7 +438,7 @@ mod tests {
         assert!(!batch.is_ready());
 
         let id = batch.complete_expand(pid(2), 0).unwrap();
-        batch.record_expansion(&id, pid(2), b"+view save-root class=btn".to_vec());
+        batch.record_expansion(&id, pid(2), b"+view save-root class=btn".to_vec(), false);
         assert!(batch.is_ready());
     }
 
@@ -487,7 +488,11 @@ mod tests {
 
         batch.expansions.insert(
             "app:save".to_string(),
-            (pid(2), b"+view controls:save-root class=btn".to_vec()),
+            (
+                pid(2),
+                b"+view controls:save-root class=btn".to_vec(),
+                false,
+            ),
         );
 
         let (result, _) = batch.rewrite(&subs);
@@ -572,13 +577,18 @@ mod tests {
             (
                 pid(2),
                 b"+view controls:save-root { +icon controls:save-icon name=check }".to_vec(),
+                false,
             ),
         );
 
         // Icon daemon expansion for controls:save-icon (already qualified).
         batch.expansions.insert(
             "controls:save-icon".to_string(),
-            (pid(3), b"+image icons:check-img src=check.png".to_vec()),
+            (
+                pid(3),
+                b"+image icons:check-img src=check.png".to_vec(),
+                false,
+            ),
         );
 
         let (result, _) = batch.rewrite(&claims);
