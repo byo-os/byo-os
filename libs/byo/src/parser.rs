@@ -330,7 +330,11 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         }
     }
 
-    /// Parse a mandatory children block (used by `.expand`).
+    /// Parse a mandatory body block (used by `.expand`).
+    ///
+    /// Unlike `parse_children`, this does **not** add `Push`/`Pop` to `cmds`.
+    /// The braces here are grammar syntax delimiting the response body, not
+    /// tree-structure commands. The emitter re-wraps with `{ ... }` on output.
     fn parse_mandatory_children(&mut self, cmds: &mut Vec<Command<'a>>) -> Result<(), ParseError> {
         match self.peek() {
             Some(Spanned {
@@ -338,7 +342,6 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 ..
             }) => {
                 let open_span = self.advance().span; // consume {
-                cmds.push(Command::Push);
 
                 while !self.at_end() {
                     if matches!(
@@ -361,7 +364,6 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 }
 
                 self.advance(); // consume }
-                cmds.push(Command::Pop);
                 Ok(())
             }
             _ => Err(self.error(ParseErrorKind::Expected {
@@ -1073,8 +1075,9 @@ mod tests {
             } => {
                 assert_eq!(*kind, ResponseKind::Expand);
                 assert_eq!(*seq, 0);
-                // body: Push, Upsert(root), Push, Upsert(label), Pop, Pop
-                assert_eq!(body.len(), 6);
+                // body: Upsert(root), Push, Upsert(label), Pop
+                // (no outer Push/Pop — braces are grammar syntax, not commands)
+                assert_eq!(body.len(), 4);
             }
             _ => panic!("expected Response with body"),
         }
