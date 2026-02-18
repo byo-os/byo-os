@@ -1,0 +1,46 @@
+//! ViewProps — persistent Bevy component for BYO `view` type.
+
+use bevy::prelude::*;
+use byo::{FromProps, ToProps};
+
+use super::types::*;
+
+/// Persistent component storing all BYO props for a `view` entity.
+/// Reconciliation systems watch `Changed<ViewProps>` to update Bevy UI.
+#[derive(Component, Debug, Default, Clone, FromProps, ToProps)]
+pub struct ViewProps {
+    pub class: Option<String>,
+    pub width: Option<ByoVal>,
+    pub height: Option<ByoVal>,
+    pub min_width: Option<ByoVal>,
+    pub max_width: Option<ByoVal>,
+    pub min_height: Option<ByoVal>,
+    pub max_height: Option<ByoVal>,
+    pub background_color: Option<ByoColor>,
+    pub border_color: Option<ByoColor>,
+    pub border_width: Option<ByoRect>,
+    pub border_radius: Option<ByoBorderRadius>,
+    pub padding: Option<ByoRect>,
+    pub margin: Option<ByoRect>,
+    pub gap: Option<ByoVal>,
+    pub column_gap: Option<ByoVal>,
+    pub row_gap: Option<ByoVal>,
+    pub display: Option<ByoDisplay>,
+    pub flex_direction: Option<ByoFlexDirection>,
+    pub align_items: Option<ByoAlignItems>,
+    pub align_self: Option<ByoAlignSelf>,
+    pub justify_content: Option<ByoJustifyContent>,
+    pub flex_wrap: Option<ByoFlexWrap>,
+    pub overflow: Option<ByoOverflow>,
+    pub position: Option<ByoPositionType>,
+    pub left: Option<ByoVal>,
+    pub right: Option<ByoVal>,
+    pub top: Option<ByoVal>,
+    pub bottom: Option<ByoVal>,
+    pub flex_grow: Option<f32>,
+    pub flex_shrink: Option<f32>,
+    pub flex_basis: Option<ByoVal>,
+    pub order: Option<i32>,
+    pub hidden: bool,
+    pub opacity: Option<f32>,
+}

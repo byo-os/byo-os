@@ -28,8 +28,15 @@ pub trait WriteProp {
 }
 
 /// Struct-level: build a typed struct from a prop slice.
-pub trait FromProps: Sized {
+pub trait FromProps: Sized + Default {
     fn from_props(props: &[Prop]) -> Self;
+
+    /// Patch `self` with only the props mentioned in the slice.
+    /// Unmentioned fields are left untouched (unlike `from_props`
+    /// which starts from `Default`).
+    fn apply_props(&mut self, props: &[Prop]) {
+        *self = Self::from_props(props);
+    }
 }
 
 /// Struct-level: convert a typed struct into a prop list.
@@ -65,16 +72,6 @@ impl ReadProp for String {
     }
 }
 
-impl ReadProp for Option<String> {
-    fn apply(&mut self, prop: &Prop) {
-        match prop {
-            Prop::Value { value, .. } => *self = Some(value.to_string()),
-            Prop::Boolean { .. } => *self = Some("true".to_string()),
-            Prop::Remove { .. } => *self = None,
-        }
-    }
-}
-
 macro_rules! impl_read_prop_numeric {
     ($($ty:ty),*) => {
         $(
@@ -87,25 +84,23 @@ macro_rules! impl_read_prop_numeric {
                     }
                 }
             }
-
-            impl ReadProp for Option<$ty> {
-                fn apply(&mut self, prop: &Prop) {
-                    match prop {
-                        Prop::Value { value, .. } => {
-                            if let Ok(v) = value.parse::<$ty>() {
-                                *self = Some(v);
-                            }
-                        }
-                        Prop::Remove { .. } => *self = None,
-                        _ => {}
-                    }
-                }
-            }
         )*
     };
 }
 
 impl_read_prop_numeric!(f32, f64, i32, u32, i64, u64);
+
+impl<T: ReadProp> ReadProp for Option<T> {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Remove { .. } => *self = None,
+            _ => {
+                let inner = self.get_or_insert_with(T::default);
+                inner.apply(prop);
+            }
+        }
+    }
+}
 
 impl<T: ReadProp> ReadProp for Vec<T> {
     fn apply(&mut self, prop: &Prop) {
@@ -137,14 +132,6 @@ impl WriteProp for String {
     }
 }
 
-impl WriteProp for Option<String> {
-    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
-        if let Some(v) = self {
-            out.push(Prop::val(key, v.as_str()));
-        }
-    }
-}
-
 macro_rules! impl_write_prop_numeric {
     ($($ty:ty),*) => {
         $(
@@ -153,19 +140,19 @@ macro_rules! impl_write_prop_numeric {
                     out.push(Prop::val(key, self.to_string()));
                 }
             }
-
-            impl WriteProp for Option<$ty> {
-                fn encode(&self, key: &str, out: &mut Vec<Prop>) {
-                    if let Some(v) = self {
-                        out.push(Prop::val(key, v.to_string()));
-                    }
-                }
-            }
         )*
     };
 }
 
 impl_write_prop_numeric!(f32, f64, i32, u32, i64, u64);
+
+impl<T: WriteProp> WriteProp for Option<T> {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        if let Some(v) = self {
+            v.encode(key, out);
+        }
+    }
+}
 
 impl<T: WriteProp> WriteProp for Vec<T> {
     fn encode(&self, key: &str, out: &mut Vec<Prop>) {

@@ -175,6 +175,16 @@ pub fn derive_from_props(input: DeriveInput) -> TokenStream {
         })
         .collect();
 
+    let apply_match_arms: Vec<TokenStream> = fields
+        .iter()
+        .filter(|f| !f.skip)
+        .map(|f| {
+            let ident = &f.ident;
+            let wire_key = &f.wire_key;
+            quote! { #wire_key => ::byo::props::ReadProp::apply(&mut self.#ident, __prop), }
+        })
+        .collect();
+
     quote! {
         impl #impl_generics ::byo::props::FromProps for #name #ty_generics #where_clause {
             fn from_props(__props: &[::byo::Prop]) -> Self {
@@ -186,6 +196,15 @@ pub fn derive_from_props(input: DeriveInput) -> TokenStream {
                     }
                 }
                 Self { #(#field_inits)* }
+            }
+
+            fn apply_props(&mut self, __props: &[::byo::Prop]) {
+                for __prop in __props {
+                    match __prop.key() {
+                        #(#apply_match_arms)*
+                        _ => {}
+                    }
+                }
             }
         }
     }

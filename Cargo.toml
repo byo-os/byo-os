@@ -14,7 +14,7 @@ edition = "2024"
 [workspace.dependencies]
 byo = { path = "libs/byo" }
 byo-macros = { path = "libs/byo-macros" }
-bevy = { version = "0.18", features = ["ui"] }
+bevy = { version = "0.18", features = ["ui", "bevy_pbr"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -8,7 +8,7 @@ use byo::{FromProps, Prop, ToProps, byo_assert_eq, byo_write};
 // Test structs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, FromProps, ToProps)]
+#[derive(Debug, Clone, PartialEq, FromProps, ToProps)]
 struct ViewProps {
     class: Option<String>,
     hidden: bool,
@@ -41,6 +41,56 @@ struct VecProps {
     #[prop(rename = "tag")]
     tags: Vec<String>,
     label: String,
+}
+
+// ---------------------------------------------------------------------------
+// Default impls for test structs (needed for FromProps: Default bound)
+// ---------------------------------------------------------------------------
+
+impl Default for ViewProps {
+    fn default() -> Self {
+        Self {
+            class: None,
+            hidden: false,
+            order: 0,
+        }
+    }
+}
+
+impl Default for RenamedProps {
+    fn default() -> Self {
+        Self {
+            data_value: String::new(),
+            label: String::new(),
+        }
+    }
+}
+
+impl Default for AutoKebabProps {
+    fn default() -> Self {
+        Self {
+            bg_color: String::new(),
+            font_size: 0,
+        }
+    }
+}
+
+impl Default for SkippedProps {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            internal: 0,
+        }
+    }
+}
+
+impl Default for VecProps {
+    fn default() -> Self {
+        Self {
+            tags: Vec::new(),
+            label: String::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +390,7 @@ fn enum_round_trip() {
 
 #[test]
 fn enum_in_struct() {
-    #[derive(Debug, PartialEq, FromProps, ToProps)]
+    #[derive(Debug, Default, PartialEq, FromProps, ToProps)]
     struct ButtonProps {
         label: String,
         variant: Variant,
@@ -402,7 +452,7 @@ fn newtype_string() {
 
 #[test]
 fn newtype_in_struct() {
-    #[derive(Debug, PartialEq, FromProps, ToProps)]
+    #[derive(Debug, Default, PartialEq, FromProps, ToProps)]
     struct BoxProps {
         width: Pixels,
         height: Pixels,
@@ -418,4 +468,104 @@ fn newtype_in_struct() {
         encoded,
         vec![Prop::val("width", "100"), Prop::val("height", "50")]
     );
+}
+
+// ---------------------------------------------------------------------------
+// apply_props tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_props_partial_patch() {
+    let mut v = ViewProps {
+        class: Some("w-64".to_string()),
+        hidden: true,
+        order: 5,
+    };
+    // Only patch order — class and hidden should be preserved
+    v.apply_props(&[Prop::val("order", "10")]);
+    assert_eq!(v.class, Some("w-64".to_string()));
+    assert!(v.hidden);
+    assert_eq!(v.order, 10);
+}
+
+#[test]
+fn apply_props_multiple_fields() {
+    let mut v = ViewProps {
+        class: Some("flex".to_string()),
+        hidden: false,
+        order: 0,
+    };
+    v.apply_props(&[Prop::val("class", "grid"), Prop::flag("hidden")]);
+    assert_eq!(v.class, Some("grid".to_string()));
+    assert!(v.hidden);
+    assert_eq!(v.order, 0); // untouched
+}
+
+#[test]
+fn apply_props_remove_resets_field() {
+    let mut v = ViewProps {
+        class: Some("w-64".to_string()),
+        hidden: true,
+        order: 5,
+    };
+    v.apply_props(&[Prop::remove("class"), Prop::remove("hidden")]);
+    assert_eq!(v.class, None);
+    assert!(!v.hidden);
+    assert_eq!(v.order, 5); // untouched
+}
+
+#[test]
+fn apply_props_empty_slice_no_change() {
+    let original = ViewProps {
+        class: Some("px-4".to_string()),
+        hidden: true,
+        order: 42,
+    };
+    let mut v = original.clone();
+    v.apply_props(&[]);
+    assert_eq!(v, original);
+}
+
+#[test]
+fn apply_props_skipped_field_ignored() {
+    let mut v = SkippedProps {
+        label: "Hello".to_string(),
+        internal: 99,
+    };
+    v.apply_props(&[Prop::val("label", "World"), Prop::val("internal", "0")]);
+    assert_eq!(v.label, "World");
+    assert_eq!(v.internal, 99); // skipped, unchanged
+}
+
+#[test]
+fn apply_props_vec_accumulates() {
+    let mut v = VecProps {
+        tags: vec!["existing".to_string()],
+        label: "Hi".to_string(),
+    };
+    v.apply_props(&[Prop::val("tag", "new")]);
+    assert_eq!(v.tags, vec!["existing".to_string(), "new".to_string()]);
+    assert_eq!(v.label, "Hi"); // untouched
+}
+
+#[test]
+fn apply_props_vec_remove_clears() {
+    let mut v = VecProps {
+        tags: vec!["a".to_string(), "b".to_string()],
+        label: "Hi".to_string(),
+    };
+    v.apply_props(&[Prop::remove("tag")]);
+    assert!(v.tags.is_empty());
+    assert_eq!(v.label, "Hi");
+}
+
+#[test]
+fn apply_props_with_rename() {
+    let mut v = RenamedProps {
+        data_value: "old".to_string(),
+        label: "original".to_string(),
+    };
+    v.apply_props(&[Prop::val("val", "new")]);
+    assert_eq!(v.data_value, "new");
+    assert_eq!(v.label, "original"); // untouched
 }
