@@ -90,6 +90,19 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
 
     /// Set a parent-child relationship.
     pub fn set_parent(&mut self, child: &K, parent: &K) {
+        debug_assert!(
+            child != parent && !self.collect_descendants(child).contains(parent),
+            "set_parent would create a cycle"
+        );
+
+        // Remove from old parent's children list if reparenting.
+        if let Some(old_parent) = self.objects.get(child).and_then(|obj| obj.parent.clone())
+            && old_parent != *parent
+            && let Some(old_parent_obj) = self.objects.get_mut(&old_parent)
+        {
+            old_parent_obj.children.retain(|c| c != child);
+        }
+
         if let Some(obj) = self.objects.get_mut(parent)
             && !obj.children.contains(child)
         {
@@ -582,6 +595,51 @@ mod tests {
 
         let p = tree.get(&parent).unwrap();
         assert_eq!(p.children.len(), 1);
+    }
+
+    #[test]
+    fn set_parent_reparent_removes_from_old() {
+        let mut tree = TestTree::new();
+        let a = key("a");
+        let b = key("b");
+        let c = key("c");
+        tree.upsert("view", &a, &IndexMap::new(), 1);
+        tree.upsert("view", &b, &IndexMap::new(), 1);
+        tree.upsert("view", &c, &IndexMap::new(), 1);
+
+        tree.set_parent(&c, &a);
+        assert_eq!(tree.get(&a).unwrap().children, vec![c.clone()]);
+
+        // Move c to b.
+        tree.set_parent(&c, &b);
+        assert_eq!(tree.get(&b).unwrap().children, vec![c.clone()]);
+        assert_eq!(tree.get(&c).unwrap().parent, Some(b));
+
+        // a should no longer have c as a child.
+        assert!(tree.get(&a).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn destroy_after_reparent_does_not_cascade() {
+        let mut tree = TestTree::new();
+        let a = key("a");
+        let b = key("b");
+        let c = key("c");
+        tree.upsert("view", &a, &IndexMap::new(), 1);
+        tree.upsert("view", &b, &IndexMap::new(), 1);
+        tree.upsert("view", &c, &IndexMap::new(), 1);
+
+        tree.set_parent(&c, &a);
+        tree.set_parent(&c, &b);
+
+        // Destroying a should NOT cascade to c (now under b).
+        tree.destroy(&a);
+        assert!(tree.get(&a).is_none());
+        assert!(tree.get(&b).is_some());
+        assert!(
+            tree.get(&c).is_some(),
+            "c should survive — it was reparented to b"
+        );
     }
 
     #[test]
