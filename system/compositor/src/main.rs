@@ -6,6 +6,7 @@ mod plugin;
 mod props;
 mod render;
 mod style;
+mod transition;
 
 use std::f32::consts::FRAC_PI_6;
 

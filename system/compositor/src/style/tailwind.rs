@@ -11,6 +11,9 @@ use crate::props::types::*;
 use crate::props::view::ViewProps;
 use crate::style::color::parse_color;
 use crate::style::palette::tailwind_color;
+use crate::transition::config::{
+    EaseFn, TransitionProperty, tw_transition_colors, tw_transition_default, tw_transition_opacity,
+};
 
 /// Apply all Tailwind utility classes in `class_str` to `props`.
 pub fn apply_classes(props: &mut ViewProps, class_str: &str) {
@@ -780,6 +783,15 @@ fn apply_class(props: &mut ViewProps, class: &str) {
         return;
     }
 
+    // Transition classes
+    apply_transition_class(
+        class,
+        &mut props.tw_transition_property,
+        &mut props.tw_transition_duration,
+        &mut props.tw_transition_easing,
+        &mut props.tw_transition_delay,
+    );
+
     // 2D transforms on views
     apply_2d_transform_class(
         class,
@@ -880,11 +892,16 @@ fn parse_rotation_value(s: &str) -> Option<f32> {
 // ---------------------------------------------------------------------------
 
 /// All class-resolved values for 3D objects (windows/layers).
-/// Covers transforms, PBR material properties, and colors.
+/// Covers transforms, PBR material properties, colors, and transitions.
 #[derive(Debug, Default, Clone)]
 pub struct TransformStyle {
     // Layer format
     pub format: Option<ByoTextureFormat>,
+    // Transitions (tw-derived)
+    pub tw_transition_property: Option<TransitionProperty>,
+    pub tw_transition_duration: Option<f32>,
+    pub tw_transition_easing: Option<EaseFn>,
+    pub tw_transition_delay: Option<f32>,
     // Transforms
     pub translate_x: Option<f32>,
     pub translate_y: Option<f32>,
@@ -1003,6 +1020,15 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
         }
         _ => {}
     }
+
+    // ── Transition classes ──────────────────────────────────────────────
+    apply_transition_class(
+        class,
+        &mut style.tw_transition_property,
+        &mut style.tw_transition_duration,
+        &mut style.tw_transition_easing,
+        &mut style.tw_transition_delay,
+    );
 
     // ── Negative prefix for transforms ───────────────────────────────
     let (class, neg) = if let Some(rest) = class.strip_prefix('-') {
@@ -1193,6 +1219,113 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
         style.depth_bias = Some(v);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Transition class parsing (shared helper)
+// ---------------------------------------------------------------------------
+
+/// Parse transition-related Tailwind utility classes.
+fn apply_transition_class(
+    class: &str,
+    property: &mut Option<TransitionProperty>,
+    duration: &mut Option<f32>,
+    easing: &mut Option<EaseFn>,
+    delay: &mut Option<f32>,
+) {
+    match class {
+        "transition" => {
+            *property = Some(tw_transition_default());
+            if duration.is_none() {
+                *duration = Some(0.15);
+            }
+            if easing.is_none() {
+                *easing = Some(EaseFn::SmoothStep);
+            }
+            return;
+        }
+        "transition-all" => {
+            *property = Some(TransitionProperty::All);
+            if duration.is_none() {
+                *duration = Some(0.15);
+            }
+            if easing.is_none() {
+                *easing = Some(EaseFn::SmoothStep);
+            }
+            return;
+        }
+        "transition-colors" => {
+            *property = Some(tw_transition_colors());
+            if duration.is_none() {
+                *duration = Some(0.15);
+            }
+            if easing.is_none() {
+                *easing = Some(EaseFn::SmoothStep);
+            }
+            return;
+        }
+        "transition-opacity" => {
+            *property = Some(tw_transition_opacity());
+            if duration.is_none() {
+                *duration = Some(0.15);
+            }
+            if easing.is_none() {
+                *easing = Some(EaseFn::SmoothStep);
+            }
+            return;
+        }
+        "transition-none" => {
+            *property = None;
+            *duration = None;
+            *easing = None;
+            *delay = None;
+            return;
+        }
+        "ease-linear" => {
+            *easing = Some(EaseFn::Linear);
+            return;
+        }
+        "ease-in" => {
+            *easing = Some(EaseFn::CubicIn);
+            return;
+        }
+        "ease-out" => {
+            *easing = Some(EaseFn::CubicOut);
+            return;
+        }
+        "ease-in-out" => {
+            *easing = Some(EaseFn::CubicInOut);
+            return;
+        }
+        _ => {}
+    }
+
+    // duration-{N} or duration-[Nms]
+    if let Some(rest) = class.strip_prefix("duration-") {
+        if let Some(d) = parse_duration_class(rest) {
+            *duration = Some(d);
+        }
+        return;
+    }
+
+    // delay-{N} or delay-[Nms]
+    if let Some(rest) = class.strip_prefix("delay-")
+        && let Some(d) = parse_duration_class(rest)
+    {
+        *delay = Some(d);
+    }
+}
+
+/// Parse a duration/delay class value: integer (ms) or arbitrary `[Nms]`/`[Ns]`.
+fn parse_duration_class(s: &str) -> Option<f32> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return crate::transition::config::parse_duration(inner);
+    }
+    s.parse::<u32>().ok().map(|n| n as f32 / 1000.0)
+}
+
+// ---------------------------------------------------------------------------
+// PBR parsing helpers
+// ---------------------------------------------------------------------------
 
 /// Parse a PBR shorthand value: 0-100 → 0.0-1.0, or arbitrary `[value]`.
 fn parse_pbr_value(s: &str) -> Option<f32> {

@@ -6,6 +6,7 @@ use crate::commands;
 use crate::id_map::IdMap;
 use crate::io::{self, ByoBatch};
 use crate::style;
+use crate::transition;
 
 /// Conversion factor from protocol pixel coordinates to 3D world units (meters).
 /// Computed from the assumed logical PPI: `world_scale = 1.0 / (ppi * 39.3701)`.
@@ -26,12 +27,24 @@ impl Plugin for ByoPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    transition::systems::handle_view_transitions,
+                    transition::systems::handle_window_transitions,
+                    transition::systems::handle_layer_transitions,
                     style::reconcile_views,
                     style::reconcile_view_transforms,
                     style::reconcile_text,
                     style::reconcile_windows,
                     style::reconcile_layers,
                     style::reorder_children,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    transition::systems::tick_view_transitions,
+                    transition::systems::tick_window_transitions,
+                    transition::systems::tick_layer_transitions,
                 ),
             );
     }

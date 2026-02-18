@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use byo::{FromProps, ToProps};
 
 use super::types::*;
+use crate::transition::config::{EaseFn, TransitionProperty};
 
 /// Persistent component storing all BYO props for a `layer` entity.
 /// Layers own a render texture + Camera2d for 2D UI compositing,
@@ -56,4 +57,14 @@ pub struct LayerProps {
     // Anisotropy
     pub anisotropy_strength: Option<f32>,
     pub anisotropy_rotation: Option<f32>,
+    // Transition
+    pub transition: Option<String>,
+    #[prop(skip)]
+    pub tw_transition_property: Option<TransitionProperty>,
+    #[prop(skip)]
+    pub tw_transition_duration: Option<f32>,
+    #[prop(skip)]
+    pub tw_transition_easing: Option<EaseFn>,
+    #[prop(skip)]
+    pub tw_transition_delay: Option<f32>,
 }

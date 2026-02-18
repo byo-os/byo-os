@@ -13,21 +13,21 @@ printf '\e_B
           +view cpu-row class="flex flex-col gap-1" {
             +text cpu-label content="CPU" class="text-zinc-400"
             +view cpu-track class="w-full h-4 rounded-full bg-zinc-800" {
-              +view cpu-fill class="h-4 rounded-full bg-sky-500" width=0
+              +view cpu-fill class="h-4 rounded-full bg-sky-500 transition-all duration-300" width=0
             }
             +text cpu-pct content="0%%" class="text-sky-400"
           }
           +view mem-row class="flex flex-col gap-1" {
             +text mem-label content="Memory" class="text-zinc-400"
             +view mem-track class="w-full h-4 rounded-full bg-zinc-800" {
-              +view mem-fill class="h-4 rounded-full bg-emerald-500" width=0
+              +view mem-fill class="h-4 rounded-full bg-emerald-500 transition-all duration-300" width=0
             }
             +text mem-pct content="0%%" class="text-emerald-400"
           }
           +view disk-row class="flex flex-col gap-1" {
             +text disk-label content="Disk I/O" class="text-zinc-400"
             +view disk-track class="w-full h-4 rounded-full bg-zinc-800" {
-              +view disk-fill class="h-4 rounded-full bg-amber-500" width=0
+              +view disk-fill class="h-4 rounded-full bg-amber-500 transition-all duration-300" width=0
             }
             +text disk-pct content="0%%" class="text-amber-400"
           }
@@ -70,7 +70,7 @@ while true; do
 
     printf '\e_B
       @text clock content="%s"
-      @view cpu-fill class="h-4 rounded-full %s" width="%s%%"
+      @view cpu-fill class="h-4 rounded-full %s transition-all duration-300" width="%s%%"
       @text cpu-pct content="%d%%"
       @view mem-fill width="%s%%"
       @text mem-pct content="%d%%"

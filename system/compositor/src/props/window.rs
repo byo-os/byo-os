@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use byo::{FromProps, ToProps};
 
 use super::types::*;
+use crate::transition::config::{EaseFn, TransitionProperty};
 
 /// Persistent component storing all BYO props for a `window` entity.
 /// Windows are 3D transform roots that contain layers.
@@ -29,4 +30,14 @@ pub struct WindowProps {
     pub rotate_y: Option<f32>,
     pub rotate_z: Option<f32>,
     pub scale_z: Option<f32>,
+    // Transition
+    pub transition: Option<String>,
+    #[prop(skip)]
+    pub tw_transition_property: Option<TransitionProperty>,
+    #[prop(skip)]
+    pub tw_transition_duration: Option<f32>,
+    #[prop(skip)]
+    pub tw_transition_easing: Option<EaseFn>,
+    #[prop(skip)]
+    pub tw_transition_delay: Option<f32>,
 }

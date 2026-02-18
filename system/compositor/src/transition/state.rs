@@ -1,0 +1,332 @@
+//! Runtime animation state for active transitions.
+
+use bevy::prelude::*;
+
+use super::config::{AnimatableProp, EaseFn, TRANSFORM_3D_PROPS};
+
+/// A value that can be interpolated during a transition.
+#[derive(Debug, Clone)]
+pub enum AnimatableValue {
+    Val(Val),
+    F32(f32),
+    Color(Color),
+}
+
+impl AnimatableValue {
+    /// Interpolate between two values at parameter `t` in [0, 1].
+    pub fn interpolate(&self, to: &AnimatableValue, t: f32) -> AnimatableValue {
+        match (self, to) {
+            (AnimatableValue::F32(a), AnimatableValue::F32(b)) => {
+                AnimatableValue::F32(a + (b - a) * t)
+            }
+            (AnimatableValue::Color(a), AnimatableValue::Color(b)) => {
+                AnimatableValue::Color(lerp_color(*a, *b, t))
+            }
+            (AnimatableValue::Val(a), AnimatableValue::Val(b)) => {
+                AnimatableValue::Val(lerp_val(*a, *b, t))
+            }
+            // Mismatched types: snap to target
+            _ => to.clone(),
+        }
+    }
+
+    /// Extract f32 value, returning None for other types.
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            AnimatableValue::F32(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Extract Color value, returning None for other types.
+    pub fn as_color(&self) -> Option<Color> {
+        match self {
+            AnimatableValue::Color(c) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// Extract Val value, returning None for other types.
+    pub fn as_val(&self) -> Option<Val> {
+        match self {
+            AnimatableValue::Val(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+/// A single active transition being animated.
+#[derive(Debug, Clone)]
+pub struct ActiveTransition {
+    pub prop: AnimatableProp,
+    pub from: AnimatableValue,
+    pub to: AnimatableValue,
+    pub duration_secs: f32,
+    pub delay_secs: f32,
+    pub easing: EaseFn,
+    pub elapsed: f32,
+}
+
+impl ActiveTransition {
+    /// Compute the current interpolated value.
+    pub fn current_value(&self) -> AnimatableValue {
+        let progress = ((self.elapsed - self.delay_secs) / self.duration_secs.max(f32::EPSILON))
+            .clamp(0.0, 1.0);
+        if progress <= 0.0 {
+            return self.from.clone();
+        }
+        let eased = self.easing.sample(progress);
+        self.from.interpolate(&self.to, eased)
+    }
+
+    /// Whether this transition has completed.
+    pub fn is_complete(&self) -> bool {
+        self.elapsed >= self.delay_secs + self.duration_secs
+    }
+}
+
+/// Component tracking all active transitions on an entity.
+#[derive(Component, Debug, Default)]
+pub struct ActiveTransitions {
+    pub transitions: Vec<ActiveTransition>,
+}
+
+impl ActiveTransitions {
+    /// Check if a specific property has an active transition.
+    pub fn has(&self, prop: AnimatableProp) -> bool {
+        self.transitions.iter().any(|t| t.prop == prop)
+    }
+
+    /// Check if any 3D transform property has an active transition.
+    pub fn has_any_3d_transform(&self) -> bool {
+        self.transitions
+            .iter()
+            .any(|t| TRANSFORM_3D_PROPS.contains(&t.prop))
+    }
+
+    /// Get the current interpolated f32 value for a property, if transitioning.
+    #[allow(dead_code)]
+    pub fn get_f32(&self, prop: AnimatableProp) -> Option<f32> {
+        self.transitions
+            .iter()
+            .find(|t| t.prop == prop)
+            .and_then(|t| t.current_value().as_f32())
+    }
+
+    /// Get the current interpolated Color value for a property, if transitioning.
+    #[allow(dead_code)]
+    pub fn get_color(&self, prop: AnimatableProp) -> Option<Color> {
+        self.transitions
+            .iter()
+            .find(|t| t.prop == prop)
+            .and_then(|t| t.current_value().as_color())
+    }
+
+    /// Get the current interpolated Val for a property, if transitioning.
+    #[allow(dead_code)]
+    pub fn get_val(&self, prop: AnimatableProp) -> Option<Val> {
+        self.transitions
+            .iter()
+            .find(|t| t.prop == prop)
+            .and_then(|t| t.current_value().as_val())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interpolation helpers
+// ---------------------------------------------------------------------------
+
+/// Linearly interpolate between two `Val` values.
+/// Only same-variant Vals (Px↔Px, Percent↔Percent, etc.) interpolate smoothly.
+/// Mismatched variants snap to `b` (matches CSS behavior).
+fn lerp_val(a: Val, b: Val, t: f32) -> Val {
+    match (a, b) {
+        (Val::Px(a), Val::Px(b)) => Val::Px(a + (b - a) * t),
+        (Val::Percent(a), Val::Percent(b)) => Val::Percent(a + (b - a) * t),
+        (Val::Vw(a), Val::Vw(b)) => Val::Vw(a + (b - a) * t),
+        (Val::Vh(a), Val::Vh(b)) => Val::Vh(a + (b - a) * t),
+        (Val::VMin(a), Val::VMin(b)) => Val::VMin(a + (b - a) * t),
+        (Val::VMax(a), Val::VMax(b)) => Val::VMax(a + (b - a) * t),
+        // Mismatched variants: snap to target
+        (_, b) => b,
+    }
+}
+
+/// Linearly interpolate between two colors in sRGB space.
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    Color::srgba(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        a.alpha + (b.alpha - a.alpha) * t,
+    )
+}
+
+/// Approximate equality for `Val` values (avoids spurious transitions).
+pub fn val_approx_eq(a: Val, b: Val) -> bool {
+    match (a, b) {
+        (Val::Auto, Val::Auto) => true,
+        (Val::Px(a), Val::Px(b)) => (a - b).abs() < 0.01,
+        (Val::Percent(a), Val::Percent(b)) => (a - b).abs() < 0.01,
+        (Val::Vw(a), Val::Vw(b)) => (a - b).abs() < 0.01,
+        (Val::Vh(a), Val::Vh(b)) => (a - b).abs() < 0.01,
+        (Val::VMin(a), Val::VMin(b)) => (a - b).abs() < 0.01,
+        (Val::VMax(a), Val::VMax(b)) => (a - b).abs() < 0.01,
+        _ => false,
+    }
+}
+
+/// Approximate equality for `Color` values.
+pub fn color_approx_eq(a: Color, b: Color) -> bool {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    (a.red - b.red).abs() < 0.005
+        && (a.green - b.green).abs() < 0.005
+        && (a.blue - b.blue).abs() < 0.005
+        && (a.alpha - b.alpha).abs() < 0.005
+}
+
+/// Insert or update a transition in the list (upsert by prop).
+pub fn upsert_transition(
+    transitions: &mut Vec<ActiveTransition>,
+    prop: AnimatableProp,
+    from: AnimatableValue,
+    to: AnimatableValue,
+    duration_secs: f32,
+    delay_secs: f32,
+    easing: EaseFn,
+) {
+    let t = ActiveTransition {
+        prop,
+        from,
+        to,
+        duration_secs,
+        delay_secs,
+        easing,
+        elapsed: 0.0,
+    };
+    if let Some(existing) = transitions.iter_mut().find(|e| e.prop == prop) {
+        *existing = t;
+    } else {
+        transitions.push(t);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpolate_f32() {
+        let a = AnimatableValue::F32(0.0);
+        let b = AnimatableValue::F32(100.0);
+        let mid = a.interpolate(&b, 0.5);
+        assert_eq!(mid.as_f32(), Some(50.0));
+    }
+
+    #[test]
+    fn interpolate_val_px() {
+        let a = AnimatableValue::Val(Val::Px(0.0));
+        let b = AnimatableValue::Val(Val::Px(200.0));
+        let mid = a.interpolate(&b, 0.25);
+        assert_eq!(mid.as_val(), Some(Val::Px(50.0)));
+    }
+
+    #[test]
+    fn interpolate_val_percent() {
+        let a = AnimatableValue::Val(Val::Percent(0.0));
+        let b = AnimatableValue::Val(Val::Percent(100.0));
+        let mid = a.interpolate(&b, 0.5);
+        assert_eq!(mid.as_val(), Some(Val::Percent(50.0)));
+    }
+
+    #[test]
+    fn interpolate_val_mismatch_snaps() {
+        let a = AnimatableValue::Val(Val::Px(100.0));
+        let b = AnimatableValue::Val(Val::Percent(50.0));
+        let result = a.interpolate(&b, 0.5);
+        assert_eq!(result.as_val(), Some(Val::Percent(50.0)));
+    }
+
+    #[test]
+    fn interpolate_color() {
+        let a = AnimatableValue::Color(Color::srgba(0.0, 0.0, 0.0, 1.0));
+        let b = AnimatableValue::Color(Color::srgba(1.0, 1.0, 1.0, 1.0));
+        let mid = a.interpolate(&b, 0.5);
+        let c = mid.as_color().unwrap().to_srgba();
+        assert!((c.red - 0.5).abs() < 0.01);
+        assert!((c.green - 0.5).abs() < 0.01);
+        assert!((c.blue - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn val_approx_eq_same() {
+        assert!(val_approx_eq(Val::Px(100.0), Val::Px(100.001)));
+        assert!(!val_approx_eq(Val::Px(100.0), Val::Px(200.0)));
+    }
+
+    #[test]
+    fn val_approx_eq_different_types() {
+        assert!(!val_approx_eq(Val::Px(100.0), Val::Percent(100.0)));
+    }
+
+    #[test]
+    fn active_transition_delay() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::Width,
+            from: AnimatableValue::F32(0.0),
+            to: AnimatableValue::F32(100.0),
+            duration_secs: 1.0,
+            delay_secs: 0.5,
+            easing: EaseFn::Linear,
+            elapsed: 0.3, // still in delay
+        };
+        assert_eq!(t.current_value().as_f32(), Some(0.0));
+    }
+
+    #[test]
+    fn active_transition_midway() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::Width,
+            from: AnimatableValue::F32(0.0),
+            to: AnimatableValue::F32(100.0),
+            duration_secs: 1.0,
+            delay_secs: 0.0,
+            easing: EaseFn::Linear,
+            elapsed: 0.5,
+        };
+        let v = t.current_value().as_f32().unwrap();
+        assert!((v - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn upsert_replaces_existing() {
+        let mut transitions = Vec::new();
+        upsert_transition(
+            &mut transitions,
+            AnimatableProp::Width,
+            AnimatableValue::F32(0.0),
+            AnimatableValue::F32(100.0),
+            1.0,
+            0.0,
+            EaseFn::Linear,
+        );
+        upsert_transition(
+            &mut transitions,
+            AnimatableProp::Width,
+            AnimatableValue::F32(50.0),
+            AnimatableValue::F32(200.0),
+            0.5,
+            0.0,
+            EaseFn::CubicOut,
+        );
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].to.as_f32(), Some(200.0));
+    }
+}

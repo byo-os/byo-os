@@ -7,7 +7,7 @@ printf '\e_B
     +view dl1 class="flex flex-col w-full gap-1" {
       +text dl1-name content="bevy-0.18.0.tar.gz" class="text-zinc-300"
       +view dl1-track class="w-full h-3 rounded-full bg-zinc-700" {
-        +view dl1-fill class="h-3 rounded-full bg-sky-500" width=0
+        +view dl1-fill class="h-3 rounded-full bg-sky-500 transition-all duration-200 ease-out" width=0
       }
       +text dl1-pct content="0%%" class="text-zinc-500"
     }
@@ -15,7 +15,7 @@ printf '\e_B
     +view dl2 class="flex flex-col w-full gap-1" {
       +text dl2-name content="rust-1.82.0-src.tar.xz" class="text-zinc-300"
       +view dl2-track class="w-full h-3 rounded-full bg-zinc-700" {
-        +view dl2-fill class="h-3 rounded-full bg-emerald-500" width=0
+        +view dl2-fill class="h-3 rounded-full bg-emerald-500 transition-all duration-200 ease-out" width=0
       }
       +text dl2-pct content="0%%" class="text-zinc-500"
     }
@@ -23,7 +23,7 @@ printf '\e_B
     +view dl3 class="flex flex-col w-full gap-1" {
       +text dl3-name content="linux-6.8.tar.xz" class="text-zinc-300"
       +view dl3-track class="w-full h-3 rounded-full bg-zinc-700" {
-        +view dl3-fill class="h-3 rounded-full bg-purple-500" width=0
+        +view dl3-fill class="h-3 rounded-full bg-purple-500 transition-all duration-200 ease-out" width=0
       }
       +text dl3-pct content="0%%" class="text-zinc-500"
     }

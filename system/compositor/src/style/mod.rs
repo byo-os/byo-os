@@ -15,12 +15,14 @@ use crate::props::types::{ByoColor, ByoOrderMode};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::LayerRender;
+use crate::transition::config::AnimatableProp;
+use crate::transition::state::ActiveTransitions;
 
 /// Default scale factor for order → z/depth-bias mapping.
 const DEFAULT_ORDER_SCALE: f32 = 0.001;
 
 /// Resolve class + individual props. Individual props always override class-derived values.
-fn resolve_view_props(props: &ViewProps) -> ViewProps {
+pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
     let mut r = ViewProps::default();
     if let Some(ref class) = props.class {
         tailwind::apply_classes(&mut r, class);
@@ -70,6 +72,11 @@ fn resolve_view_props(props: &ViewProps) -> ViewProps {
         scale,
         scale_x,
         scale_y,
+        transition,
+        tw_transition_property,
+        tw_transition_duration,
+        tw_transition_easing,
+        tw_transition_delay,
     );
     if props.hidden {
         r.hidden = true;
@@ -78,6 +85,7 @@ fn resolve_view_props(props: &ViewProps) -> ViewProps {
 }
 
 /// Reconcile `ViewProps` changes onto Bevy `Node` + `BackgroundColor` etc.
+/// Skips fields that have active transitions (those are driven by tick_view_transitions).
 #[allow(clippy::type_complexity)]
 pub fn reconcile_views(
     mut query: Query<
@@ -87,70 +95,140 @@ pub fn reconcile_views(
             &mut BackgroundColor,
             &mut BorderColor,
             Option<&mut Visibility>,
+            Option<&ActiveTransitions>,
         ),
         Changed<ViewProps>,
     >,
 ) {
-    for (props, mut node, mut bg, mut border_color, visibility) in &mut query {
+    for (props, mut node, mut bg, mut border_color, visibility, active) in &mut query {
         let resolved = resolve_view_props(props);
+        let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
 
         // Sizing
-        if let Some(ref v) = resolved.width {
+        if let Some(ref v) = resolved.width
+            && !has(AnimatableProp::Width)
+        {
             node.width = v.0;
         }
-        if let Some(ref v) = resolved.height {
+        if let Some(ref v) = resolved.height
+            && !has(AnimatableProp::Height)
+        {
             node.height = v.0;
         }
-        if let Some(ref v) = resolved.min_width {
+        if let Some(ref v) = resolved.min_width
+            && !has(AnimatableProp::MinWidth)
+        {
             node.min_width = v.0;
         }
-        if let Some(ref v) = resolved.max_width {
+        if let Some(ref v) = resolved.max_width
+            && !has(AnimatableProp::MaxWidth)
+        {
             node.max_width = v.0;
         }
-        if let Some(ref v) = resolved.min_height {
+        if let Some(ref v) = resolved.min_height
+            && !has(AnimatableProp::MinHeight)
+        {
             node.min_height = v.0;
         }
-        if let Some(ref v) = resolved.max_height {
+        if let Some(ref v) = resolved.max_height
+            && !has(AnimatableProp::MaxHeight)
+        {
             node.max_height = v.0;
         }
 
         // Colors
-        if let Some(ref c) = resolved.background_color {
+        if let Some(ref c) = resolved.background_color
+            && !has(AnimatableProp::BackgroundColor)
+        {
             *bg = BackgroundColor(c.0);
         }
-        if let Some(ref c) = resolved.border_color {
+        if let Some(ref c) = resolved.border_color
+            && !has(AnimatableProp::BorderColor)
+        {
             *border_color = BorderColor::all(c.0);
         }
 
         // Border
         if let Some(ref r) = resolved.border_width {
-            node.border = r.0;
+            if !has(AnimatableProp::BorderWidthTop) {
+                node.border.top = r.0.top;
+            }
+            if !has(AnimatableProp::BorderWidthRight) {
+                node.border.right = r.0.right;
+            }
+            if !has(AnimatableProp::BorderWidthBottom) {
+                node.border.bottom = r.0.bottom;
+            }
+            if !has(AnimatableProp::BorderWidthLeft) {
+                node.border.left = r.0.left;
+            }
         }
         if let Some(ref r) = resolved.border_radius {
-            node.border_radius = r.0;
+            if !has(AnimatableProp::BorderRadiusTopLeft) {
+                node.border_radius.top_left = r.0.top_left;
+            }
+            if !has(AnimatableProp::BorderRadiusTopRight) {
+                node.border_radius.top_right = r.0.top_right;
+            }
+            if !has(AnimatableProp::BorderRadiusBottomRight) {
+                node.border_radius.bottom_right = r.0.bottom_right;
+            }
+            if !has(AnimatableProp::BorderRadiusBottomLeft) {
+                node.border_radius.bottom_left = r.0.bottom_left;
+            }
         }
 
         // Spacing
         if let Some(ref r) = resolved.padding {
-            node.padding = r.0;
+            if !has(AnimatableProp::PaddingTop) {
+                node.padding.top = r.0.top;
+            }
+            if !has(AnimatableProp::PaddingRight) {
+                node.padding.right = r.0.right;
+            }
+            if !has(AnimatableProp::PaddingBottom) {
+                node.padding.bottom = r.0.bottom;
+            }
+            if !has(AnimatableProp::PaddingLeft) {
+                node.padding.left = r.0.left;
+            }
         }
         if let Some(ref r) = resolved.margin {
-            node.margin = r.0;
+            if !has(AnimatableProp::MarginTop) {
+                node.margin.top = r.0.top;
+            }
+            if !has(AnimatableProp::MarginRight) {
+                node.margin.right = r.0.right;
+            }
+            if !has(AnimatableProp::MarginBottom) {
+                node.margin.bottom = r.0.bottom;
+            }
+            if !has(AnimatableProp::MarginLeft) {
+                node.margin.left = r.0.left;
+            }
         }
 
         // Gap
         if let Some(ref v) = resolved.gap {
-            node.column_gap = v.0;
-            node.row_gap = v.0;
+            if !has(AnimatableProp::ColumnGap) {
+                node.column_gap = v.0;
+            }
+            if !has(AnimatableProp::RowGap) {
+                node.row_gap = v.0;
+            }
         }
-        if let Some(ref v) = resolved.column_gap {
+        if let Some(ref v) = resolved.column_gap
+            && !has(AnimatableProp::ColumnGap)
+        {
             node.column_gap = v.0;
         }
-        if let Some(ref v) = resolved.row_gap {
+        if let Some(ref v) = resolved.row_gap
+            && !has(AnimatableProp::RowGap)
+        {
             node.row_gap = v.0;
         }
 
-        // Layout
+        // Layout (not animatable — always write immediately)
         if let Some(ref d) = resolved.display {
             node.display = d.to_bevy();
         }
@@ -180,27 +258,41 @@ pub fn reconcile_views(
         }
 
         // Position
-        if let Some(ref v) = resolved.left {
+        if let Some(ref v) = resolved.left
+            && !has(AnimatableProp::Left)
+        {
             node.left = v.0;
         }
-        if let Some(ref v) = resolved.right {
+        if let Some(ref v) = resolved.right
+            && !has(AnimatableProp::Right)
+        {
             node.right = v.0;
         }
-        if let Some(ref v) = resolved.top {
+        if let Some(ref v) = resolved.top
+            && !has(AnimatableProp::Top)
+        {
             node.top = v.0;
         }
-        if let Some(ref v) = resolved.bottom {
+        if let Some(ref v) = resolved.bottom
+            && !has(AnimatableProp::Bottom)
+        {
             node.bottom = v.0;
         }
 
         // Flex
-        if let Some(v) = resolved.flex_grow {
+        if let Some(v) = resolved.flex_grow
+            && !has(AnimatableProp::FlexGrow)
+        {
             node.flex_grow = v;
         }
-        if let Some(v) = resolved.flex_shrink {
+        if let Some(v) = resolved.flex_shrink
+            && !has(AnimatableProp::FlexShrink)
+        {
             node.flex_shrink = v;
         }
-        if let Some(ref v) = resolved.flex_basis {
+        if let Some(ref v) = resolved.flex_basis
+            && !has(AnimatableProp::FlexBasis)
+        {
             node.flex_basis = v.0;
         }
 
@@ -260,10 +352,26 @@ pub fn reconcile_text(
 }
 
 /// Reconcile `ViewProps` 2D transform changes onto `UiTransform`.
+/// Skips fields with active transitions.
 pub fn reconcile_view_transforms(
-    mut query: Query<(&ViewProps, &mut UiTransform), Changed<ViewProps>>,
+    mut query: Query<
+        (&ViewProps, &mut UiTransform, Option<&ActiveTransitions>),
+        Changed<ViewProps>,
+    >,
 ) {
-    for (props, mut ui_transform) in &mut query {
+    for (props, mut ui_transform, active) in &mut query {
+        // If any 2D transform prop is transitioning, skip the entire transform write
+        // (tick_view_transitions handles per-field writes)
+        let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
+        if has(AnimatableProp::TranslateX)
+            || has(AnimatableProp::TranslateY)
+            || has(AnimatableProp::Rotate)
+            || has(AnimatableProp::ScaleX)
+            || has(AnimatableProp::ScaleY)
+        {
+            continue;
+        }
+
         let resolved = resolve_view_props(props);
         let tx = resolved.translate_x.unwrap_or(0.0);
         let ty = resolved.translate_y.unwrap_or(0.0);
@@ -281,11 +389,20 @@ pub fn reconcile_view_transforms(
 }
 
 /// Reconcile `WindowProps` 3D transform changes onto `Transform`.
+/// Skips when 3D transform props are actively transitioning.
 pub fn reconcile_windows(
-    mut query: Query<(&WindowProps, &mut Transform), Changed<WindowProps>>,
+    mut query: Query<
+        (&WindowProps, &mut Transform, Option<&ActiveTransitions>),
+        Changed<WindowProps>,
+    >,
     world_scale: Res<WorldScale>,
 ) {
-    for (props, mut transform) in &mut query {
+    for (props, mut transform, active) in &mut query {
+        // Skip if any 3D transform is transitioning (tick handles it)
+        if active.is_some_and(|a| a.has_any_3d_transform()) {
+            continue;
+        }
+
         let order = props.order.unwrap_or(0) as f32;
         let mode = props
             .order_mode
@@ -316,15 +433,19 @@ pub fn reconcile_windows(
 }
 
 /// Reconcile `LayerProps` 3D transform + PBR material changes.
+/// Skips transform/PBR fields that are actively transitioning.
 #[allow(clippy::type_complexity)]
 pub fn reconcile_layers(
-    layer_query: Query<(&LayerProps, &LayerRender), Changed<LayerProps>>,
+    layer_query: Query<
+        (&LayerProps, &LayerRender, Option<&ActiveTransitions>),
+        Changed<LayerProps>,
+    >,
     mut transforms: Query<&mut Transform>,
     material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     world_scale: Res<WorldScale>,
 ) {
-    for (props, render) in &layer_query {
+    for (props, render, active) in &layer_query {
         let order = props.order.unwrap_or(0) as f32;
         let mode = props
             .order_mode
@@ -332,30 +453,32 @@ pub fn reconcile_layers(
             .unwrap_or(&ByoOrderMode::TranslateZ);
         let scale = props.order_scale.unwrap_or(DEFAULT_ORDER_SCALE);
 
-        let order_z = match mode {
-            ByoOrderMode::TranslateZ => order * scale,
-            _ => 0.0,
-        };
-        let ts = resolve_3d_transform(
-            props.class.as_deref(),
-            props.translate_x,
-            props.translate_y,
-            props.translate_z,
-            props.rotate,
-            props.rotate_x,
-            props.rotate_y,
-            props.rotate_z,
-            props.scale,
-            props.scale_x,
-            props.scale_y,
-            props.scale_z,
-            order_z,
-            world_scale.0,
-        );
+        // Apply transform to the 3D plane entity (skip if transitioning)
+        if !active.is_some_and(|a| a.has_any_3d_transform()) {
+            let order_z = match mode {
+                ByoOrderMode::TranslateZ => order * scale,
+                _ => 0.0,
+            };
+            let ts = resolve_3d_transform(
+                props.class.as_deref(),
+                props.translate_x,
+                props.translate_y,
+                props.translate_z,
+                props.rotate,
+                props.rotate_x,
+                props.rotate_y,
+                props.rotate_z,
+                props.scale,
+                props.scale_x,
+                props.scale_y,
+                props.scale_z,
+                order_z,
+                world_scale.0,
+            );
 
-        // Apply transform to the 3D plane entity
-        if let Ok(mut plane_transform) = transforms.get_mut(render.plane) {
-            *plane_transform = ts;
+            if let Ok(mut plane_transform) = transforms.get_mut(render.plane) {
+                *plane_transform = ts;
+            }
         }
 
         // Apply PBR material props + order-based depth-bias

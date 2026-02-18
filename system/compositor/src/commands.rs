@@ -15,6 +15,8 @@ use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::{LayerRender, spawn_layer_render};
 use crate::render::window::WindowRender;
+use crate::transition::config::TransitionConfig;
+use crate::transition::state::ActiveTransitions;
 
 /// PreUpdate system: processes BYO batches and applies them to the ECS.
 #[allow(clippy::too_many_arguments)]
@@ -212,6 +214,8 @@ fn spawn_entity(
                 Node::default(),
                 BackgroundColor::default(),
                 BorderColor::default(),
+                TransitionConfig::default(),
+                ActiveTransitions::default(),
             ));
             if let Some(p) = resolved {
                 ec.insert(ChildOf(p));
@@ -254,7 +258,12 @@ fn spawn_entity(
                 _ => 0.0,
             };
 
-            let mut ec = commands.spawn((ByoLayer, lp));
+            let mut ec = commands.spawn((
+                ByoLayer,
+                lp,
+                TransitionConfig::default(),
+                ActiveTransitions::default(),
+            ));
             if let Some(p) = parent {
                 ec.insert(ChildOf(p));
             }
@@ -290,6 +299,8 @@ fn spawn_entity(
                 },
                 Transform::IDENTITY,
                 Visibility::default(),
+                TransitionConfig::default(),
+                ActiveTransitions::default(),
             ));
             if let Some(p) = parent {
                 ec.insert(ChildOf(p));
