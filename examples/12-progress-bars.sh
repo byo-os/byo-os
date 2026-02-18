@@ -57,4 +57,4 @@ while true; do
     sleep 0.2
 done
 
-sleep infinity
+sleep 99999

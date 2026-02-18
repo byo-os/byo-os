@@ -44,4 +44,4 @@ CMD="$CMD } \e\\"
 printf "$CMD"
 
 printf '\e_B @text status content="All back! (rounded-full this time)" \e\\'
-sleep infinity
+sleep 99999

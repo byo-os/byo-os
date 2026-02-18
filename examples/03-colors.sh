@@ -48,4 +48,4 @@ printf '\e_B
   }
 \e\\'
 
-sleep infinity
+sleep 99999

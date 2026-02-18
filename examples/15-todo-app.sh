@@ -55,4 +55,4 @@ for i in 5 3 1; do
 done
 
 printf '\e_B @text count content="3 items remaining" \e\\'
-sleep infinity
+sleep 99999
