@@ -257,35 +257,37 @@ impl Router {
 
         for cmd in &commands {
             match cmd {
-                Command::Upsert { kind, id, props }
-                    if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
-                {
-                    let subscriber = self.claims[&**kind];
-                    let qid = QualifiedId::new(&client, id);
-                    let expand_seq = self.next_expand_seq(subscriber);
-
-                    let mut expand_buf = Vec::new();
-                    let _ = write!(expand_buf, "\n?expand {expand_seq} {qid} kind={kind}");
-                    write_props(&mut expand_buf, props);
-
-                    expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
-                }
-                Command::Patch { kind, id, .. }
-                    if *id != "_" && self.claims.get(&**kind).is_some_and(|&s| s != from) =>
-                {
-                    let subscriber = self.claims[&**kind];
-                    let qid = QualifiedId::new(&client, id);
-
-                    reduced_buf.clear();
-                    if self.state.write_reduced_command(&qid, &mut reduced_buf) {
+                Command::Upsert { kind, id, props } if *id != "_" => {
+                    if let Some(&subscriber) = self.claims.get(&**kind)
+                        && subscriber != from
+                    {
+                        let qid = QualifiedId::new(&client, id);
                         let expand_seq = self.next_expand_seq(subscriber);
+
                         let mut expand_buf = Vec::new();
-                        let _ = write!(
-                            expand_buf,
-                            "\n?expand {expand_seq} {}",
-                            String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
-                        );
-                        expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
+                        let _ = write!(expand_buf, "\n?expand {expand_seq} {qid} kind={kind}");
+                        write_props(&mut expand_buf, props);
+
+                        expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
+                    }
+                }
+                Command::Patch { kind, id, .. } if *id != "_" => {
+                    if let Some(&subscriber) = self.claims.get(&**kind)
+                        && subscriber != from
+                    {
+                        let qid = QualifiedId::new(&client, id);
+
+                        reduced_buf.clear();
+                        if self.state.write_reduced_command(&qid, &mut reduced_buf) {
+                            let expand_seq = self.next_expand_seq(subscriber);
+                            let mut expand_buf = Vec::new();
+                            let _ = write!(
+                                expand_buf,
+                                "\n?expand {expand_seq} {}",
+                                String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
+                            );
+                            expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
+                        }
                     }
                 }
                 _ => {}
