@@ -275,7 +275,7 @@ async fn event_cross_daemon() {
 /// 1. Compositor sends `!click 0 app:btn` → routed to app
 /// 2. App disconnects before ACKing
 /// 3. No crash, pending ACK is cleaned up
-/// 4. Compositor does NOT receive a stale ACK
+/// 4. Compositor receives destroy notification (not a stale ACK)
 #[tokio::test]
 async fn disconnect_cleans_pending_acks() {
     let mut router = Router::new();
@@ -297,7 +297,15 @@ async fn disconnect_cleans_pending_acks() {
         .handle(byo_orchestrator::router::RouterMsg::Disconnected { process: pid(2) })
         .await;
 
-    // Compositor should NOT receive any stale ACK.
+    // Compositor receives destroy notification for the app's object.
+    let destroy_s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&destroy_s).unwrap();
+    assert!(
+        matches!(&cmds[0], Command::Destroy { kind, id } if *kind == "view" && *id == "app:btn"),
+        "expected -view app:btn, got: {destroy_s}"
+    );
+
+    // No stale ACK — just the destroy notification above.
     assert_no_message(&mut compositor_rx);
 }
 
@@ -484,7 +492,15 @@ async fn disconnect_cleans_pending_responses() {
         .handle(byo_orchestrator::router::RouterMsg::Disconnected { process: pid(2) })
         .await;
 
-    // Compositor should NOT receive any stale response.
+    // Compositor receives destroy notification for the app's object.
+    let destroy_s = recv_byo_raw(&mut compositor_rx);
+    let cmds = byo::parser::parse(&destroy_s).unwrap();
+    assert!(
+        matches!(&cmds[0], Command::Destroy { kind, id } if *kind == "view" && *id == "app:surface"),
+        "expected -view app:surface, got: {destroy_s}"
+    );
+
+    // No stale response — just the destroy notification above.
     assert_no_message(&mut compositor_rx);
 }
 

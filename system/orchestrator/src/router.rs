@@ -428,6 +428,71 @@ impl Router {
         };
         tracing::info!("process disconnected: {name}");
 
+        // --- Phase 1: Notify observers about destroyed objects ---
+        //
+        // Must happen BEFORE state tree cleanup so projection can look up
+        // ancestors and descendants.
+
+        // Find "root disconnect objects": owned by the disconnecting process,
+        // whose parent (if any) is NOT owned by the same process. These are the
+        // top-level objects to destroy — children cascade automatically.
+        let owned_roots: Vec<(QualifiedId, String)> = self
+            .state
+            .values()
+            .filter(|o| o.data == process)
+            .filter(|o| {
+                o.parent
+                    .as_ref()
+                    .and_then(|p| self.state.get(p))
+                    .is_none_or(|parent_obj| parent_obj.data != process)
+            })
+            .map(|o| (o.id.clone(), o.kind.clone()))
+            .collect();
+
+        if !owned_roots.is_empty() {
+            // Generate destroy commands for root objects.
+            let mut destroy_buf = Vec::new();
+            let mut daemon_notifications: HashMap<ProcessId, Vec<u8>> = HashMap::new();
+
+            for (qid, kind) in &owned_roots {
+                let _ = write!(destroy_buf, "\n-{kind} {qid}");
+
+                // Collect expansion descendants owned by OTHER processes so we
+                // can notify their daemons (same logic as handle_cascade_destroys).
+                let descendants = self.state.descendants_info(qid);
+                for (desc_qid, desc_kind, desc_owner) in &descendants {
+                    if *desc_owner != process {
+                        let buf = daemon_notifications.entry(*desc_owner).or_default();
+                        let _ = write!(buf, "\n-{desc_kind} {desc_qid}");
+                    }
+                }
+            }
+
+            // Forward destroy commands to observers (projection handles type filtering).
+            self.forward_to_observers(&destroy_buf, process).await;
+
+            // Notify daemons about their expansion objects being destroyed.
+            for (daemon_pid, notification) in daemon_notifications {
+                if daemon_pid != process {
+                    self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification)))
+                        .await;
+                }
+            }
+        }
+
+        // --- Phase 2: State tree cleanup ---
+
+        // Destroy root objects (cascades to expansion children from other owners).
+        for (qid, _) in &owned_roots {
+            self.state.destroy(qid);
+        }
+
+        // Safety net: remove any remaining objects owned by this process that
+        // weren't reachable as roots (shouldn't happen, but prevents leaks).
+        crate::state::remove_by_owner(&mut self.state, process);
+
+        // --- Phase 3: Subscription and routing cleanup ---
+
         // Remove all claims for this process.
         self.claims.retain(|_, &mut pid| pid != process);
 
@@ -456,9 +521,6 @@ impl Router {
         // Remove pending responses (same logic as pending ACKs).
         self.pending_responses
             .retain(|(pid, _, _), resp| *pid != process && resp.sender != process);
-
-        // Remove objects owned by this process from the state tree.
-        let _removed = crate::state::remove_by_owner(&mut self.state, process);
 
         // Clean up process state.
         self.output_queues.remove(&process);

@@ -139,6 +139,11 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
             .collect()
     }
 
+    /// Iterate over all objects in the tree.
+    pub fn values(&self) -> impl Iterator<Item = &ObjectState<K, D>> {
+        self.objects.values()
+    }
+
     /// Number of objects in the tree.
     pub fn len(&self) -> usize {
         self.objects.len()
