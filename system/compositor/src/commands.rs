@@ -1,5 +1,7 @@
 //! Command processing system — translates BYO commands into ECS operations.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use byo::props::FromProps;
 
@@ -34,7 +36,13 @@ pub fn process_commands(
         .next()
         .map(|w| w.scale_factor())
         .unwrap_or(1.0);
+
+    // Eagerly track layer→ui_root mappings for layers created in this frame,
+    // since deferred Commands haven't applied LayerRender components yet.
+    let mut pending_layer_ui_roots: HashMap<Entity, Entity> = HashMap::new();
+
     for batch in messages.read() {
+        debug!("processing batch of {} commands", batch.0.len());
         let mut parent_stack: Vec<Entity> = Vec::new();
         let mut last_entity: Option<Entity> = None;
 
@@ -47,7 +55,6 @@ pub fn process_commands(
                     let kind_str = kind.as_ref();
 
                     let entity = if let Some(existing) = id_map.get_entity(id_str) {
-                        // Existing entity — full replace props
                         match kind_str {
                             "view" => {
                                 if let Ok(mut vp) = views.get_mut(existing) {
@@ -74,22 +81,23 @@ pub fn process_commands(
                         existing
                     } else {
                         let parent = parent_stack.last().copied();
-                        let entity = spawn_entity(
+                        spawn_entity(
                             &mut commands,
                             &mut images,
                             &mut meshes,
                             &mut materials,
                             &layer_renders,
+                            &mut pending_layer_ui_roots,
                             kind_str,
                             parent,
                             props,
                             scale_factor,
-                        );
-                        id_map.insert(id_str.to_string(), entity);
-                        entity
+                        )
                     };
 
-                    // Update order component if set
+                    id_map.insert(id_str.to_string(), entity);
+                    info!("upsert {kind_str} {id_str:?} -> {entity:?}");
+
                     if let Some(order) = extract_order(props) {
                         commands.entity(entity).insert(ByoOrder(order));
                     }
@@ -160,13 +168,20 @@ pub fn process_commands(
 
 /// Resolve the actual parent entity for a child. If the parent is a layer,
 /// redirect to its `ui_root` so UI nodes render via the layer's Camera2d.
-fn resolve_parent(parent: Option<Entity>, layer_renders: &Query<&LayerRender>) -> Option<Entity> {
+/// Checks the pending map first (for layers created this frame), then the ECS query.
+fn resolve_parent(
+    parent: Option<Entity>,
+    layer_renders: &Query<&LayerRender>,
+    pending: &HashMap<Entity, Entity>,
+) -> Option<Entity> {
     parent.map(|p| {
-        if let Ok(lr) = layer_renders.get(p) {
-            lr.ui_root
-        } else {
-            p
+        if let Some(&ui_root) = pending.get(&p) {
+            return ui_root;
         }
+        if let Ok(lr) = layer_renders.get(p) {
+            return lr.ui_root;
+        }
+        p
     })
 }
 
@@ -177,6 +192,7 @@ fn spawn_entity(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     layer_renders: &Query<&LayerRender>,
+    pending_layer_ui_roots: &mut HashMap<Entity, Entity>,
     kind: &str,
     parent: Option<Entity>,
     props: &[byo::Prop],
@@ -185,7 +201,7 @@ fn spawn_entity(
     match kind {
         "view" => {
             let vp = ViewProps::from_props(props);
-            let resolved_parent = resolve_parent(parent, layer_renders);
+            let resolved = resolve_parent(parent, layer_renders, pending_layer_ui_roots);
             let mut ec = commands.spawn((
                 ByoView,
                 vp,
@@ -193,7 +209,7 @@ fn spawn_entity(
                 BackgroundColor::default(),
                 BorderColor::default(),
             ));
-            if let Some(p) = resolved_parent {
+            if let Some(p) = resolved {
                 ec.insert(ChildOf(p));
             }
             ec.id()
@@ -201,7 +217,7 @@ fn spawn_entity(
         "text" => {
             let tp = TextProps::from_props(props);
             let content = tp.content.clone().unwrap_or_default();
-            let resolved_parent = resolve_parent(parent, layer_renders);
+            let resolved = resolve_parent(parent, layer_renders, pending_layer_ui_roots);
             let mut ec = commands.spawn((
                 ByoText,
                 tp,
@@ -209,37 +225,37 @@ fn spawn_entity(
                 TextFont::default(),
                 TextColor::default(),
             ));
-            if let Some(p) = resolved_parent {
+            if let Some(p) = resolved {
                 ec.insert(ChildOf(p));
             }
             ec.id()
         }
         "layer" => {
             let lp = LayerProps::from_props(props);
-            let logical_width = extract_layer_size(&lp.width, 1280);
-            let logical_height = extract_layer_size(&lp.height, 720);
+            let width = extract_layer_size(&lp.width, 1280);
+            let height = extract_layer_size(&lp.height, 720);
+            let z_offset = lp.order.unwrap_or(0) as f32;
 
-            // Physical texture size = logical * scale_factor (for HiDPI)
-            let physical_width = (logical_width as f32 * scale_factor) as u32;
-            let physical_height = (logical_height as f32 * scale_factor) as u32;
-
-            // Spawn the layer entity first
             let mut ec = commands.spawn((ByoLayer, lp));
             if let Some(p) = parent {
                 ec.insert(ChildOf(p));
             }
             let layer_entity = ec.id();
 
-            // Create the render pipeline (Camera2d + texture + 3D plane)
             let render = spawn_layer_render(
                 commands,
                 images,
                 meshes,
                 materials,
-                parent, // window entity for 3D plane parenting
-                physical_width,
-                physical_height,
+                parent,
+                width,
+                height,
+                scale_factor,
+                z_offset,
             );
+
+            // Record ui_root eagerly so same-batch views can find it
+            pending_layer_ui_roots.insert(layer_entity, render.ui_root);
             commands.entity(layer_entity).insert(render);
 
             layer_entity
@@ -261,9 +277,9 @@ fn spawn_entity(
             ec.id()
         }
         _ => {
-            let resolved_parent = resolve_parent(parent, layer_renders);
+            let resolved = resolve_parent(parent, layer_renders, pending_layer_ui_roots);
             let mut ec = commands.spawn(Node::default());
-            if let Some(p) = resolved_parent {
+            if let Some(p) = resolved {
                 ec.insert(ChildOf(p));
             }
             ec.id()
@@ -271,7 +287,6 @@ fn spawn_entity(
     }
 }
 
-/// Extract a pixel size from an optional ByoVal prop, defaulting to `fallback`.
 fn extract_layer_size(val: &Option<crate::props::types::ByoVal>, fallback: u32) -> u32 {
     val.as_ref().map_or(fallback, |v| match v.0 {
         Val::Px(px) => px as u32,

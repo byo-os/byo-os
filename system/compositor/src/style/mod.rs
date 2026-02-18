@@ -201,18 +201,45 @@ pub fn reconcile_views(
     }
 }
 
+/// Resolve class + individual props for text. Individual props always override class-derived values.
+fn resolve_text_props(props: &TextProps) -> TextProps {
+    let mut r = TextProps::default();
+    if let Some(ref class) = props.class {
+        tailwind::apply_text_classes(&mut r, class);
+    }
+    // Individual props override class-derived values
+    if props.content.is_some() {
+        r.content = props.content.clone();
+    }
+    if props.color.is_some() {
+        r.color = props.color.clone();
+    }
+    if props.font_size.is_some() {
+        r.font_size = props.font_size;
+    }
+    if props.text_align.is_some() {
+        r.text_align = props.text_align.clone();
+    }
+    if props.line_height.is_some() {
+        r.line_height = props.line_height;
+    }
+    r
+}
+
 /// Reconcile `TextProps` changes onto Bevy `Text` + `TextFont` + `TextColor`.
 pub fn reconcile_text(
     mut query: Query<(&TextProps, &mut Text, &mut TextFont, &mut TextColor), Changed<TextProps>>,
 ) {
     for (props, mut text, mut font, mut color) in &mut query {
-        if let Some(ref content) = props.content {
+        let resolved = resolve_text_props(props);
+
+        if let Some(ref content) = resolved.content {
             **text = content.clone();
         }
-        if let Some(size) = props.font_size {
+        if let Some(size) = resolved.font_size {
             font.font_size = size;
         }
-        if let Some(ref c) = props.color {
+        if let Some(ref c) = resolved.color {
             *color = TextColor(c.0);
         }
     }

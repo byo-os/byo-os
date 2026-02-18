@@ -50,17 +50,18 @@ struct StdinHandler {
 
 impl Handler for StdinHandler {
     fn on_byo(&mut self, payload: &[u8]) {
+        trace!("received payload ({} bytes)", payload.len());
         let bytes = Bytes::copy_from_slice(payload);
         match parse_bytes(bytes) {
             Ok(commands) if !commands.is_empty() => {
+                trace!("parsed {} commands", commands.len());
                 if self.tx.send(commands).is_ok() {
-                    // Wake the Bevy event loop so drain_commands runs immediately
                     let _ = self.event_loop_proxy.send_event(WinitUserEvent::WakeUp);
                 }
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("BYO parse error: {e}");
+                warn!("parse error: {e}");
             }
         }
     }
@@ -83,12 +84,19 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
         };
         let stdin = io::stdin();
         let mut buf = [0u8; 8192];
+        info!("stdin reader started");
         loop {
             match stdin.lock().read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => scanner.feed(&buf[..n], &mut handler),
+                Ok(0) => {
+                    debug!("stdin EOF");
+                    break;
+                }
+                Ok(n) => {
+                    trace!("read {n} bytes from stdin");
+                    scanner.feed(&buf[..n], &mut handler);
+                }
                 Err(e) => {
-                    eprintln!("stdin read error: {e}");
+                    warn!("stdin read error: {e}");
                     break;
                 }
             }
@@ -117,6 +125,7 @@ pub fn drain_commands(
     let rx = queue.rx.lock().unwrap();
     let mut got_commands = false;
     while let Ok(commands) = rx.try_recv() {
+        debug!("received batch of {} commands", commands.len());
         messages.write(ByoBatch(commands));
         got_commands = true;
     }

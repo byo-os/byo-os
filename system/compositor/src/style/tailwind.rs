@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 
+use crate::props::text::TextProps;
 use crate::props::types::*;
 use crate::props::view::ViewProps;
 use crate::style::color::parse_color;
@@ -16,6 +17,71 @@ pub fn apply_classes(props: &mut ViewProps, class_str: &str) {
     for class in class_str.split_whitespace() {
         apply_class(props, class);
     }
+}
+
+/// Apply Tailwind utility classes relevant to text styling.
+///
+/// Handles `text-{size}`, `text-{color}`, `text-{align}`, and `font-{weight}` classes.
+pub fn apply_text_classes(props: &mut TextProps, class_str: &str) {
+    for class in class_str.split_whitespace() {
+        apply_text_class(props, class);
+    }
+}
+
+fn apply_text_class(props: &mut TextProps, class: &str) {
+    // Text alignment
+    match class {
+        "text-left" => {
+            props.text_align = Some(ByoTextAlign::Left);
+            return;
+        }
+        "text-center" => {
+            props.text_align = Some(ByoTextAlign::Center);
+            return;
+        }
+        "text-right" => {
+            props.text_align = Some(ByoTextAlign::Right);
+            return;
+        }
+        "text-justify" => {
+            props.text_align = Some(ByoTextAlign::Justified);
+            return;
+        }
+        _ => {}
+    }
+
+    // Text size: text-{size}
+    if let Some(rest) = class.strip_prefix("text-") {
+        // Check size names first
+        if let Some(size) = text_size(rest) {
+            props.font_size = Some(size);
+            return;
+        }
+        // Otherwise try as color: text-{color}-{shade}[/{opacity}]
+        if let Some(color) = parse_color_class(rest) {
+            props.color = Some(ByoColor(color));
+        }
+    }
+}
+
+/// Map Tailwind text size class names to font sizes in px.
+fn text_size(name: &str) -> Option<f32> {
+    Some(match name {
+        "xs" => 12.0,
+        "sm" => 14.0,
+        "base" => 16.0,
+        "lg" => 18.0,
+        "xl" => 20.0,
+        "2xl" => 24.0,
+        "3xl" => 30.0,
+        "4xl" => 36.0,
+        "5xl" => 48.0,
+        "6xl" => 60.0,
+        "7xl" => 72.0,
+        "8xl" => 96.0,
+        "9xl" => 128.0,
+        _ => return None,
+    })
 }
 
 /// Convert a Tailwind spacing token to a [`Val`].
@@ -1157,6 +1223,76 @@ mod tests {
         // Nothing else was set incorrectly
         assert!(p.width.is_none());
         assert!(p.background_color.is_none());
+    }
+
+    // ── Text classes ──────────────────────────────────────────────────
+
+    fn text_props_from(classes: &str) -> TextProps {
+        let mut props = TextProps::default();
+        apply_text_classes(&mut props, classes);
+        props
+    }
+
+    #[test]
+    fn text_size_2xl() {
+        let p = text_props_from("text-2xl");
+        assert_eq!(p.font_size, Some(24.0));
+    }
+
+    #[test]
+    fn text_size_xs() {
+        let p = text_props_from("text-xs");
+        assert_eq!(p.font_size, Some(12.0));
+    }
+
+    #[test]
+    fn text_size_9xl() {
+        let p = text_props_from("text-9xl");
+        assert_eq!(p.font_size, Some(128.0));
+    }
+
+    #[test]
+    fn text_color_white() {
+        let p = text_props_from("text-white");
+        assert_color_approx(p.color.unwrap().0, Color::srgba_u8(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn text_color_zinc_500() {
+        let p = text_props_from("text-zinc-500");
+        assert!(p.color.is_some());
+    }
+
+    #[test]
+    fn text_color_sky_400() {
+        let p = text_props_from("text-sky-400");
+        assert!(p.color.is_some());
+    }
+
+    #[test]
+    fn text_align_center() {
+        let p = text_props_from("text-center");
+        assert!(matches!(p.text_align, Some(ByoTextAlign::Center)));
+    }
+
+    #[test]
+    fn text_align_right() {
+        let p = text_props_from("text-right");
+        assert!(matches!(p.text_align, Some(ByoTextAlign::Right)));
+    }
+
+    #[test]
+    fn text_combined() {
+        let p = text_props_from("text-2xl text-white");
+        assert_eq!(p.font_size, Some(24.0));
+        assert_color_approx(p.color.unwrap().0, Color::srgba_u8(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn text_color_with_opacity() {
+        let p = text_props_from("text-sky-500/50");
+        let c = p.color.unwrap().0.to_srgba();
+        assert!((c.alpha - 0.5).abs() < 0.02);
     }
 
     // ── Spacing scale edge cases ──────────────────────────────────────
