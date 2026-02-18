@@ -378,8 +378,10 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                         ..
                     })
                 ) {
+                    // Use parse_mandatory_children (no Push/Pop) — same as
+                    // .expand. Braces are grammar syntax, not tree structure.
                     let mut body = Vec::new();
-                    self.parse_children(&mut body)?;
+                    self.parse_mandatory_children(&mut body)?;
                     if body.is_empty() { None } else { Some(body) }
                 } else {
                     None

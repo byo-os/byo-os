@@ -1,4 +1,4 @@
-use byo::protocol::{Command, EventKind, Prop};
+use byo::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
 
 use crate::{assert_no_message, mock_process, pid, recv_byo_raw, send_byo};
 use byo_orchestrator::router::Router;
@@ -299,4 +299,238 @@ async fn disconnect_cleans_pending_acks() {
 
     // Compositor should NOT receive any stale ACK.
     assert_no_message(&mut compositor_rx);
+}
+
+/// Test 9: Custom request is routed to the target object's owner.
+///
+/// Expected flow:
+/// 1. App creates `+view surface`
+/// 2. Compositor sends `?render-frame 0 app:surface` targeting app's object
+/// 3. App receives `?render-frame 0 surface` (remapped seq, dequalified target)
+#[tokio::test]
+async fn request_basic() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app, mut app_rx) = mock_process(2, "app");
+    router.add_process(compositor);
+    router.add_process(app);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view surface").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    // Compositor sends a custom request targeting the app's object.
+    send_byo(&mut router, pid(1), "?render-frame 0 app:surface").await;
+
+    let s = recv_byo_raw(&mut app_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+    assert_eq!(cmds.len(), 1, "expected 1 command, got: {s}");
+    assert!(
+        matches!(&cmds[0], Command::Request { kind: RequestKind::Other(k), seq, targets, .. }
+            if *k == "render-frame" && *seq == 0 && targets.first().map(|t| &**t) == Some("surface")),
+        "expected ?render-frame 0 surface, got: {s}"
+    );
+}
+
+/// Test 10: Custom response is routed back with original seq.
+///
+/// Expected flow:
+/// 1. Compositor sends `?render-frame 3 app:surface`
+/// 2. App receives `?render-frame 0 surface` (remapped)
+/// 3. App responds `.render-frame 0 status=ok`
+/// 4. Compositor receives `.render-frame 3 status=ok` (original seq)
+#[tokio::test]
+async fn response_routing() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app, mut app_rx) = mock_process(2, "app");
+    router.add_process(compositor);
+    router.add_process(app);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view surface").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    // Compositor sends request with seq 3.
+    send_byo(&mut router, pid(1), "?render-frame 3 app:surface").await;
+    let s = recv_byo_raw(&mut app_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+    let remapped_seq = match &cmds[0] {
+        Command::Request { seq, .. } => *seq,
+        _ => panic!("expected request, got: {s}"),
+    };
+
+    // App responds with the remapped seq.
+    send_byo(
+        &mut router,
+        pid(2),
+        &format!(".render-frame {remapped_seq} status=ok"),
+    )
+    .await;
+
+    // Compositor should receive response with original seq 3.
+    let resp_s = recv_byo_raw(&mut compositor_rx);
+    let resp_cmds = byo::parser::parse(&resp_s).unwrap();
+    assert_eq!(resp_cmds.len(), 1, "expected 1 response, got: {resp_s}");
+    assert!(
+        matches!(&resp_cmds[0], Command::Response { kind: ResponseKind::Other(k), seq, props, .. }
+            if *k == "render-frame" && *seq == 3
+               && props.iter().any(|p| matches!(p, Prop::Value { key, value } if *key == "status" && *value == "ok"))
+        ),
+        "expected .render-frame 3 status=ok, got: {resp_s}"
+    );
+}
+
+/// Test 11: Custom response with body is forwarded correctly.
+#[tokio::test]
+async fn response_with_body() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app, mut app_rx) = mock_process(2, "app");
+    router.add_process(compositor);
+    router.add_process(app);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view surface").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    send_byo(&mut router, pid(1), "?snapshot 0 app:surface").await;
+    let _ = recv_byo_raw(&mut app_rx);
+
+    // App responds with a body.
+    send_byo(
+        &mut router,
+        pid(2),
+        ".snapshot 0 { +view frame class=captured }",
+    )
+    .await;
+
+    let resp_s = recv_byo_raw(&mut compositor_rx);
+    let resp_cmds = byo::parser::parse(&resp_s).unwrap();
+    assert_eq!(resp_cmds.len(), 1, "expected 1 response, got: {resp_s}");
+    match &resp_cmds[0] {
+        Command::Response {
+            kind: ResponseKind::Other(k),
+            seq,
+            body: Some(body),
+            ..
+        } => {
+            assert_eq!(*k, "snapshot");
+            assert_eq!(*seq, 0);
+            assert!(
+                matches!(&body[0], Command::Upsert { kind, id, .. }
+                    if *kind == "view" && *id == "frame"),
+                "expected body +view frame, got: {resp_s}"
+            );
+        }
+        _ => panic!("expected response with body, got: {resp_s}"),
+    }
+}
+
+/// Test 12: Request seq isolation — different destinations get independent counters.
+#[tokio::test]
+async fn request_seq_isolation() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app1, mut app1_rx) = mock_process(2, "app1");
+    let (app2, mut app2_rx) = mock_process(3, "app2");
+    router.add_process(compositor);
+    router.add_process(app1);
+    router.add_process(app2);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view s1").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+    send_byo(&mut router, pid(3), "+view s2").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    // Request to app1.
+    send_byo(&mut router, pid(1), "?render-frame 0 app1:s1").await;
+    let s1 = recv_byo_raw(&mut app1_rx);
+    let cmds1 = byo::parser::parse(&s1).unwrap();
+    assert!(
+        matches!(&cmds1[0], Command::Request { seq, .. } if *seq == 0),
+        "app1 should get seq 0, got: {s1}"
+    );
+
+    // Request to app2 — should also start at seq 0.
+    send_byo(&mut router, pid(1), "?render-frame 1 app2:s2").await;
+    let s2 = recv_byo_raw(&mut app2_rx);
+    let cmds2 = byo::parser::parse(&s2).unwrap();
+    assert!(
+        matches!(&cmds2[0], Command::Request { seq, .. } if *seq == 0),
+        "app2 should get seq 0 (independent), got: {s2}"
+    );
+}
+
+/// Test 13: Pending responses are cleaned up on disconnect.
+#[tokio::test]
+async fn disconnect_cleans_pending_responses() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app, mut app_rx) = mock_process(2, "app");
+    router.add_process(compositor);
+    router.add_process(app);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view surface").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    send_byo(&mut router, pid(1), "?render-frame 0 app:surface").await;
+    let _ = recv_byo_raw(&mut app_rx);
+
+    // App disconnects before responding.
+    router
+        .handle(byo_orchestrator::router::RouterMsg::Disconnected { process: pid(2) })
+        .await;
+
+    // Compositor should NOT receive any stale response.
+    assert_no_message(&mut compositor_rx);
+}
+
+/// Test 14: Request with props is forwarded correctly.
+#[tokio::test]
+async fn request_with_props() {
+    let mut router = Router::new();
+    let (compositor, mut compositor_rx) = mock_process(1, "compositor");
+    let (app, mut app_rx) = mock_process(2, "app");
+    router.add_process(compositor);
+    router.add_process(app);
+
+    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "+view surface").await;
+    let _ = recv_byo_raw(&mut compositor_rx);
+
+    send_byo(
+        &mut router,
+        pid(1),
+        "?render-frame 0 app:surface format=png quality=high",
+    )
+    .await;
+
+    let s = recv_byo_raw(&mut app_rx);
+    let cmds = byo::parser::parse(&s).unwrap();
+    assert_eq!(cmds.len(), 1, "expected 1 command, got: {s}");
+    match &cmds[0] {
+        Command::Request {
+            kind: RequestKind::Other(k),
+            props,
+            ..
+        } => {
+            assert_eq!(*k, "render-frame");
+            assert!(
+                props
+                    .iter()
+                    .any(|p| matches!(p, Prop::Value { key, value } if *key == "format" && *value == "png")),
+                "expected format=png, got: {s}"
+            );
+            assert!(
+                props
+                    .iter()
+                    .any(|p| matches!(p, Prop::Value { key, value } if *key == "quality" && *value == "high")),
+                "expected quality=high, got: {s}"
+            );
+        }
+        _ => panic!("expected request, got: {s}"),
+    }
 }

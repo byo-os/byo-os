@@ -48,6 +48,17 @@ struct PendingAck {
     forwarded_at: Instant,
 }
 
+/// Tracks a forwarded custom request awaiting a response from the destination.
+struct PendingResponse {
+    /// The process that originally sent the request.
+    sender: ProcessId,
+    /// The sequence number used by the original sender.
+    sender_seq: u64,
+    /// When the request was forwarded (for future liveness timeout).
+    #[allow(dead_code)]
+    forwarded_at: Instant,
+}
+
 /// The central router that dispatches messages between processes.
 pub struct Router {
     /// All managed processes, keyed by ID.
@@ -72,6 +83,10 @@ pub struct Router {
     event_seqs: HashMap<(ProcessId, String), u64>,
     /// Per (destination, event_type, forwarded_seq): pending ACK info.
     pending_acks: HashMap<(ProcessId, String, u64), PendingAck>,
+    /// Per (destination, request_kind): next outbound seq.
+    request_seqs: HashMap<(ProcessId, String), u64>,
+    /// Per (destination, request_kind, forwarded_seq): pending response info.
+    pending_responses: HashMap<(ProcessId, String, u64), PendingResponse>,
 }
 
 impl Default for Router {
@@ -88,6 +103,8 @@ impl Default for Router {
             name_to_id: HashMap::new(),
             event_seqs: HashMap::new(),
             pending_acks: HashMap::new(),
+            request_seqs: HashMap::new(),
+            pending_responses: HashMap::new(),
         }
     }
 }
@@ -194,6 +211,26 @@ impl Router {
                     ..
                 } => {
                     self.handle_expand_response(from, &client, *seq, body).await;
+                }
+                Command::Request {
+                    kind: RequestKind::Other(kind_name),
+                    seq,
+                    targets,
+                    props,
+                } => {
+                    if let Some(target) = targets.first() {
+                        self.handle_request(from, &client, kind_name, *seq, target, props)
+                            .await;
+                    }
+                }
+                Command::Response {
+                    kind: ResponseKind::Other(kind_name),
+                    seq,
+                    props,
+                    body,
+                } => {
+                    self.handle_response(from, kind_name, *seq, props, body)
+                        .await;
                 }
                 Command::Event {
                     kind,
@@ -413,6 +450,13 @@ impl Router {
         self.pending_acks
             .retain(|(pid, _, _), ack| *pid != process && ack.sender != process);
 
+        // Remove request seq counters for this process.
+        self.request_seqs.retain(|(pid, _), _| *pid != process);
+
+        // Remove pending responses (same logic as pending ACKs).
+        self.pending_responses
+            .retain(|(pid, _, _), resp| *pid != process && resp.sender != process);
+
         // Remove objects owned by this process from the state tree.
         let _removed = crate::state::remove_by_owner(&mut self.state, process);
 
@@ -578,6 +622,93 @@ impl Router {
         let mut buf = Vec::new();
         let mut em = Emitter::new(&mut buf);
         let _ = em.ack(&event_type, pending.sender_seq, props);
+
+        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)))
+            .await;
+    }
+
+    /// Route a custom request to the owner of the target object.
+    ///
+    /// Same pattern as event routing: qualify target, look up owner,
+    /// remap seq per-destination, dequalify, forward, store pending response.
+    async fn handle_request(
+        &mut self,
+        from: ProcessId,
+        client: &str,
+        kind_name: &str,
+        seq: u64,
+        target: &str,
+        props: &[Prop],
+    ) {
+        use crate::id::{dequalify, qualify};
+
+        let qualified_id = qualify(client, target);
+        let qid = match QualifiedId::parse(&qualified_id) {
+            Some(q) => q,
+            None => return,
+        };
+
+        let target_pid = match self.state.get(&qid) {
+            Some(obj) => obj.data,
+            None => return, // Object doesn't exist — drop silently
+        };
+
+        if target_pid == from {
+            return;
+        }
+
+        let dest_client = match self.client_name(target_pid) {
+            Some(n) => n.to_owned(),
+            None => return,
+        };
+
+        let remapped_seq = self.next_request_seq(target_pid, kind_name);
+        let dequalified_target = dequalify(&dest_client, &qualified_id);
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        let _ = em.request(kind_name, remapped_seq, dequalified_target, props);
+
+        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf))).await;
+
+        self.pending_responses.insert(
+            (target_pid, kind_name.to_owned(), remapped_seq),
+            PendingResponse {
+                sender: from,
+                sender_seq: seq,
+                forwarded_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Route a custom response back to the original request sender.
+    ///
+    /// Same pattern as ACK routing: look up pending response, remap seq,
+    /// forward to original sender.
+    async fn handle_response(
+        &mut self,
+        from: ProcessId,
+        kind_name: &str,
+        seq: u64,
+        props: &[Prop],
+        body: &Option<Vec<Command>>,
+    ) {
+        let kind_owned = kind_name.to_owned();
+        let pending = self
+            .pending_responses
+            .remove(&(from, kind_owned.clone(), seq));
+
+        let Some(pending) = pending else {
+            return; // Stale or unknown response — drop silently
+        };
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        if let Some(body) = body {
+            let _ = em.response_with(kind_name, pending.sender_seq, props, |em| em.commands(body));
+        } else {
+            let _ = em.response(kind_name, pending.sender_seq, props);
+        }
 
         self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)))
             .await;
@@ -1069,6 +1200,17 @@ impl Router {
         let seq = self
             .event_seqs
             .entry((target, event_type.to_owned()))
+            .or_insert(0);
+        let current = *seq;
+        *seq += 1;
+        current
+    }
+
+    /// Get the next request sequence number for a (destination, request_kind) pair.
+    fn next_request_seq(&mut self, target: ProcessId, request_kind: &str) -> u64 {
+        let seq = self
+            .request_seqs
+            .entry((target, request_kind.to_owned()))
             .or_insert(0);
         let current = *seq;
         *seq += 1;
