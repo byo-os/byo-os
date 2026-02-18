@@ -43,4 +43,11 @@ pub struct ViewProps {
     pub order: Option<i32>,
     pub hidden: bool,
     pub opacity: Option<f32>,
+    // 2D transforms
+    pub translate_x: Option<f32>,
+    pub translate_y: Option<f32>,
+    pub rotate: Option<f32>,
+    pub scale: Option<f32>,
+    pub scale_x: Option<f32>,
+    pub scale_y: Option<f32>,
 }

@@ -8,8 +8,16 @@ pub mod tailwind;
 use bevy::prelude::*;
 
 use crate::components::ByoOrder;
+use crate::plugin::WorldScale;
+use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
+use crate::props::types::{ByoColor, ByoOrderMode};
 use crate::props::view::ViewProps;
+use crate::props::window::WindowProps;
+use crate::render::layer::LayerRender;
+
+/// Default scale factor for order → z/depth-bias mapping.
+const DEFAULT_ORDER_SCALE: f32 = 0.001;
 
 /// Resolve class + individual props. Individual props always override class-derived values.
 fn resolve_view_props(props: &ViewProps) -> ViewProps {
@@ -56,6 +64,12 @@ fn resolve_view_props(props: &ViewProps) -> ViewProps {
         flex_basis,
         order,
         opacity,
+        translate_x,
+        translate_y,
+        rotate,
+        scale,
+        scale_x,
+        scale_y,
     );
     if props.hidden {
         r.hidden = true;
@@ -242,6 +256,285 @@ pub fn reconcile_text(
         if let Some(ref c) = resolved.color {
             *color = TextColor(c.0);
         }
+    }
+}
+
+/// Reconcile `ViewProps` 2D transform changes onto `UiTransform`.
+pub fn reconcile_view_transforms(
+    mut query: Query<(&ViewProps, &mut UiTransform), Changed<ViewProps>>,
+) {
+    for (props, mut ui_transform) in &mut query {
+        let resolved = resolve_view_props(props);
+        let tx = resolved.translate_x.unwrap_or(0.0);
+        let ty = resolved.translate_y.unwrap_or(0.0);
+        let uniform_scale = resolved.scale.unwrap_or(1.0);
+        let sx = resolved.scale_x.unwrap_or(uniform_scale);
+        let sy = resolved.scale_y.unwrap_or(uniform_scale);
+        let rot_deg = resolved.rotate.unwrap_or(0.0);
+
+        *ui_transform = UiTransform {
+            translation: Val2::px(tx, ty),
+            scale: Vec2::new(sx, sy),
+            rotation: Rot2::radians(rot_deg.to_radians()),
+        };
+    }
+}
+
+/// Reconcile `WindowProps` 3D transform changes onto `Transform`.
+pub fn reconcile_windows(
+    mut query: Query<(&WindowProps, &mut Transform), Changed<WindowProps>>,
+    world_scale: Res<WorldScale>,
+) {
+    for (props, mut transform) in &mut query {
+        let order = props.order.unwrap_or(0) as f32;
+        let mode = props
+            .order_mode
+            .as_ref()
+            .unwrap_or(&ByoOrderMode::TranslateZ);
+        let scale = props.order_scale.unwrap_or(DEFAULT_ORDER_SCALE);
+        let order_z = match mode {
+            ByoOrderMode::TranslateZ => order * scale,
+            _ => 0.0,
+        };
+        *transform = resolve_3d_transform(
+            props.class.as_deref(),
+            props.translate_x,
+            props.translate_y,
+            props.translate_z,
+            props.rotate,
+            props.rotate_x,
+            props.rotate_y,
+            props.rotate_z,
+            props.scale,
+            props.scale_x,
+            props.scale_y,
+            props.scale_z,
+            order_z,
+            world_scale.0,
+        );
+    }
+}
+
+/// Reconcile `LayerProps` 3D transform + PBR material changes.
+#[allow(clippy::type_complexity)]
+pub fn reconcile_layers(
+    layer_query: Query<(&LayerProps, &LayerRender), Changed<LayerProps>>,
+    mut transforms: Query<&mut Transform>,
+    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    world_scale: Res<WorldScale>,
+) {
+    for (props, render) in &layer_query {
+        let order = props.order.unwrap_or(0) as f32;
+        let mode = props
+            .order_mode
+            .as_ref()
+            .unwrap_or(&ByoOrderMode::TranslateZ);
+        let scale = props.order_scale.unwrap_or(DEFAULT_ORDER_SCALE);
+
+        let order_z = match mode {
+            ByoOrderMode::TranslateZ => order * scale,
+            _ => 0.0,
+        };
+        let ts = resolve_3d_transform(
+            props.class.as_deref(),
+            props.translate_x,
+            props.translate_y,
+            props.translate_z,
+            props.rotate,
+            props.rotate_x,
+            props.rotate_y,
+            props.rotate_z,
+            props.scale,
+            props.scale_x,
+            props.scale_y,
+            props.scale_z,
+            order_z,
+            world_scale.0,
+        );
+
+        // Apply transform to the 3D plane entity
+        if let Ok(mut plane_transform) = transforms.get_mut(render.plane) {
+            *plane_transform = ts;
+        }
+
+        // Apply PBR material props + order-based depth-bias
+        if let Ok(mat_handle) = material_handles.get(render.plane)
+            && let Some(mat) = materials.get_mut(&mat_handle.0)
+        {
+            apply_pbr_props(mat, props, world_scale.0);
+
+            // Order-based depth-bias (explicit depth_bias prop already applied by apply_pbr_props)
+            if matches!(mode, ByoOrderMode::DepthBias) && props.depth_bias.is_none() {
+                mat.depth_bias = order * scale;
+            }
+        }
+    }
+}
+
+/// Shared 3D transform builder — resolves class + individual props.
+/// `order_z` is the z contribution from order (pre-computed by caller based on order-mode).
+/// `world_scale` converts pixel translations to meters (= 1.0 / pixels_per_meter).
+#[allow(clippy::too_many_arguments)]
+fn resolve_3d_transform(
+    class: Option<&str>,
+    prop_tx: Option<f32>,
+    prop_ty: Option<f32>,
+    prop_tz: Option<f32>,
+    prop_rotate: Option<f32>,
+    prop_rx: Option<f32>,
+    prop_ry: Option<f32>,
+    prop_rz: Option<f32>,
+    prop_scale: Option<f32>,
+    prop_sx: Option<f32>,
+    prop_sy: Option<f32>,
+    prop_sz: Option<f32>,
+    order_z: f32,
+    world_scale: f32,
+) -> Transform {
+    // Start with class-derived values
+    let mut ts = tailwind::TransformStyle::default();
+    if let Some(class_str) = class {
+        tailwind::apply_transform_classes(&mut ts, class_str);
+    }
+
+    // Individual props override class-derived values.
+    // Translations are in protocol pixels — convert to world meters.
+    let tx = prop_tx.or(ts.translate_x).unwrap_or(0.0) * world_scale;
+    let ty = prop_ty.or(ts.translate_y).unwrap_or(0.0) * world_scale;
+    let tz = prop_tz.or(ts.translate_z).unwrap_or(0.0) * world_scale + order_z;
+    let rot = prop_rotate.or(ts.rotate).unwrap_or(0.0);
+    let rx = prop_rx.or(ts.rotate_x).unwrap_or(0.0);
+    let ry = prop_ry.or(ts.rotate_y).unwrap_or(0.0);
+    // rotate-z overrides rotate shorthand
+    let rz = prop_rz.or(ts.rotate_z).unwrap_or(rot);
+    let uniform = prop_scale.or(ts.scale).unwrap_or(1.0);
+    let sx = prop_sx.or(ts.scale_x).unwrap_or(uniform);
+    let sy = prop_sy.or(ts.scale_y).unwrap_or(uniform);
+    let sz = prop_sz.or(ts.scale_z).unwrap_or(uniform);
+
+    let rotation = Quat::from_euler(
+        EulerRot::XYZ,
+        rx.to_radians(),
+        ry.to_radians(),
+        rz.to_radians(),
+    );
+
+    Transform {
+        translation: Vec3::new(tx, ty, tz),
+        rotation,
+        scale: Vec3::new(sx, sy, sz),
+    }
+}
+
+/// Apply PBR material props from LayerProps onto a StandardMaterial.
+/// Individual wire props always override class-derived values.
+/// `world_scale` converts pixel-based spatial values (thickness, attenuation_distance) to meters.
+fn apply_pbr_props(mat: &mut StandardMaterial, props: &LayerProps, world_scale: f32) {
+    // Resolve class-based PBR values first
+    let mut cs = tailwind::TransformStyle::default();
+    if let Some(ref class_str) = props.class {
+        tailwind::apply_transform_classes(&mut cs, class_str);
+    }
+
+    // Helper: convert ByoColor to sRGB Color for base_color
+    fn resolve_color(prop: &Option<ByoColor>, class: Option<Color>) -> Option<Color> {
+        prop.as_ref().map(|c| c.0).or(class)
+    }
+
+    // Helper: convert ByoColor to LinearRgba for emissive
+    fn resolve_emissive(prop: &Option<ByoColor>, class: Option<Color>) -> Option<LinearRgba> {
+        let color = prop.as_ref().map(|c| c.0).or(class)?;
+        let srgba = color.to_srgba();
+        Some(LinearRgba::new(
+            srgba.red,
+            srgba.green,
+            srgba.blue,
+            srgba.alpha,
+        ))
+    }
+
+    // Colors
+    if let Some(c) = resolve_color(&props.base_color, cs.base_color) {
+        mat.base_color = c;
+    }
+    if let Some(e) = resolve_emissive(&props.emissive_color, cs.emissive_color) {
+        mat.emissive = e;
+    }
+    if let Some(c) = resolve_color(&props.attenuation_color, cs.attenuation_color) {
+        mat.attenuation_color = c;
+    }
+
+    // 0-100 scale properties (prop overrides class)
+    if let Some(v) = props.perceptual_roughness.or(cs.perceptual_roughness) {
+        mat.perceptual_roughness = v;
+    }
+    if let Some(v) = props.metallic.or(cs.metallic) {
+        mat.metallic = v;
+    }
+    if let Some(v) = props.reflectance.or(cs.reflectance) {
+        mat.reflectance = v;
+    }
+    if let Some(v) = props.clearcoat.or(cs.clearcoat) {
+        mat.clearcoat = v;
+    }
+    if let Some(v) = props
+        .clearcoat_perceptual_roughness
+        .or(cs.clearcoat_perceptual_roughness)
+    {
+        mat.clearcoat_perceptual_roughness = v;
+    }
+    if let Some(v) = props.anisotropy_strength.or(cs.anisotropy_strength) {
+        mat.anisotropy_strength = v;
+    }
+    if let Some(v) = props.specular_transmission.or(cs.specular_transmission) {
+        mat.specular_transmission = v;
+    }
+    if let Some(v) = props.diffuse_transmission.or(cs.diffuse_transmission) {
+        mat.diffuse_transmission = v;
+    }
+
+    // Arbitrary float properties (prop overrides class)
+    if let Some(v) = props
+        .emissive_exposure_weight
+        .or(cs.emissive_exposure_weight)
+    {
+        mat.emissive_exposure_weight = v;
+    }
+    if let Some(v) = props.ior.or(cs.ior) {
+        mat.ior = v;
+    }
+    if let Some(v) = props.thickness.or(cs.thickness) {
+        mat.thickness = v * world_scale;
+    }
+    if let Some(v) = props.attenuation_distance.or(cs.attenuation_distance) {
+        mat.attenuation_distance = v * world_scale;
+    }
+    if let Some(v) = props.anisotropy_rotation.or(cs.anisotropy_rotation) {
+        mat.anisotropy_rotation = v;
+    }
+    if let Some(v) = props.depth_bias.or(cs.depth_bias) {
+        mat.depth_bias = v;
+    }
+
+    // Booleans (prop overrides class)
+    if let Some(v) = props.unlit.or(cs.unlit) {
+        mat.unlit = v;
+    }
+    if let Some(v) = props.double_sided.or(cs.double_sided) {
+        mat.double_sided = v;
+    }
+    if let Some(ref mode) = props.cull_mode {
+        mat.cull_mode = mode.to_face();
+    }
+    if let Some(v) = props.fog_enabled.or(cs.fog_enabled) {
+        mat.fog_enabled = v;
+    }
+
+    // Enum (prop overrides class)
+    let alpha_mode = props.alpha_mode.as_ref().or(cs.alpha_mode.as_ref());
+    if let Some(mode) = alpha_mode {
+        mat.alpha_mode = mode.to_bevy();
     }
 }
 

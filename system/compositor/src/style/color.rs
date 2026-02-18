@@ -146,12 +146,13 @@ fn parse_percent_or_fraction(s: &str) -> Option<f32> {
     s.parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0))
 }
 
-/// Parse `"255"` as 0..=255 -> 0.0..=1.0, or `"50%"` -> 0.5
+/// Parse `"255"` as 0..=255 -> 0.0..=1.0, or `"50%"` -> 0.5.
+/// Values above 1.0 are allowed for HDR emissive colors (e.g. `rgb(510, 0, 0)` -> 2.0).
 fn parse_color_component(s: &str) -> Option<f32> {
     if let Some(pct) = s.strip_suffix('%') {
-        return pct.parse::<f32>().ok().map(|v| (v / 100.0).clamp(0.0, 1.0));
+        return pct.parse::<f32>().ok().map(|v| (v / 100.0).max(0.0));
     }
-    s.parse::<f32>().ok().map(|v| (v / 255.0).clamp(0.0, 1.0))
+    s.parse::<f32>().ok().map(|v| (v / 255.0).max(0.0))
 }
 
 /// Parse alpha: `"0.5"` -> 0.5, `"50%"` -> 0.5

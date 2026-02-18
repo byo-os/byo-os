@@ -8,6 +8,7 @@ use byo::props::FromProps;
 use crate::components::*;
 use crate::id_map::IdMap;
 use crate::io::ByoBatch;
+use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
 use crate::props::view::ViewProps;
@@ -30,6 +31,7 @@ pub fn process_commands(
     mut windows: Query<&mut WindowProps>,
     layer_renders: Query<&LayerRender>,
     primary_window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    world_scale: Res<WorldScale>,
 ) {
     let scale_factor = primary_window
         .iter()
@@ -92,6 +94,7 @@ pub fn process_commands(
                             parent,
                             props,
                             scale_factor,
+                            world_scale.0,
                         )
                     };
 
@@ -197,6 +200,7 @@ fn spawn_entity(
     parent: Option<Entity>,
     props: &[byo::Prop],
     scale_factor: f32,
+    world_scale: f32,
 ) -> Entity {
     match kind {
         "view" => {
@@ -234,7 +238,21 @@ fn spawn_entity(
             let lp = LayerProps::from_props(props);
             let width = extract_layer_size(&lp.width, 1280);
             let height = extract_layer_size(&lp.height, 720);
-            let z_offset = lp.order.unwrap_or(0) as f32;
+            // Resolve format: wire prop overrides class-derived value
+            let format = lp.format.clone().unwrap_or_else(|| {
+                let mut ts = crate::style::tailwind::TransformStyle::default();
+                if let Some(ref class) = lp.class {
+                    crate::style::tailwind::apply_transform_classes(&mut ts, class);
+                }
+                ts.format.unwrap_or_default()
+            });
+            let order_scale = lp.order_scale.unwrap_or(0.001);
+            let z_offset = match lp.order_mode {
+                Some(crate::props::types::ByoOrderMode::TranslateZ) | None => {
+                    lp.order.unwrap_or(0) as f32 * order_scale
+                }
+                _ => 0.0,
+            };
 
             let mut ec = commands.spawn((ByoLayer, lp));
             if let Some(p) = parent {
@@ -252,6 +270,8 @@ fn spawn_entity(
                 height,
                 scale_factor,
                 z_offset,
+                world_scale,
+                &format,
             );
 
             // Record ui_root eagerly so same-batch views can find it

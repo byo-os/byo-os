@@ -366,6 +366,120 @@ byo_enum! {
     }
 }
 
+// Note: ByoOrderMode doesn't map to a Bevy type, so we use a dummy target.
+// The to_bevy() method isn't used; we match on the enum directly.
+byo_enum! {
+    /// Controls how `order` is applied in 3D space.
+    ByoOrderMode => u8 {
+        TranslateZ => "translate-z" => 0,
+        DepthBias => "depth-bias" => 1,
+        None => "none" => 2,
+    }
+}
+
+byo_enum! {
+    ByoAlphaMode => AlphaMode {
+        Opaque => "opaque" => AlphaMode::Opaque,
+        Blend => "blend" => AlphaMode::Blend,
+        Premultiplied => "premultiplied" => AlphaMode::Premultiplied,
+        Add => "add" => AlphaMode::Add,
+        Multiply => "multiply" => AlphaMode::Multiply,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByoTextureFormat — layer render texture pixel format
+// ---------------------------------------------------------------------------
+
+/// Controls the pixel format of a layer's render texture.
+/// Wire values use kebab-cased WebGPU format names (auto-derived from PascalCase).
+#[derive(Debug, Clone, Default, byo::ReadProp, byo::WriteProp)]
+pub enum ByoTextureFormat {
+    #[default]
+    Rgba8UnormSrgb,
+    Rgba8Unorm,
+    Rgb10a2Unorm,
+    Rgba16Float,
+    Rgba32Float,
+}
+
+impl ByoTextureFormat {
+    pub fn to_wgpu(&self) -> bevy::render::render_resource::TextureFormat {
+        use bevy::render::render_resource::TextureFormat;
+        match self {
+            Self::Rgba8UnormSrgb => TextureFormat::Rgba8UnormSrgb,
+            Self::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+            Self::Rgb10a2Unorm => TextureFormat::Rgb10a2Unorm,
+            Self::Rgba16Float => TextureFormat::Rgba16Float,
+            Self::Rgba32Float => TextureFormat::Rgba32Float,
+        }
+    }
+
+    /// Bytes-per-pixel for the format (used for zero-fill at creation).
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self {
+            Self::Rgba8UnormSrgb | Self::Rgba8Unorm | Self::Rgb10a2Unorm => 4,
+            Self::Rgba16Float => 8,
+            Self::Rgba32Float => 16,
+        }
+    }
+
+    /// Whether this format supports HDR values (>1.0 per channel).
+    pub fn is_hdr(&self) -> bool {
+        matches!(self, Self::Rgba16Float | Self::Rgba32Float)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByoCullMode — maps to Option<bevy::render::render_resource::Face>
+// ---------------------------------------------------------------------------
+
+/// Controls face culling on layer materials.
+/// - `none` → render both sides (no culling)
+/// - `front` → cull front faces
+/// - `back` → cull back faces (default)
+#[derive(Debug, Clone, Default)]
+pub enum ByoCullMode {
+    None,
+    Front,
+    #[default]
+    Back,
+}
+
+impl ByoCullMode {
+    pub fn to_face(&self) -> Option<bevy::render::render_resource::Face> {
+        match self {
+            Self::None => None,
+            Self::Front => Some(bevy::render::render_resource::Face::Front),
+            Self::Back => Some(bevy::render::render_resource::Face::Back),
+        }
+    }
+}
+
+impl ReadProp for ByoCullMode {
+    fn apply(&mut self, prop: &Prop) {
+        if let Prop::Value { value, .. } = prop {
+            match value.as_ref() {
+                "none" => *self = Self::None,
+                "front" => *self = Self::Front,
+                "back" => *self = Self::Back,
+                _ => {}
+            }
+        }
+    }
+}
+
+impl WriteProp for ByoCullMode {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        let val = match self {
+            Self::None => "none",
+            Self::Front => "front",
+            Self::Back => "back",
+        };
+        out.push(Prop::val(key, val));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------

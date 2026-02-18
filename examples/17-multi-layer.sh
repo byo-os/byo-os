@@ -3,8 +3,8 @@
 printf '\e_B
   +window desktop {
     +layer bg width=1280 height=720 order=0 {
-      +view root class="flex flex-col items-center justify-center w-full h-full bg-zinc-950" {
-        +text title content="Background Layer" class="text-6xl text-zinc-800"
+      +view bg-root class="flex flex-col items-center justify-center w-full h-full bg-zinc-950" {
+        +text bg-title content="Background Layer" class="text-6xl text-zinc-800"
         +view dots class="flex flex-row flex-wrap gap-4 p-16" {
           +view d1 class="w-4 h-4 rounded-full bg-zinc-900"
           +view d2 class="w-4 h-4 rounded-full bg-zinc-900"
@@ -20,8 +20,8 @@ printf '\e_B
     }
 
     +layer panel width=400 height=300 order=1 {
-      +view root class="flex flex-col w-full h-full bg-zinc-800 rounded-xl p-6 gap-4 border border-zinc-700" {
-        +text title content="Floating Panel" class="text-xl text-white"
+      +view panel-root class="flex flex-col w-full h-full bg-zinc-800 rounded-xl p-6 gap-4 border border-zinc-700" {
+        +text panel-title content="Floating Panel" class="text-xl text-white"
         +view divider class="w-full h-px bg-zinc-600"
         +view content class="flex flex-col gap-2" {
           +view row1 class="flex flex-row items-center gap-3" {

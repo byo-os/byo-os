@@ -1,9 +1,11 @@
 //! Layer render pipeline — render texture + Camera2d + 3D textured plane.
 
+use crate::props::types::ByoTextureFormat;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureUsages};
+use bevy::render::view::Hdr;
 
 /// Tracks the render pipeline entities for a layer.
 #[derive(Component)]
@@ -37,6 +39,8 @@ pub fn spawn_layer_render(
     height: u32,
     scale_factor: f32,
     z_offset: f32,
+    world_scale: f32,
+    format: &ByoTextureFormat,
 ) -> LayerRender {
     // 1. Create render texture at physical pixel resolution for HiDPI.
     let physical_width = (width as f32 * scale_factor) as u32;
@@ -46,11 +50,13 @@ pub fn spawn_layer_render(
         height: physical_height,
         depth_or_array_layers: 1,
     };
+    let texture_format = format.to_wgpu();
+    let fill = vec![0u8; format.bytes_per_pixel()];
     let mut image = Image::new_fill(
         size,
         TextureDimension::D2,
-        &[0, 0, 0, 0],
-        TextureFormat::Bgra8UnormSrgb,
+        &fill,
+        texture_format,
         RenderAssetUsages::default(),
     );
     image.texture_descriptor.usage =
@@ -61,20 +67,22 @@ pub fn spawn_layer_render(
     //    order: -1 ensures layer cameras render before main cameras.
     //    ImageRenderTarget.scale_factor tells Bevy's UI system the DPI scale
     //    so layout happens in logical pixels while rendering at physical resolution.
-    let camera = commands
-        .spawn((
-            Camera2d,
-            Camera {
-                order: -1,
-                clear_color: ClearColorConfig::Custom(Color::NONE),
-                ..default()
-            },
-            RenderTarget::Image(ImageRenderTarget {
-                handle: image_handle.clone(),
-                scale_factor,
-            }),
-        ))
-        .id();
+    let mut camera_cmd = commands.spawn((
+        Camera2d,
+        Camera {
+            order: -1,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+        RenderTarget::Image(ImageRenderTarget {
+            handle: image_handle.clone(),
+            scale_factor,
+        }),
+    ));
+    if format.is_hdr() {
+        camera_cmd.insert(Hdr);
+    }
+    let camera = camera_cmd.id();
 
     // 3. Spawn UI root node targeting this camera
     let ui_root = commands
@@ -89,12 +97,14 @@ pub fn spawn_layer_render(
         .id();
 
     // 4. Spawn 3D plane with the render texture as material.
-    //    Plane uses logical dimensions so it matches Camera3d's ScalingMode::WindowSize.
-    let half = Vec2::new(width as f32 / 2.0, height as f32 / 2.0);
+    //    Plane uses world-scaled dimensions — logical pixels converted to meters
+    //    via world_scale so Camera3d's perspective projection maps 1:1 at Z=0.
+    let half = Vec2::new(width as f32 / 2.0, height as f32 / 2.0) * world_scale;
     let plane_mesh = meshes.add(Plane3d::new(Vec3::Z, half));
     let plane_material = materials.add(StandardMaterial {
         base_color_texture: Some(image_handle.clone()),
         unlit: true,
+        double_sided: true,
         alpha_mode: AlphaMode::Blend,
         ..default()
     });
@@ -102,7 +112,7 @@ pub fn spawn_layer_render(
     let mut plane_cmd = commands.spawn((
         Mesh3d(plane_mesh),
         MeshMaterial3d(plane_material),
-        Transform::from_xyz(0.0, 0.0, z_offset),
+        Transform::from_xyz(0.0, 0.0, z_offset * world_scale),
     ));
     if let Some(window) = window_entity {
         plane_cmd.insert(ChildOf(window));

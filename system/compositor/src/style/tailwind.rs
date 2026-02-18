@@ -777,9 +777,437 @@ fn apply_class(props: &mut ViewProps, class: &str) {
         && let Ok(n) = rest.parse::<i32>()
     {
         props.order = Some(n);
+        return;
     }
 
+    // 2D transforms on views
+    apply_2d_transform_class(
+        class,
+        &mut props.translate_x,
+        &mut props.translate_y,
+        &mut props.rotate,
+        &mut props.scale,
+        &mut props.scale_x,
+        &mut props.scale_y,
+    );
+
     // Unknown classes — silently ignored
+}
+
+// ---------------------------------------------------------------------------
+// Transform class parsing (shared 2D helper)
+// ---------------------------------------------------------------------------
+
+/// Parse 2D transform classes: translate-x/y, rotate, scale, scale-x/y.
+/// Used by both view `apply_classes()` and `apply_transform_classes()`.
+fn apply_2d_transform_class(
+    class: &str,
+    translate_x: &mut Option<f32>,
+    translate_y: &mut Option<f32>,
+    rotate: &mut Option<f32>,
+    scale: &mut Option<f32>,
+    scale_x: &mut Option<f32>,
+    scale_y: &mut Option<f32>,
+) {
+    // Negative prefix support
+    let (class, neg) = if let Some(rest) = class.strip_prefix('-') {
+        (rest, true)
+    } else {
+        (class, false)
+    };
+    let sign = if neg { -1.0 } else { 1.0 };
+
+    // translate-x-{n}, translate-y-{n}
+    if let Some(rest) = class.strip_prefix("translate-x-") {
+        if let Some(Val::Px(px)) = spacing_scale(rest) {
+            *translate_x = Some(px * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("translate-y-") {
+        if let Some(Val::Px(px)) = spacing_scale(rest) {
+            *translate_y = Some(px * sign);
+        }
+        return;
+    }
+
+    // scale-x-{n}, scale-y-{n}, scale-{n}
+    if let Some(rest) = class.strip_prefix("scale-x-") {
+        if let Some(v) = parse_scale_value(rest) {
+            *scale_x = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("scale-y-") {
+        if let Some(v) = parse_scale_value(rest) {
+            *scale_y = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("scale-") {
+        if let Some(v) = parse_scale_value(rest) {
+            *scale = Some(v);
+        }
+        return;
+    }
+
+    // rotate-{n}
+    if let Some(rest) = class.strip_prefix("rotate-")
+        && let Some(v) = parse_rotation_value(rest)
+    {
+        *rotate = Some(v * sign);
+    }
+}
+
+/// Parse a scale class value: integer (percentage → f32) or arbitrary `[value]`.
+fn parse_scale_value(s: &str) -> Option<f32> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return inner.parse::<f32>().ok();
+    }
+    s.parse::<u32>().ok().map(|n| n as f32 / 100.0)
+}
+
+/// Parse a rotation class value: integer (degrees) or arbitrary `[value]`.
+fn parse_rotation_value(s: &str) -> Option<f32> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return inner.parse::<f32>().ok();
+    }
+    s.parse::<f32>().ok()
+}
+
+// ---------------------------------------------------------------------------
+// 3D transform + PBR class parsing (windows/layers)
+// ---------------------------------------------------------------------------
+
+/// All class-resolved values for 3D objects (windows/layers).
+/// Covers transforms, PBR material properties, and colors.
+#[derive(Debug, Default, Clone)]
+pub struct TransformStyle {
+    // Layer format
+    pub format: Option<ByoTextureFormat>,
+    // Transforms
+    pub translate_x: Option<f32>,
+    pub translate_y: Option<f32>,
+    pub translate_z: Option<f32>,
+    pub rotate: Option<f32>,
+    pub rotate_x: Option<f32>,
+    pub rotate_y: Option<f32>,
+    pub rotate_z: Option<f32>,
+    pub scale: Option<f32>,
+    pub scale_x: Option<f32>,
+    pub scale_y: Option<f32>,
+    pub scale_z: Option<f32>,
+    // PBR: 0-100 scale properties
+    pub perceptual_roughness: Option<f32>,
+    pub metallic: Option<f32>,
+    pub reflectance: Option<f32>,
+    pub clearcoat: Option<f32>,
+    pub clearcoat_perceptual_roughness: Option<f32>,
+    pub anisotropy_strength: Option<f32>,
+    pub specular_transmission: Option<f32>,
+    pub diffuse_transmission: Option<f32>,
+    // PBR: arbitrary-only floats
+    pub emissive_exposure_weight: Option<f32>,
+    pub ior: Option<f32>,
+    pub thickness: Option<f32>,
+    pub attenuation_distance: Option<f32>,
+    pub anisotropy_rotation: Option<f32>,
+    pub depth_bias: Option<f32>,
+    // PBR: colors
+    pub base_color: Option<Color>,
+    pub emissive_color: Option<Color>,
+    pub attenuation_color: Option<Color>,
+    // PBR: booleans
+    pub unlit: Option<bool>,
+    pub double_sided: Option<bool>,
+    pub fog_enabled: Option<bool>,
+    // PBR: enum
+    pub alpha_mode: Option<ByoAlphaMode>,
+}
+
+/// Apply transform + PBR shorthand classes for windows and layers.
+pub fn apply_transform_classes(style: &mut TransformStyle, class_str: &str) {
+    for class in class_str.split_whitespace() {
+        apply_transform_class(style, class);
+    }
+}
+
+fn apply_transform_class(style: &mut TransformStyle, class: &str) {
+    // ── Layer format ─────────────────────────────────────────────────
+    match class {
+        "format-rgba8unorm-srgb" => {
+            style.format = Some(ByoTextureFormat::Rgba8UnormSrgb);
+            return;
+        }
+        "format-rgba8unorm" => {
+            style.format = Some(ByoTextureFormat::Rgba8Unorm);
+            return;
+        }
+        "format-rgb10a2unorm" => {
+            style.format = Some(ByoTextureFormat::Rgb10a2Unorm);
+            return;
+        }
+        "format-rgba16float" => {
+            style.format = Some(ByoTextureFormat::Rgba16Float);
+            return;
+        }
+        "format-rgba32float" => {
+            style.format = Some(ByoTextureFormat::Rgba32Float);
+            return;
+        }
+        _ => {}
+    }
+
+    // ── Exact matches (booleans, enums) ──────────────────────────────
+    match class {
+        "unlit" => {
+            style.unlit = Some(true);
+            return;
+        }
+        "lit" => {
+            style.unlit = Some(false);
+            return;
+        }
+        "double-sided" => {
+            style.double_sided = Some(true);
+            return;
+        }
+        "fog-enabled" => {
+            style.fog_enabled = Some(true);
+            return;
+        }
+        "fog-disabled" => {
+            style.fog_enabled = Some(false);
+            return;
+        }
+        // Alpha mode
+        "alpha-opaque" => {
+            style.alpha_mode = Some(ByoAlphaMode::Opaque);
+            return;
+        }
+        "alpha-blend" => {
+            style.alpha_mode = Some(ByoAlphaMode::Blend);
+            return;
+        }
+        "alpha-premultiplied" => {
+            style.alpha_mode = Some(ByoAlphaMode::Premultiplied);
+            return;
+        }
+        "alpha-add" => {
+            style.alpha_mode = Some(ByoAlphaMode::Add);
+            return;
+        }
+        "alpha-multiply" => {
+            style.alpha_mode = Some(ByoAlphaMode::Multiply);
+            return;
+        }
+        _ => {}
+    }
+
+    // ── Negative prefix for transforms ───────────────────────────────
+    let (class, neg) = if let Some(rest) = class.strip_prefix('-') {
+        (rest, true)
+    } else {
+        (class, false)
+    };
+    let sign = if neg { -1.0 } else { 1.0 };
+
+    // ── Translations ─────────────────────────────────────────────────
+    if let Some(rest) = class.strip_prefix("translate-z-") {
+        if let Some(Val::Px(px)) = spacing_scale(rest) {
+            style.translate_z = Some(px * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("translate-x-") {
+        if let Some(Val::Px(px)) = spacing_scale(rest) {
+            style.translate_x = Some(px * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("translate-y-") {
+        if let Some(Val::Px(px)) = spacing_scale(rest) {
+            style.translate_y = Some(px * sign);
+        }
+        return;
+    }
+
+    // ── Rotations ────────────────────────────────────────────────────
+    if let Some(rest) = class.strip_prefix("rotate-x-") {
+        if let Some(v) = parse_rotation_value(rest) {
+            style.rotate_x = Some(v * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("rotate-y-") {
+        if let Some(v) = parse_rotation_value(rest) {
+            style.rotate_y = Some(v * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("rotate-z-") {
+        if let Some(v) = parse_rotation_value(rest) {
+            style.rotate_z = Some(v * sign);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("rotate-")
+        && let Some(v) = parse_rotation_value(rest)
+    {
+        style.rotate = Some(v * sign);
+        return;
+    }
+
+    // ── Scale ────────────────────────────────────────────────────────
+    if let Some(rest) = class.strip_prefix("scale-x-") {
+        if let Some(v) = parse_scale_value(rest) {
+            style.scale_x = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("scale-y-") {
+        if let Some(v) = parse_scale_value(rest) {
+            style.scale_y = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("scale-z-") {
+        if let Some(v) = parse_scale_value(rest) {
+            style.scale_z = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("scale-") {
+        if let Some(v) = parse_scale_value(rest) {
+            style.scale = Some(v);
+        }
+        return;
+    }
+
+    // ── PBR colors: base-{color}, emissive-{color}, attenuation-{color} ──
+    if let Some(rest) = class.strip_prefix("emissive-") {
+        // emissive-exposure-[v] must be checked before color parsing
+        if let Some(rest2) = rest.strip_prefix("exposure-") {
+            if let Some(v) = parse_arbitrary_value(rest2) {
+                style.emissive_exposure_weight = Some(v);
+            }
+        } else if let Some(color) = parse_color_class(rest) {
+            style.emissive_color = Some(color);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("base-") {
+        if let Some(color) = parse_color_class(rest) {
+            style.base_color = Some(color);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("attenuation-") {
+        // attenuation-distance-[v] vs attenuation-{color}
+        if let Some(inner) = rest.strip_prefix("distance-") {
+            if let Some(v) = parse_arbitrary_value(inner) {
+                style.attenuation_distance = Some(v);
+            }
+            return;
+        }
+        if let Some(color) = parse_color_class(rest) {
+            style.attenuation_color = Some(color);
+        }
+        return;
+    }
+
+    // ── PBR 0-100 scale: roughness, metallic, reflectance, etc. ──────
+    if let Some(rest) = class.strip_prefix("roughness-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.perceptual_roughness = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("metallic-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.metallic = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("reflectance-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.reflectance = Some(v);
+        }
+        return;
+    }
+    // clearcoat-roughness-{n} must come before clearcoat-{n}
+    if let Some(rest) = class.strip_prefix("clearcoat-roughness-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.clearcoat_perceptual_roughness = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("clearcoat-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.clearcoat = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("anisotropy-rotation-") {
+        if let Some(v) = parse_arbitrary_value(rest) {
+            style.anisotropy_rotation = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("anisotropy-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.anisotropy_strength = Some(v);
+        }
+        return;
+    }
+    // diffuse-transmission-{n} must come before transmission-{n}
+    if let Some(rest) = class.strip_prefix("diffuse-transmission-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.diffuse_transmission = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("transmission-") {
+        if let Some(v) = parse_pbr_value(rest) {
+            style.specular_transmission = Some(v);
+        }
+        return;
+    }
+
+    // ── PBR arbitrary-only floats ────────────────────────────────────
+    if let Some(rest) = class.strip_prefix("ior-") {
+        if let Some(v) = parse_arbitrary_value(rest) {
+            style.ior = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("thickness-") {
+        if let Some(v) = parse_arbitrary_value(rest) {
+            style.thickness = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("depth-bias-")
+        && let Some(v) = parse_arbitrary_value(rest)
+    {
+        style.depth_bias = Some(v);
+    }
+}
+
+/// Parse a PBR shorthand value: 0-100 → 0.0-1.0, or arbitrary `[value]`.
+fn parse_pbr_value(s: &str) -> Option<f32> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return inner.parse::<f32>().ok();
+    }
+    s.parse::<u32>()
+        .ok()
+        .map(|n| (n as f32 / 100.0).clamp(0.0, 1.0))
+}
+
+/// Parse an arbitrary-only value: `[value]`.
+fn parse_arbitrary_value(s: &str) -> Option<f32> {
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?;
+    inner.parse::<f32>().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,5 +1741,344 @@ mod tests {
     fn spacing_1_5() {
         let p = props_from("m-1.5");
         assert_eq!(p.margin.unwrap().0, UiRect::all(Val::Px(6.0)));
+    }
+
+    // ── 2D Transform classes (views) ─────────────────────────────────
+
+    #[test]
+    fn translate_x_4() {
+        let p = props_from("translate-x-4");
+        assert_eq!(p.translate_x, Some(16.0));
+    }
+
+    #[test]
+    fn translate_y_8() {
+        let p = props_from("translate-y-8");
+        assert_eq!(p.translate_y, Some(32.0));
+    }
+
+    #[test]
+    fn neg_translate_x() {
+        let p = props_from("-translate-x-4");
+        assert_eq!(p.translate_x, Some(-16.0));
+    }
+
+    #[test]
+    fn translate_x_arbitrary() {
+        let p = props_from("translate-x-[100]");
+        assert_eq!(p.translate_x, Some(100.0));
+    }
+
+    #[test]
+    fn rotate_45() {
+        let p = props_from("rotate-45");
+        assert_eq!(p.rotate, Some(45.0));
+    }
+
+    #[test]
+    fn neg_rotate_45() {
+        let p = props_from("-rotate-45");
+        assert_eq!(p.rotate, Some(-45.0));
+    }
+
+    #[test]
+    fn rotate_arbitrary() {
+        let p = props_from("rotate-[30]");
+        assert_eq!(p.rotate, Some(30.0));
+    }
+
+    #[test]
+    fn scale_50() {
+        let p = props_from("scale-50");
+        assert_eq!(p.scale, Some(0.5));
+    }
+
+    #[test]
+    fn scale_150() {
+        let p = props_from("scale-150");
+        assert_eq!(p.scale, Some(1.5));
+    }
+
+    #[test]
+    fn scale_x_75() {
+        let p = props_from("scale-x-75");
+        assert_eq!(p.scale_x, Some(0.75));
+    }
+
+    #[test]
+    fn scale_y_125() {
+        let p = props_from("scale-y-125");
+        assert_eq!(p.scale_y, Some(1.25));
+    }
+
+    #[test]
+    fn scale_arbitrary() {
+        let p = props_from("scale-[0.85]");
+        assert_eq!(p.scale, Some(0.85));
+    }
+
+    // ── 3D Transform + PBR classes ───────────────────────────────────
+
+    fn transform_from(classes: &str) -> TransformStyle {
+        let mut style = TransformStyle::default();
+        apply_transform_classes(&mut style, classes);
+        style
+    }
+
+    #[test]
+    fn transform_translate_z() {
+        let s = transform_from("translate-z-4");
+        assert_eq!(s.translate_z, Some(16.0));
+    }
+
+    #[test]
+    fn transform_rotate_x() {
+        let s = transform_from("rotate-x-45");
+        assert_eq!(s.rotate_x, Some(45.0));
+    }
+
+    #[test]
+    fn transform_rotate_y() {
+        let s = transform_from("rotate-y-90");
+        assert_eq!(s.rotate_y, Some(90.0));
+    }
+
+    #[test]
+    fn transform_rotate_z() {
+        let s = transform_from("rotate-z-180");
+        assert_eq!(s.rotate_z, Some(180.0));
+    }
+
+    #[test]
+    fn transform_scale_z() {
+        let s = transform_from("scale-z-50");
+        assert_eq!(s.scale_z, Some(0.5));
+    }
+
+    #[test]
+    fn roughness_25() {
+        let s = transform_from("roughness-25");
+        assert_eq!(s.perceptual_roughness, Some(0.25));
+    }
+
+    #[test]
+    fn metallic_100() {
+        let s = transform_from("metallic-100");
+        assert_eq!(s.metallic, Some(1.0));
+    }
+
+    #[test]
+    fn roughness_arbitrary() {
+        let s = transform_from("roughness-[0.3]");
+        assert_eq!(s.perceptual_roughness, Some(0.3));
+    }
+
+    #[test]
+    fn metallic_arbitrary() {
+        let s = transform_from("metallic-[0.8]");
+        assert_eq!(s.metallic, Some(0.8));
+    }
+
+    #[test]
+    fn combined_3d_transforms() {
+        let s = transform_from("translate-x-4 rotate-y-90 scale-150 metallic-50 roughness-75");
+        assert_eq!(s.translate_x, Some(16.0));
+        assert_eq!(s.rotate_y, Some(90.0));
+        assert_eq!(s.scale, Some(1.5));
+        assert_eq!(s.metallic, Some(0.5));
+        assert_eq!(s.perceptual_roughness, Some(0.75));
+    }
+
+    // ── PBR color classes ────────────────────────────────────────────
+
+    #[test]
+    fn base_color_red_500() {
+        let s = transform_from("base-red-500");
+        assert!(s.base_color.is_some());
+        assert_color_approx(
+            s.base_color.unwrap(),
+            Color::srgba_u8(0xef, 0x44, 0x44, 255),
+        );
+    }
+
+    #[test]
+    fn base_color_arbitrary() {
+        let s = transform_from("base-[#00ff00]");
+        assert!(s.base_color.is_some());
+        assert_color_approx(s.base_color.unwrap(), Color::srgba_u8(0, 255, 0, 255));
+    }
+
+    #[test]
+    fn base_color_with_opacity() {
+        let s = transform_from("base-blue-500/50");
+        let c = s.base_color.unwrap().to_srgba();
+        assert!((c.alpha - 0.5).abs() < 0.02);
+    }
+
+    #[test]
+    fn emissive_color_red_500() {
+        let s = transform_from("emissive-red-500");
+        assert!(s.emissive_color.is_some());
+    }
+
+    #[test]
+    fn emissive_color_arbitrary_hdr() {
+        let s = transform_from("emissive-[rgb(510,0,0)]");
+        assert!(s.emissive_color.is_some());
+        let c = s.emissive_color.unwrap().to_srgba();
+        assert!(c.red > 1.5); // HDR value
+    }
+
+    #[test]
+    fn attenuation_color() {
+        let s = transform_from("attenuation-sky-400");
+        assert!(s.attenuation_color.is_some());
+    }
+
+    #[test]
+    fn attenuation_distance_arbitrary() {
+        let s = transform_from("attenuation-distance-[0.5]");
+        assert_eq!(s.attenuation_distance, Some(0.5));
+    }
+
+    // ── PBR 0-100 scale classes ──────────────────────────────────────
+
+    #[test]
+    fn reflectance_50() {
+        let s = transform_from("reflectance-50");
+        assert_eq!(s.reflectance, Some(0.5));
+    }
+
+    #[test]
+    fn clearcoat_75() {
+        let s = transform_from("clearcoat-75");
+        assert_eq!(s.clearcoat, Some(0.75));
+    }
+
+    #[test]
+    fn clearcoat_roughness_25() {
+        let s = transform_from("clearcoat-roughness-25");
+        assert_eq!(s.clearcoat_perceptual_roughness, Some(0.25));
+    }
+
+    #[test]
+    fn anisotropy_50() {
+        let s = transform_from("anisotropy-50");
+        assert_eq!(s.anisotropy_strength, Some(0.5));
+    }
+
+    #[test]
+    fn transmission_75() {
+        let s = transform_from("transmission-75");
+        assert_eq!(s.specular_transmission, Some(0.75));
+    }
+
+    #[test]
+    fn diffuse_transmission_25() {
+        let s = transform_from("diffuse-transmission-25");
+        assert_eq!(s.diffuse_transmission, Some(0.25));
+    }
+
+    // ── PBR arbitrary-only floats ────────────────────────────────────
+
+    #[test]
+    fn ior_arbitrary() {
+        let s = transform_from("ior-[1.5]");
+        assert_eq!(s.ior, Some(1.5));
+    }
+
+    #[test]
+    fn thickness_arbitrary() {
+        let s = transform_from("thickness-[0.5]");
+        assert_eq!(s.thickness, Some(0.5));
+    }
+
+    #[test]
+    fn emissive_exposure_arbitrary() {
+        let s = transform_from("emissive-exposure-[0.8]");
+        assert_eq!(s.emissive_exposure_weight, Some(0.8));
+    }
+
+    #[test]
+    fn anisotropy_rotation_arbitrary() {
+        let s = transform_from("anisotropy-rotation-[1.57]");
+        assert_eq!(s.anisotropy_rotation, Some(1.57));
+    }
+
+    #[test]
+    fn depth_bias_arbitrary() {
+        let s = transform_from("depth-bias-[0.01]");
+        assert_eq!(s.depth_bias, Some(0.01));
+    }
+
+    // ── PBR boolean toggles ──────────────────────────────────────────
+
+    #[test]
+    fn unlit_class() {
+        let s = transform_from("unlit");
+        assert_eq!(s.unlit, Some(true));
+    }
+
+    #[test]
+    fn lit_class() {
+        let s = transform_from("lit");
+        assert_eq!(s.unlit, Some(false));
+    }
+
+    #[test]
+    fn double_sided_class() {
+        let s = transform_from("double-sided");
+        assert_eq!(s.double_sided, Some(true));
+    }
+
+    #[test]
+    fn fog_enabled_class() {
+        let s = transform_from("fog-enabled");
+        assert_eq!(s.fog_enabled, Some(true));
+    }
+
+    #[test]
+    fn fog_disabled_class() {
+        let s = transform_from("fog-disabled");
+        assert_eq!(s.fog_enabled, Some(false));
+    }
+
+    // ── PBR alpha mode classes ───────────────────────────────────────
+
+    #[test]
+    fn alpha_blend_class() {
+        let s = transform_from("alpha-blend");
+        assert!(matches!(s.alpha_mode, Some(ByoAlphaMode::Blend)));
+    }
+
+    #[test]
+    fn alpha_opaque_class() {
+        let s = transform_from("alpha-opaque");
+        assert!(matches!(s.alpha_mode, Some(ByoAlphaMode::Opaque)));
+    }
+
+    #[test]
+    fn alpha_add_class() {
+        let s = transform_from("alpha-add");
+        assert!(matches!(s.alpha_mode, Some(ByoAlphaMode::Add)));
+    }
+
+    // ── Combined PBR ─────────────────────────────────────────────────
+
+    #[test]
+    fn combined_pbr_layer() {
+        let s = transform_from(
+            "base-zinc-800 emissive-red-500 metallic-100 roughness-25 \
+             lit alpha-blend double-sided clearcoat-50 ior-[1.5]",
+        );
+        assert!(s.base_color.is_some());
+        assert!(s.emissive_color.is_some());
+        assert_eq!(s.metallic, Some(1.0));
+        assert_eq!(s.perceptual_roughness, Some(0.25));
+        assert_eq!(s.unlit, Some(false));
+        assert!(matches!(s.alpha_mode, Some(ByoAlphaMode::Blend)));
+        assert_eq!(s.double_sided, Some(true));
+        assert_eq!(s.clearcoat, Some(0.5));
+        assert_eq!(s.ior, Some(1.5));
     }
 }
