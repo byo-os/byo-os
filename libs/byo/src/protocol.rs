@@ -202,16 +202,37 @@ pub enum Command {
 /// Built-in event names are unqualified (e.g. `click`, `keydown`).
 /// Third-party events use dot-qualified names (e.g. `com.example.spell-check`)
 /// and parse as [`Other`](EventKind::Other).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventKind {
-    // Input events
+    // Pointer events (W3C Pointer Events spec)
+    PointerDown,
+    PointerUp,
+    PointerMove,
+    PointerOver,
+    PointerOut,
+    PointerEnter,
+    PointerLeave,
+    PointerCancel,
+    GotPointerCapture,
+    LostPointerCapture,
+
+    // Derived pointer events
     Click,
+    AuxClick,
+    DblClick,
+
+    // Scroll
+    Scroll,
+
+    // Keyboard events
     KeyDown,
     KeyUp,
-    Pointer,
-    Scroll,
+
+    // Focus events
     Focus,
     Blur,
+
+    // Window/surface events
     Resize,
 
     /// Unknown or third-party event (e.g. `com.example.spell-check`)
@@ -222,11 +243,22 @@ impl EventKind {
     /// Returns the wire-format string for this event kind.
     pub fn as_str(&self) -> &str {
         match self {
+            EventKind::PointerDown => "pointerdown",
+            EventKind::PointerUp => "pointerup",
+            EventKind::PointerMove => "pointermove",
+            EventKind::PointerOver => "pointerover",
+            EventKind::PointerOut => "pointerout",
+            EventKind::PointerEnter => "pointerenter",
+            EventKind::PointerLeave => "pointerleave",
+            EventKind::PointerCancel => "pointercancel",
+            EventKind::GotPointerCapture => "gotpointercapture",
+            EventKind::LostPointerCapture => "lostpointercapture",
             EventKind::Click => "click",
+            EventKind::AuxClick => "auxclick",
+            EventKind::DblClick => "dblclick",
+            EventKind::Scroll => "scroll",
             EventKind::KeyDown => "keydown",
             EventKind::KeyUp => "keyup",
-            EventKind::Pointer => "pointer",
-            EventKind::Scroll => "scroll",
             EventKind::Focus => "focus",
             EventKind::Blur => "blur",
             EventKind::Resize => "resize",
@@ -241,16 +273,49 @@ impl EventKind {
     pub fn from_wire(s: impl Into<ByteStr>) -> Self {
         let s = s.into();
         match s.as_ref() {
+            "pointerdown" => EventKind::PointerDown,
+            "pointerup" => EventKind::PointerUp,
+            "pointermove" => EventKind::PointerMove,
+            "pointerover" => EventKind::PointerOver,
+            "pointerout" => EventKind::PointerOut,
+            "pointerenter" => EventKind::PointerEnter,
+            "pointerleave" => EventKind::PointerLeave,
+            "pointercancel" => EventKind::PointerCancel,
+            "gotpointercapture" => EventKind::GotPointerCapture,
+            "lostpointercapture" => EventKind::LostPointerCapture,
             "click" => EventKind::Click,
+            "auxclick" => EventKind::AuxClick,
+            "dblclick" => EventKind::DblClick,
+            "scroll" => EventKind::Scroll,
             "keydown" => EventKind::KeyDown,
             "keyup" => EventKind::KeyUp,
-            "pointer" => EventKind::Pointer,
-            "scroll" => EventKind::Scroll,
             "focus" => EventKind::Focus,
             "blur" => EventKind::Blur,
             "resize" => EventKind::Resize,
             _ => EventKind::Other(s),
         }
+    }
+
+    /// Returns `true` if this event type bubbles (participates in propagation).
+    pub fn bubbles(&self) -> bool {
+        !matches!(
+            self,
+            EventKind::PointerEnter | EventKind::PointerLeave | EventKind::Focus | EventKind::Blur
+        )
+    }
+
+    /// Returns `true` if this event type is cancelable (can be handled/stopped).
+    pub fn cancelable(&self) -> bool {
+        !matches!(
+            self,
+            EventKind::PointerEnter
+                | EventKind::PointerLeave
+                | EventKind::PointerCancel
+                | EventKind::GotPointerCapture
+                | EventKind::LostPointerCapture
+                | EventKind::Focus
+                | EventKind::Blur
+        )
     }
 }
 

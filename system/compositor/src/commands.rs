@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use byo::props::FromProps;
 
 use crate::components::*;
+use crate::events::engine::{EngineHandle, EngineInput};
 use crate::id_map::IdMap;
 use crate::io::ByoBatch;
 use crate::plugin::WorldScale;
@@ -34,6 +35,7 @@ pub fn process_commands(
     layer_renders: Query<&LayerRender>,
     primary_window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     world_scale: Res<WorldScale>,
+    engine: Option<Res<EngineHandle>>,
 ) {
     let scale_factor = primary_window
         .iter()
@@ -163,6 +165,25 @@ pub fn process_commands(
 
                 byo::Command::Pop => {
                     last_entity = parent_stack.pop();
+                }
+
+                byo::Command::Ack { kind, seq, props } => {
+                    if let Some(ref engine) = engine {
+                        let handled = props.iter().any(|p| {
+                            matches!(p, byo::Prop::Value { key, value } if key.as_ref() == "handled" && value.as_ref() == "true")
+                                || matches!(p, byo::Prop::Boolean { key } if key.as_ref() == "handled")
+                        });
+                        let capture = props.iter().any(|p| {
+                            matches!(p, byo::Prop::Value { key, value } if key.as_ref() == "capture" && value.as_ref() == "true")
+                                || matches!(p, byo::Prop::Boolean { key } if key.as_ref() == "capture")
+                        });
+                        engine.send(EngineInput::Ack {
+                            kind: kind.clone(),
+                            seq: *seq,
+                            handled,
+                            capture,
+                        });
+                    }
                 }
 
                 _ => {}

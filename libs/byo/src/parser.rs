@@ -946,11 +946,11 @@ mod tests {
     }
 
     #[test]
-    fn event_pointer() {
-        let cmds = parse("!pointer 5 content x=120 y=45 type=move").unwrap();
+    fn event_pointermove() {
+        let cmds = parse("!pointermove 5 content x=120 y=45").unwrap();
         match &cmds[0] {
             Command::Event { kind, seq, .. } => {
-                assert_eq!(*kind, EventKind::Pointer);
+                assert_eq!(*kind, EventKind::PointerMove);
                 assert_eq!(*seq, 5);
             }
             _ => panic!("expected Event"),

@@ -1,5 +1,6 @@
 mod commands;
 mod components;
+mod events;
 mod id_map;
 mod io;
 mod plugin;

@@ -57,6 +57,9 @@ pub struct LayerProps {
     // Anisotropy
     pub anisotropy_strength: Option<f32>,
     pub anisotropy_rotation: Option<f32>,
+    // Input events
+    pub events: Option<String>,
+    pub pointer_events: Option<ByoPointerEvents>,
     // Transition
     pub transition: Option<String>,
     #[prop(skip)]

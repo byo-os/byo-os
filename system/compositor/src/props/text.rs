@@ -14,4 +14,8 @@ pub struct TextProps {
     pub font_size: Option<f32>,
     pub text_align: Option<ByoTextAlign>,
     pub line_height: Option<f32>,
+    /// CSS-like event subscription string (e.g. `"click, pointerdown verbose"`).
+    pub events: Option<String>,
+    /// CSS pointer-events behavior (`auto` or `none`).
+    pub pointer_events: Option<ByoPointerEvents>,
 }

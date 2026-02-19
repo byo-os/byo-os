@@ -181,7 +181,8 @@ impl<W: io::Write> Emitter<W> {
         self.writer.write_all(&[PROTOCOL_ID])?;
         commands(self)?;
         self.writer.write_all(b"\n")?;
-        self.writer.write_all(ST)
+        self.writer.write_all(ST)?;
+        self.writer.flush()
     }
 
     // -- Object commands -----------------------------------------------------
@@ -835,11 +836,22 @@ mod tests {
     fn event_kind_as_str() {
         use crate::byte_str::ByteStr;
         use crate::protocol::EventKind;
+        assert_eq!(EventKind::PointerDown.as_str(), "pointerdown");
+        assert_eq!(EventKind::PointerUp.as_str(), "pointerup");
+        assert_eq!(EventKind::PointerMove.as_str(), "pointermove");
+        assert_eq!(EventKind::PointerOver.as_str(), "pointerover");
+        assert_eq!(EventKind::PointerOut.as_str(), "pointerout");
+        assert_eq!(EventKind::PointerEnter.as_str(), "pointerenter");
+        assert_eq!(EventKind::PointerLeave.as_str(), "pointerleave");
+        assert_eq!(EventKind::PointerCancel.as_str(), "pointercancel");
+        assert_eq!(EventKind::GotPointerCapture.as_str(), "gotpointercapture");
+        assert_eq!(EventKind::LostPointerCapture.as_str(), "lostpointercapture");
         assert_eq!(EventKind::Click.as_str(), "click");
+        assert_eq!(EventKind::AuxClick.as_str(), "auxclick");
+        assert_eq!(EventKind::DblClick.as_str(), "dblclick");
+        assert_eq!(EventKind::Scroll.as_str(), "scroll");
         assert_eq!(EventKind::KeyDown.as_str(), "keydown");
         assert_eq!(EventKind::KeyUp.as_str(), "keyup");
-        assert_eq!(EventKind::Pointer.as_str(), "pointer");
-        assert_eq!(EventKind::Scroll.as_str(), "scroll");
         assert_eq!(EventKind::Focus.as_str(), "focus");
         assert_eq!(EventKind::Blur.as_str(), "blur");
         assert_eq!(EventKind::Resize.as_str(), "resize");

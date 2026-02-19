@@ -8,10 +8,11 @@ pub mod tailwind;
 use bevy::prelude::*;
 
 use crate::components::ByoOrder;
+use crate::events::config::EventSubscriptions;
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
-use crate::props::types::{ByoColor, ByoOrderMode};
+use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::{LayerRender, resize_layer_render};
@@ -77,6 +78,8 @@ pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
         tw_transition_duration,
         tw_transition_easing,
         tw_transition_delay,
+        events,
+        pointer_events,
     );
     if props.hidden {
         r.hidden = true;
@@ -710,6 +713,176 @@ fn apply_pbr_props(
     let alpha_mode = props.alpha_mode.as_ref().or(cs.alpha_mode.as_ref());
     if let Some(mode) = alpha_mode {
         mat.alpha_mode = mode.to_bevy();
+    }
+}
+
+/// Reconcile `events` and `pointer-events` props onto `EventSubscriptions`
+/// and `Pickable` components for views.
+pub fn reconcile_view_picking(
+    mut commands: Commands,
+    query: Query<(Entity, &ViewProps), Changed<ViewProps>>,
+    children_query: Query<&Children>,
+    all_views: Query<&ViewProps>,
+) {
+    for (entity, props) in &query {
+        let resolved = resolve_view_props(props);
+        reconcile_picking_for_entity(
+            &mut commands,
+            entity,
+            resolved.events.as_deref(),
+            resolved.pointer_events.as_ref(),
+            &children_query,
+            &all_views,
+        );
+    }
+}
+
+/// Reconcile `events` and `pointer-events` props for text elements.
+pub fn reconcile_text_picking(
+    mut commands: Commands,
+    query: Query<(Entity, &TextProps), Changed<TextProps>>,
+) {
+    for (entity, props) in &query {
+        if let Some(ref events_str) = props.events {
+            commands
+                .entity(entity)
+                .insert(EventSubscriptions::parse(events_str));
+        } else {
+            commands.entity(entity).remove::<EventSubscriptions>();
+        }
+
+        let pe = props
+            .pointer_events
+            .as_ref()
+            .unwrap_or(&ByoPointerEvents::Auto);
+        match pe {
+            ByoPointerEvents::Auto => {
+                commands.entity(entity).remove::<Pickable>();
+            }
+            ByoPointerEvents::None => {
+                commands.entity(entity).insert(Pickable::IGNORE);
+            }
+        }
+    }
+}
+
+/// Reconcile `events` and `pointer-events` props for layers.
+pub fn reconcile_layer_picking(
+    mut commands: Commands,
+    query: Query<(Entity, &LayerProps), Changed<LayerProps>>,
+) {
+    for (entity, props) in &query {
+        // Layers: set EventSubscriptions + Pickable directly (no class resolution needed)
+        if let Some(ref events_str) = props.events {
+            commands
+                .entity(entity)
+                .insert(EventSubscriptions::parse(events_str));
+        } else {
+            commands.entity(entity).remove::<EventSubscriptions>();
+        }
+
+        let pe = props
+            .pointer_events
+            .as_ref()
+            .unwrap_or(&ByoPointerEvents::Auto);
+        match pe {
+            ByoPointerEvents::Auto => {
+                commands.entity(entity).remove::<Pickable>();
+            }
+            ByoPointerEvents::None => {
+                commands.entity(entity).insert(Pickable::IGNORE);
+            }
+        }
+    }
+}
+
+/// Reconcile `events` and `pointer-events` props for windows.
+pub fn reconcile_window_picking(
+    mut commands: Commands,
+    query: Query<(Entity, &WindowProps), Changed<WindowProps>>,
+) {
+    for (entity, props) in &query {
+        if let Some(ref events_str) = props.events {
+            commands
+                .entity(entity)
+                .insert(EventSubscriptions::parse(events_str));
+        } else {
+            commands.entity(entity).remove::<EventSubscriptions>();
+        }
+
+        let pe = props
+            .pointer_events
+            .as_ref()
+            .unwrap_or(&ByoPointerEvents::Auto);
+        match pe {
+            ByoPointerEvents::Auto => {
+                commands.entity(entity).remove::<Pickable>();
+            }
+            ByoPointerEvents::None => {
+                commands.entity(entity).insert(Pickable::IGNORE);
+            }
+        }
+    }
+}
+
+/// Shared logic: set EventSubscriptions + Pickable on an entity,
+/// and propagate pointer-events=none to children (CSS inheritance).
+fn reconcile_picking_for_entity(
+    commands: &mut Commands,
+    entity: Entity,
+    events: Option<&str>,
+    pointer_events: Option<&ByoPointerEvents>,
+    children_query: &Query<&Children>,
+    all_views: &Query<&ViewProps>,
+) {
+    // EventSubscriptions
+    if let Some(events_str) = events {
+        commands
+            .entity(entity)
+            .insert(EventSubscriptions::parse(events_str));
+    } else {
+        commands.entity(entity).remove::<EventSubscriptions>();
+    }
+
+    // Pickable (with CSS-like inheritance for pointer-events: none)
+    let pe = pointer_events.unwrap_or(&ByoPointerEvents::Auto);
+    match pe {
+        ByoPointerEvents::Auto => {
+            // Restore default pickability
+            commands.entity(entity).remove::<Pickable>();
+        }
+        ByoPointerEvents::None => {
+            commands.entity(entity).insert(Pickable::IGNORE);
+            // Propagate to children that don't have their own explicit pointer-events
+            propagate_pointer_events_none(commands, entity, children_query, all_views);
+        }
+    }
+}
+
+/// Recursively propagate pointer-events=none to descendants.
+/// Stops at children that have an explicit `pointer_events` prop set.
+fn propagate_pointer_events_none(
+    commands: &mut Commands,
+    parent: Entity,
+    children_query: &Query<&Children>,
+    all_views: &Query<&ViewProps>,
+) {
+    let Ok(children) = children_query.get(parent) else {
+        return;
+    };
+    for child in children.iter() {
+        // If this child has its own explicit pointer-events prop, respect it
+        if let Ok(child_props) = all_views.get(child) {
+            if child_props.pointer_events.is_some() {
+                // Child has explicit setting — don't override, but if it's also
+                // none, it will propagate when its own reconciliation runs
+                continue;
+            }
+        }
+        // Inherit: set IGNORE on this child too
+        commands.entity(child).insert(Pickable::IGNORE);
+        // Recurse
+        propagate_pointer_events_none(commands, child, children_query, all_views);
     }
 }
 

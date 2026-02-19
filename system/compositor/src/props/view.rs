@@ -51,6 +51,9 @@ pub struct ViewProps {
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
+    // Input events
+    pub events: Option<String>,
+    pub pointer_events: Option<ByoPointerEvents>,
     // Transition
     pub transition: Option<String>,
     #[prop(skip)]

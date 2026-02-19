@@ -30,6 +30,9 @@ pub struct WindowProps {
     pub rotate_y: Option<f32>,
     pub rotate_z: Option<f32>,
     pub scale_z: Option<f32>,
+    // Input events
+    pub events: Option<String>,
+    pub pointer_events: Option<ByoPointerEvents>,
     // Transition
     pub transition: Option<String>,
     #[prop(skip)]

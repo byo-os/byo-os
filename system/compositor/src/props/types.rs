@@ -481,6 +481,44 @@ impl WriteProp for ByoCullMode {
 }
 
 // ---------------------------------------------------------------------------
+// ByoPointerEvents — maps to CSS pointer-events: auto/none
+// ---------------------------------------------------------------------------
+
+/// Controls whether an element participates in hit testing.
+/// - `auto` → normal hit testing (default)
+/// - `none` → transparent to pointer events (like CSS `pointer-events: none`)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ByoPointerEvents {
+    #[default]
+    Auto,
+    None,
+}
+
+impl ReadProp for ByoPointerEvents {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Value { value, .. } => match value.as_ref() {
+                "auto" => *self = Self::Auto,
+                "none" => *self = Self::None,
+                _ => {}
+            },
+            Prop::Remove { .. } => *self = Self::Auto,
+            _ => {}
+        }
+    }
+}
+
+impl WriteProp for ByoPointerEvents {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        let val = match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+        };
+        out.push(Prop::val(key, val));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
