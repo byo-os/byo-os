@@ -14,7 +14,7 @@ use crate::props::text::TextProps;
 use crate::props::types::{ByoColor, ByoOrderMode};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
-use crate::render::layer::LayerRender;
+use crate::render::layer::{LayerRender, resize_layer_render};
 use crate::transition::config::AnimatableProp;
 use crate::transition::state::ActiveTransitions;
 
@@ -403,18 +403,15 @@ pub fn reconcile_windows(
             continue;
         }
 
-        let order = props.order.unwrap_or(0) as f32;
-        let mode = props
-            .order_mode
-            .as_ref()
-            .unwrap_or(&ByoOrderMode::TranslateZ);
-        let scale = props.order_scale.unwrap_or(DEFAULT_ORDER_SCALE);
+        let ts = resolve_transform_style(props.class.as_deref());
+        let (order, mode, scale) =
+            resolve_order(&ts, props.order, &props.order_mode, props.order_scale);
         let order_z = match mode {
             ByoOrderMode::TranslateZ => order * scale,
             _ => 0.0,
         };
         *transform = resolve_3d_transform(
-            props.class.as_deref(),
+            &ts,
             props.translate_x,
             props.translate_y,
             props.translate_z,
@@ -432,26 +429,56 @@ pub fn reconcile_windows(
     }
 }
 
-/// Reconcile `LayerProps` 3D transform + PBR material changes.
+/// Reconcile `LayerProps` 3D transform + PBR material + size changes.
 /// Skips transform/PBR fields that are actively transitioning.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn reconcile_layers(
-    layer_query: Query<
-        (&LayerProps, &LayerRender, Option<&ActiveTransitions>),
+    mut layer_query: Query<
+        (&LayerProps, &mut LayerRender, Option<&ActiveTransitions>),
         Changed<LayerProps>,
     >,
     mut transforms: Query<&mut Transform>,
     material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
+    mesh_handles: Query<&Mesh3d>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     world_scale: Res<WorldScale>,
 ) {
-    for (props, render, active) in &layer_query {
-        let order = props.order.unwrap_or(0) as f32;
-        let mode = props
-            .order_mode
+    for (props, mut render, active) in &mut layer_query {
+        // Parse class once for shared use across sizing, order, transforms, PBR
+        let cs = resolve_transform_style(props.class.as_deref());
+
+        // Resize render texture + plane mesh if width/height changed
+        let new_width =
+            props
+                .width
+                .as_ref()
+                .or(cs.width.as_ref())
+                .map_or(render.width, |v| match v.0 {
+                    Val::Px(px) => px as u32,
+                    _ => render.width,
+                });
+        let new_height = props
+            .height
             .as_ref()
-            .unwrap_or(&ByoOrderMode::TranslateZ);
-        let scale = props.order_scale.unwrap_or(DEFAULT_ORDER_SCALE);
+            .or(cs.height.as_ref())
+            .map_or(render.height, |v| match v.0 {
+                Val::Px(px) => px as u32,
+                _ => render.height,
+            });
+        resize_layer_render(
+            &mut render,
+            new_width,
+            new_height,
+            world_scale.0,
+            &mut images,
+            &mut meshes,
+            &mesh_handles,
+        );
+
+        let (order, mode, scale) =
+            resolve_order(&cs, props.order, &props.order_mode, props.order_scale);
 
         // Apply transform to the 3D plane entity (skip if transitioning)
         if !active.is_some_and(|a| a.has_any_3d_transform()) {
@@ -459,8 +486,8 @@ pub fn reconcile_layers(
                 ByoOrderMode::TranslateZ => order * scale,
                 _ => 0.0,
             };
-            let ts = resolve_3d_transform(
-                props.class.as_deref(),
+            let t = resolve_3d_transform(
+                &cs,
                 props.translate_x,
                 props.translate_y,
                 props.translate_z,
@@ -477,7 +504,7 @@ pub fn reconcile_layers(
             );
 
             if let Ok(mut plane_transform) = transforms.get_mut(render.plane) {
-                *plane_transform = ts;
+                *plane_transform = t;
             }
         }
 
@@ -485,7 +512,7 @@ pub fn reconcile_layers(
         if let Ok(mat_handle) = material_handles.get(render.plane)
             && let Some(mat) = materials.get_mut(&mat_handle.0)
         {
-            apply_pbr_props(mat, props, world_scale.0);
+            apply_pbr_props(mat, props, &cs, world_scale.0);
 
             // Order-based depth-bias (explicit depth_bias prop already applied by apply_pbr_props)
             if matches!(mode, ByoOrderMode::DepthBias) && props.depth_bias.is_none() {
@@ -495,12 +522,23 @@ pub fn reconcile_layers(
     }
 }
 
-/// Shared 3D transform builder — resolves class + individual props.
+/// Parse class string into a TransformStyle once, for shared use across
+/// transform, PBR, order, and sizing resolution.
+fn resolve_transform_style(class: Option<&str>) -> tailwind::TransformStyle {
+    let mut ts = tailwind::TransformStyle::default();
+    if let Some(class_str) = class {
+        tailwind::apply_transform_classes(&mut ts, class_str);
+    }
+    ts
+}
+
+/// Shared 3D transform builder — uses pre-parsed TransformStyle for class values.
+/// Individual wire props always override class-derived values.
 /// `order_z` is the z contribution from order (pre-computed by caller based on order-mode).
 /// `world_scale` converts pixel translations to meters (= 1.0 / pixels_per_meter).
 #[allow(clippy::too_many_arguments)]
 fn resolve_3d_transform(
-    class: Option<&str>,
+    ts: &tailwind::TransformStyle,
     prop_tx: Option<f32>,
     prop_ty: Option<f32>,
     prop_tz: Option<f32>,
@@ -515,12 +553,6 @@ fn resolve_3d_transform(
     order_z: f32,
     world_scale: f32,
 ) -> Transform {
-    // Start with class-derived values
-    let mut ts = tailwind::TransformStyle::default();
-    if let Some(class_str) = class {
-        tailwind::apply_transform_classes(&mut ts, class_str);
-    }
-
     // Individual props override class-derived values.
     // Translations are in protocol pixels — convert to world meters.
     let tx = prop_tx.or(ts.translate_x).unwrap_or(0.0) * world_scale;
@@ -550,16 +582,35 @@ fn resolve_3d_transform(
     }
 }
 
-/// Apply PBR material props from LayerProps onto a StandardMaterial.
-/// Individual wire props always override class-derived values.
-/// `world_scale` converts pixel-based spatial values (thickness, attenuation_distance) to meters.
-fn apply_pbr_props(mat: &mut StandardMaterial, props: &LayerProps, world_scale: f32) {
-    // Resolve class-based PBR values first
-    let mut cs = tailwind::TransformStyle::default();
-    if let Some(ref class_str) = props.class {
-        tailwind::apply_transform_classes(&mut cs, class_str);
-    }
+/// Resolve order parameters from class + wire props.
+/// Returns (order_f32, order_mode, order_scale).
+fn resolve_order<'a>(
+    ts: &'a tailwind::TransformStyle,
+    prop_order: Option<i32>,
+    prop_order_mode: &'a Option<ByoOrderMode>,
+    prop_order_scale: Option<f32>,
+) -> (f32, &'a ByoOrderMode, f32) {
+    static DEFAULT_MODE: ByoOrderMode = ByoOrderMode::TranslateZ;
+    let order = prop_order.or(ts.order).unwrap_or(0) as f32;
+    let mode = prop_order_mode
+        .as_ref()
+        .or(ts.order_mode.as_ref())
+        .unwrap_or(&DEFAULT_MODE);
+    let scale = prop_order_scale
+        .or(ts.order_scale)
+        .unwrap_or(DEFAULT_ORDER_SCALE);
+    (order, mode, scale)
+}
 
+/// Apply PBR material props from LayerProps onto a StandardMaterial.
+/// Uses pre-parsed TransformStyle for class-derived values. Individual wire props override.
+/// `world_scale` converts pixel-based spatial values (thickness, attenuation_distance) to meters.
+fn apply_pbr_props(
+    mat: &mut StandardMaterial,
+    props: &LayerProps,
+    cs: &tailwind::TransformStyle,
+    world_scale: f32,
+) {
     // Helper: convert ByoColor to sRGB Color for base_color
     fn resolve_color(prop: &Option<ByoColor>, class: Option<Color>) -> Option<Color> {
         prop.as_ref().map(|c| c.0).or(class)
@@ -647,7 +698,8 @@ fn apply_pbr_props(mat: &mut StandardMaterial, props: &LayerProps, world_scale: 
     if let Some(v) = props.double_sided.or(cs.double_sided) {
         mat.double_sided = v;
     }
-    if let Some(ref mode) = props.cull_mode {
+    let cull_mode = props.cull_mode.as_ref().or(cs.cull_mode.as_ref());
+    if let Some(mode) = cull_mode {
         mat.cull_mode = mode.to_face();
     }
     if let Some(v) = props.fog_enabled.or(cs.fog_enabled) {

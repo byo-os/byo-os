@@ -897,6 +897,13 @@ fn parse_rotation_value(s: &str) -> Option<f32> {
 pub struct TransformStyle {
     // Layer format
     pub format: Option<ByoTextureFormat>,
+    // Sizing
+    pub width: Option<ByoVal>,
+    pub height: Option<ByoVal>,
+    // Order
+    pub order: Option<i32>,
+    pub order_mode: Option<ByoOrderMode>,
+    pub order_scale: Option<f32>,
     // Transitions (tw-derived)
     pub tw_transition_property: Option<TransitionProperty>,
     pub tw_transition_duration: Option<f32>,
@@ -940,6 +947,7 @@ pub struct TransformStyle {
     pub fog_enabled: Option<bool>,
     // PBR: enum
     pub alpha_mode: Option<ByoAlphaMode>,
+    pub cull_mode: Option<ByoCullMode>,
 }
 
 /// Apply transform + PBR shorthand classes for windows and layers.
@@ -1018,6 +1026,32 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
             style.alpha_mode = Some(ByoAlphaMode::Multiply);
             return;
         }
+        // Cull mode
+        "cull-none" => {
+            style.cull_mode = Some(ByoCullMode::None);
+            return;
+        }
+        "cull-front" => {
+            style.cull_mode = Some(ByoCullMode::Front);
+            return;
+        }
+        "cull-back" => {
+            style.cull_mode = Some(ByoCullMode::Back);
+            return;
+        }
+        // Order mode
+        "order-translate-z" => {
+            style.order_mode = Some(ByoOrderMode::TranslateZ);
+            return;
+        }
+        "order-depth-bias" => {
+            style.order_mode = Some(ByoOrderMode::DepthBias);
+            return;
+        }
+        "order-none" => {
+            style.order_mode = Some(ByoOrderMode::None);
+            return;
+        }
         _ => {}
     }
 
@@ -1029,6 +1063,42 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
         &mut style.tw_transition_easing,
         &mut style.tw_transition_delay,
     );
+
+    // ── Width / Height ─────────────────────────────────────────────
+    if let Some(rest) = class.strip_prefix("w-") {
+        if let Some(val) = sizing_scale(rest, false) {
+            style.width = Some(ByoVal(val));
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("h-") {
+        if let Some(val) = sizing_scale(rest, true) {
+            style.height = Some(ByoVal(val));
+        }
+        return;
+    }
+
+    // ── Order (integer, supports negative via prefix) ────────────────
+    // order-scale-[v] must come before order-{n} to avoid prefix conflict
+    if let Some(rest) = class.strip_prefix("order-scale-") {
+        if let Some(v) = parse_arbitrary_value(rest) {
+            style.order_scale = Some(v);
+        }
+        return;
+    }
+    if let Some(rest) = class.strip_prefix("order-") {
+        if let Ok(n) = rest.parse::<i32>() {
+            style.order = Some(n);
+        }
+        return;
+    }
+    // Negative order: -order-5 → order = -5
+    if let Some(rest) = class.strip_prefix("-order-") {
+        if let Ok(n) = rest.parse::<i32>() {
+            style.order = Some(-n);
+        }
+        return;
+    }
 
     // ── Negative prefix for transforms ───────────────────────────────
     let (class, neg) = if let Some(rest) = class.strip_prefix('-') {
@@ -2421,5 +2491,126 @@ mod tests {
     fn transform_delay() {
         let s = transform_from("transition delay-[250ms]");
         assert_eq!(s.tw_transition_delay, Some(0.25));
+    }
+
+    // ── Width / Height classes ───────────────────────────────────────
+
+    #[test]
+    fn transform_w_64() {
+        let s = transform_from("w-64");
+        assert_eq!(s.width.unwrap().0, Val::Px(256.0));
+    }
+
+    #[test]
+    fn transform_h_48() {
+        let s = transform_from("h-48");
+        assert_eq!(s.height.unwrap().0, Val::Px(192.0));
+    }
+
+    #[test]
+    fn transform_w_full() {
+        let s = transform_from("w-full");
+        assert_eq!(s.width.unwrap().0, Val::Percent(100.0));
+    }
+
+    #[test]
+    fn transform_h_screen() {
+        let s = transform_from("h-screen");
+        assert_eq!(s.height.unwrap().0, Val::Vh(100.0));
+    }
+
+    #[test]
+    fn transform_w_arbitrary() {
+        let s = transform_from("w-[200px]");
+        assert_eq!(s.width.unwrap().0, Val::Px(200.0));
+    }
+
+    #[test]
+    fn transform_h_arbitrary() {
+        let s = transform_from("h-[50%]");
+        assert_eq!(s.height.unwrap().0, Val::Percent(50.0));
+    }
+
+    // ── Order classes ────────────────────────────────────────────────
+
+    #[test]
+    fn transform_order_5() {
+        let s = transform_from("order-5");
+        assert_eq!(s.order, Some(5));
+    }
+
+    #[test]
+    fn transform_order_0() {
+        let s = transform_from("order-0");
+        assert_eq!(s.order, Some(0));
+    }
+
+    #[test]
+    fn transform_neg_order() {
+        let s = transform_from("-order-3");
+        assert_eq!(s.order, Some(-3));
+    }
+
+    #[test]
+    fn transform_order_scale_arbitrary() {
+        let s = transform_from("order-scale-[0.01]");
+        assert_eq!(s.order_scale, Some(0.01));
+    }
+
+    // ── Order mode classes ───────────────────────────────────────────
+
+    #[test]
+    fn transform_order_translate_z() {
+        let s = transform_from("order-translate-z");
+        assert!(matches!(s.order_mode, Some(ByoOrderMode::TranslateZ)));
+    }
+
+    #[test]
+    fn transform_order_depth_bias() {
+        let s = transform_from("order-depth-bias");
+        assert!(matches!(s.order_mode, Some(ByoOrderMode::DepthBias)));
+    }
+
+    #[test]
+    fn transform_order_mode_none() {
+        let s = transform_from("order-none");
+        assert!(matches!(s.order_mode, Some(ByoOrderMode::None)));
+    }
+
+    // ── Cull mode classes ────────────────────────────────────────────
+
+    #[test]
+    fn cull_none_class() {
+        let s = transform_from("cull-none");
+        assert!(matches!(s.cull_mode, Some(ByoCullMode::None)));
+    }
+
+    #[test]
+    fn cull_front_class() {
+        let s = transform_from("cull-front");
+        assert!(matches!(s.cull_mode, Some(ByoCullMode::Front)));
+    }
+
+    #[test]
+    fn cull_back_class() {
+        let s = transform_from("cull-back");
+        assert!(matches!(s.cull_mode, Some(ByoCullMode::Back)));
+    }
+
+    // ── Combined sizing + order + cull ───────────────────────────────
+
+    #[test]
+    fn combined_layer_classes() {
+        let s = transform_from(
+            "w-[1280px] h-[720px] order-2 order-scale-[0.01] \
+             order-depth-bias cull-none metallic-50",
+        );
+        assert_eq!(s.width.unwrap().0, Val::Px(1280.0));
+        assert_eq!(s.height.unwrap().0, Val::Px(720.0));
+        assert_eq!(s.order, Some(2));
+        assert_eq!(s.order_scale, Some(0.01));
+        assert!(matches!(s.order_mode, Some(ByoOrderMode::DepthBias)));
+        assert!(matches!(s.cull_mode, Some(ByoCullMode::None)));
+        assert_eq!(s.metallic, Some(0.5));
     }
 }

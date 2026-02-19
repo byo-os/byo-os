@@ -240,16 +240,14 @@ fn spawn_entity(
         }
         "layer" => {
             let lp = LayerProps::from_props(props);
-            let width = extract_layer_size(&lp.width, 1280);
-            let height = extract_layer_size(&lp.height, 720);
-            // Resolve format: wire prop overrides class-derived value
-            let format = lp.format.clone().unwrap_or_else(|| {
-                let mut ts = crate::style::tailwind::TransformStyle::default();
-                if let Some(ref class) = lp.class {
-                    crate::style::tailwind::apply_transform_classes(&mut ts, class);
-                }
-                ts.format.unwrap_or_default()
-            });
+            // Parse class once — resolve width, height, format from class with wire overrides
+            let mut ts = crate::style::tailwind::TransformStyle::default();
+            if let Some(ref class) = lp.class {
+                crate::style::tailwind::apply_transform_classes(&mut ts, class);
+            }
+            let width = extract_layer_size(lp.width.as_ref().or(ts.width.as_ref()), 1280);
+            let height = extract_layer_size(lp.height.as_ref().or(ts.height.as_ref()), 720);
+            let format = lp.format.clone().or(ts.format).unwrap_or_default();
             let order_scale = lp.order_scale.unwrap_or(0.001);
             let z_offset = match lp.order_mode {
                 Some(crate::props::types::ByoOrderMode::TranslateZ) | None => {
@@ -318,8 +316,8 @@ fn spawn_entity(
     }
 }
 
-fn extract_layer_size(val: &Option<crate::props::types::ByoVal>, fallback: u32) -> u32 {
-    val.as_ref().map_or(fallback, |v| match v.0 {
+fn extract_layer_size(val: Option<&crate::props::types::ByoVal>, fallback: u32) -> u32 {
+    val.map_or(fallback, |v| match v.0 {
         Val::Px(px) => px as u32,
         _ => fallback,
     })

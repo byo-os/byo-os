@@ -19,6 +19,14 @@ pub struct LayerRender {
     pub ui_root: Entity,
     /// The 3D plane entity displaying the texture.
     pub plane: Entity,
+    /// Current logical width (for resize detection).
+    pub width: u32,
+    /// Current logical height (for resize detection).
+    pub height: u32,
+    /// Texture format (needed for resize re-creation).
+    pub format: ByoTextureFormat,
+    /// Scale factor at creation time (for physical pixel calculation).
+    pub scale_factor: f32,
 }
 
 /// Creates the render pipeline for a layer and returns the LayerRender component.
@@ -124,5 +132,59 @@ pub fn spawn_layer_render(
         camera,
         ui_root,
         plane,
+        width,
+        height,
+        format: format.clone(),
+        scale_factor,
     }
+}
+
+/// Resize a layer's render texture and 3D plane mesh in place.
+/// Keeps the same asset handles so Camera and Material auto-update.
+pub fn resize_layer_render(
+    render: &mut LayerRender,
+    new_width: u32,
+    new_height: u32,
+    world_scale: f32,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    mesh_handles: &Query<&Mesh3d>,
+) {
+    if render.width == new_width && render.height == new_height {
+        return;
+    }
+
+    // 1. Resize the render texture (same handle, replace contents).
+    let physical_width = (new_width as f32 * render.scale_factor) as u32;
+    let physical_height = (new_height as f32 * render.scale_factor) as u32;
+    let size = Extent3d {
+        width: physical_width,
+        height: physical_height,
+        depth_or_array_layers: 1,
+    };
+    let texture_format = render.format.to_wgpu();
+    let fill = vec![0u8; render.format.bytes_per_pixel()];
+    if let Some(image) = images.get_mut(&render.image) {
+        *image = Image::new_fill(
+            size,
+            TextureDimension::D2,
+            &fill,
+            texture_format,
+            RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST
+            | TextureUsages::RENDER_ATTACHMENT;
+    }
+
+    // 2. Resize the 3D plane mesh (same handle, replace contents).
+    let half = Vec2::new(new_width as f32 / 2.0, new_height as f32 / 2.0) * world_scale;
+    if let Ok(mesh3d) = mesh_handles.get(render.plane)
+        && let Some(mesh) = meshes.get_mut(&mesh3d.0)
+    {
+        *mesh = Plane3d::new(Vec3::Z, half).mesh().build();
+    }
+
+    render.width = new_width;
+    render.height = new_height;
 }
