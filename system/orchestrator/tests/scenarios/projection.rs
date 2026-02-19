@@ -25,10 +25,10 @@ async fn disjoint_observers() {
     router.add_process(app);
 
     // Step 1: Compositor observes view only.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: TextSvc observes text only.
-    send_byo(&mut router, pid(2), "?observe 0 text").await;
+    send_byo(&mut router, pid(2), "#observe text").await;
 
     // Step 3: App sends a view with a text child.
     send_byo(
@@ -73,10 +73,10 @@ async fn semi_disjoint_observers() {
     router.add_process(app);
 
     // Step 1: Compositor observes both view and text.
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
 
     // Step 2: A11y observes view only.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 3: App sends a view with text and view children.
     send_byo(
@@ -162,7 +162,7 @@ async fn unobserved_wraps_under_ancestor() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: App sends a view with a non-observed panel containing a view child.
     // This establishes the state tree: root -> container -> child

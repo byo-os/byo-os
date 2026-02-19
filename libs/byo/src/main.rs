@@ -414,6 +414,10 @@ fn write_tsv_record(
                 serialize_props(props)
             )
         }
+        Command::Pragma { kind, targets } => {
+            let t = targets.join(",");
+            writeln!(out, "#\t{}\t\t{t}\t\t", kind.as_str())
+        }
         Command::Push | Command::Pop => Ok(()),
     }
 }
@@ -524,6 +528,18 @@ fn write_json_obj(
             if let Some(body) = body {
                 write_json_body_field(out, body)?;
             }
+        }
+        Command::Pragma { kind, targets } => {
+            out.write_all(b"\"op\":\"#\",\"kind\":")?;
+            write_json_str(out, kind.as_str())?;
+            out.write_all(b",\"targets\":[")?;
+            for (i, t) in targets.iter().enumerate() {
+                if i > 0 {
+                    out.write_all(b",")?;
+                }
+                write_json_str(out, t)?;
+            }
+            out.write_all(b"]")?;
         }
         Command::Push | Command::Pop => {}
     }

@@ -2,6 +2,7 @@
 
 pub mod layer;
 pub mod text;
+pub mod tty;
 pub mod types;
 pub mod view;
 pub mod window;

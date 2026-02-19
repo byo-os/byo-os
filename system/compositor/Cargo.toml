@@ -7,3 +7,4 @@ edition.workspace = true
 byo.workspace = true
 bevy.workspace = true
 bytes.workspace = true
+alacritty_terminal = { version = "0.25", default-features = false }

@@ -22,8 +22,8 @@ async fn setup_expansion_env() -> (
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     (router, compositor_rx, controls_rx, app_rx)
 }

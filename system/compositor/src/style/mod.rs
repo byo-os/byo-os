@@ -8,10 +8,12 @@ pub mod tailwind;
 use bevy::prelude::*;
 
 use crate::components::ByoOrder;
+use crate::components::ByoTty;
 use crate::events::config::EventSubscriptions;
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
+use crate::props::tty::TtyProps;
 use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
@@ -350,6 +352,168 @@ pub fn reconcile_text(
         }
         if let Some(ref c) = resolved.color {
             *color = TextColor(c.0);
+        }
+    }
+}
+
+/// Resolved tty-specific properties (class merged with wire props, defaults applied).
+pub struct ResolvedTtyProps {
+    pub font_size: f32,
+    pub scrollback: u32,
+    pub cols: Option<u32>,
+    pub rows: Option<u32>,
+}
+
+/// Resolve tty-specific props: class values are the base, wire props override, defaults fill gaps.
+pub fn resolve_tty_props(props: &TtyProps) -> ResolvedTtyProps {
+    use crate::props::tty::{DEFAULT_FONT_SIZE, DEFAULT_SCROLLBACK};
+
+    let class_props = props
+        .class
+        .as_ref()
+        .map(|c| tailwind::apply_tty_classes(c))
+        .unwrap_or_default();
+
+    ResolvedTtyProps {
+        font_size: props
+            .font_size
+            .or(class_props.font_size)
+            .unwrap_or(DEFAULT_FONT_SIZE),
+        scrollback: props
+            .scrollback
+            .or(class_props.scrollback)
+            .unwrap_or(DEFAULT_SCROLLBACK),
+        cols: props.cols.or(class_props.cols),
+        rows: props.rows.or(class_props.rows),
+    }
+}
+
+/// Reconcile `TtyProps` class onto the tty's `Node`, `BackgroundColor`, and `BorderColor`.
+///
+/// Parses the tailwind class string from `TtyProps.class` using the same parser as views.
+/// Only fields specified by the class are overridden; tty defaults (flex column, overflow clip,
+/// 100% size) set at spawn time are preserved for unspecified fields.
+pub fn reconcile_tty_style(
+    mut query: Query<
+        (&TtyProps, &mut Node, &mut BackgroundColor, &mut BorderColor),
+        (Changed<TtyProps>, With<ByoTty>),
+    >,
+) {
+    for (props, mut node, mut bg, mut border_color) in &mut query {
+        let Some(ref class) = props.class else {
+            continue;
+        };
+        let mut resolved = ViewProps::default();
+        tailwind::apply_classes(&mut resolved, class);
+
+        // Sizing
+        if let Some(ref v) = resolved.width {
+            node.width = v.0;
+        }
+        if let Some(ref v) = resolved.height {
+            node.height = v.0;
+        }
+        if let Some(ref v) = resolved.min_width {
+            node.min_width = v.0;
+        }
+        if let Some(ref v) = resolved.max_width {
+            node.max_width = v.0;
+        }
+        if let Some(ref v) = resolved.min_height {
+            node.min_height = v.0;
+        }
+        if let Some(ref v) = resolved.max_height {
+            node.max_height = v.0;
+        }
+
+        // Colors
+        if let Some(ref c) = resolved.background_color {
+            *bg = BackgroundColor(c.0);
+        }
+        if let Some(ref c) = resolved.border_color {
+            *border_color = BorderColor::all(c.0);
+        }
+
+        // Border
+        if let Some(ref r) = resolved.border_width {
+            node.border = r.0;
+        }
+        if let Some(ref r) = resolved.border_radius {
+            node.border_radius = r.0;
+        }
+
+        // Spacing
+        if let Some(ref r) = resolved.padding {
+            node.padding = r.0;
+        }
+        if let Some(ref r) = resolved.margin {
+            node.margin = r.0;
+        }
+
+        // Gap
+        if let Some(ref v) = resolved.gap {
+            node.column_gap = v.0;
+            node.row_gap = v.0;
+        }
+        if let Some(ref v) = resolved.column_gap {
+            node.column_gap = v.0;
+        }
+        if let Some(ref v) = resolved.row_gap {
+            node.row_gap = v.0;
+        }
+
+        // Layout
+        if let Some(ref d) = resolved.display {
+            node.display = d.to_bevy();
+        }
+        if let Some(ref d) = resolved.flex_direction {
+            node.flex_direction = d.to_bevy();
+        }
+        if let Some(ref a) = resolved.align_items {
+            node.align_items = a.to_bevy();
+        }
+        if let Some(ref a) = resolved.align_self {
+            node.align_self = a.to_bevy();
+        }
+        if let Some(ref j) = resolved.justify_content {
+            node.justify_content = j.to_bevy();
+        }
+        if let Some(ref w) = resolved.flex_wrap {
+            node.flex_wrap = w.to_bevy();
+        }
+        if let Some(ref p) = resolved.position {
+            node.position_type = p.to_bevy();
+        }
+
+        // Overflow
+        if let Some(ref o) = resolved.overflow {
+            let axis = o.to_bevy();
+            node.overflow = Overflow { x: axis, y: axis };
+        }
+
+        // Position
+        if let Some(ref v) = resolved.left {
+            node.left = v.0;
+        }
+        if let Some(ref v) = resolved.right {
+            node.right = v.0;
+        }
+        if let Some(ref v) = resolved.top {
+            node.top = v.0;
+        }
+        if let Some(ref v) = resolved.bottom {
+            node.bottom = v.0;
+        }
+
+        // Flex
+        if let Some(v) = resolved.flex_grow {
+            node.flex_grow = v;
+        }
+        if let Some(v) = resolved.flex_shrink {
+            node.flex_shrink = v;
+        }
+        if let Some(ref v) = resolved.flex_basis {
+            node.flex_basis = v.0;
         }
     }
 }

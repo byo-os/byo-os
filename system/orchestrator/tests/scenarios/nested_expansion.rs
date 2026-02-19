@@ -32,11 +32,11 @@ async fn two_daemon_a_to_b() {
     router.add_process(app);
 
     // Step 1: Compositor observes view and image.
-    send_byo(&mut router, pid(1), "?observe 0 view,image").await;
+    send_byo(&mut router, pid(1), "#observe view,image").await;
 
     // Step 2: Controls claims button, Icons claims icon.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
-    send_byo(&mut router, pid(3), "?claim 0 icon").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
+    send_byo(&mut router, pid(3), "#claim icon").await;
 
     // Step 3: App sends a button upsert.
     send_byo(&mut router, pid(4), "+button save label=\"Save\"").await;
@@ -179,12 +179,12 @@ async fn three_daemon_a_to_b_to_c() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: Each daemon claims its type.
-    send_byo(&mut router, pid(2), "?claim 0 widget").await;
-    send_byo(&mut router, pid(3), "?claim 0 gadget").await;
-    send_byo(&mut router, pid(4), "?claim 0 thing").await;
+    send_byo(&mut router, pid(2), "#claim widget").await;
+    send_byo(&mut router, pid(3), "#claim gadget").await;
+    send_byo(&mut router, pid(4), "#claim thing").await;
 
     // Step 3: App sends a widget.
     send_byo(&mut router, pid(5), "+widget w1").await;
@@ -298,11 +298,11 @@ async fn circular_a_to_b_to_a() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: DaemonA claims type-a, DaemonB claims type-b.
-    send_byo(&mut router, pid(2), "?claim 0 type-a").await;
-    send_byo(&mut router, pid(3), "?claim 0 type-b").await;
+    send_byo(&mut router, pid(2), "#claim type-a").await;
+    send_byo(&mut router, pid(3), "#claim type-b").await;
 
     // Step 3: App sends +type-a root.
     send_byo(&mut router, pid(4), "+type-a root").await;
@@ -406,10 +406,10 @@ async fn self_referential_a_to_a() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: DaemonA claims widget.
-    send_byo(&mut router, pid(2), "?claim 0 widget").await;
+    send_byo(&mut router, pid(2), "#claim widget").await;
 
     // Step 3: App sends +widget root.
     send_byo(&mut router, pid(3), "+widget root").await;
@@ -503,10 +503,10 @@ async fn depth_limit_exceeded() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: DaemonA claims recurse.
-    send_byo(&mut router, pid(2), "?claim 0 recurse").await;
+    send_byo(&mut router, pid(2), "#claim recurse").await;
 
     // Step 3: App sends +recurse root.
     send_byo(&mut router, pid(3), "+recurse root").await;

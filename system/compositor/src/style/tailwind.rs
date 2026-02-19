@@ -1469,6 +1469,53 @@ fn parse_arbitrary_value(s: &str) -> Option<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// TTY-specific class parser
+// ---------------------------------------------------------------------------
+
+/// Resolved tty-specific class values.
+#[derive(Debug, Default)]
+pub struct TtyClassProps {
+    pub font_size: Option<f32>,
+    pub cols: Option<u32>,
+    pub rows: Option<u32>,
+    pub scrollback: Option<u32>,
+}
+
+/// Parse tty-specific classes from a class string.
+///
+/// Recognized classes:
+/// - `text-{size}` — font size (`text-sm`, `text-base`, `text-lg`, etc.)
+/// - `cols-{N}` — fixed column count
+/// - `rows-{N}` — fixed row count
+/// - `scrollback-{N}` — scrollback buffer size
+///
+/// View-layout classes (flex, bg, border, etc.) are ignored here —
+/// they are handled separately by [`apply_classes`].
+pub fn apply_tty_classes(class_str: &str) -> TtyClassProps {
+    let mut props = TtyClassProps::default();
+    for class in class_str.split_whitespace() {
+        if let Some(rest) = class.strip_prefix("text-") {
+            if let Some(size) = text_size(rest) {
+                props.font_size = Some(size);
+            }
+        } else if let Some(rest) = class.strip_prefix("cols-") {
+            if let Ok(n) = rest.parse::<u32>() {
+                props.cols = Some(n);
+            }
+        } else if let Some(rest) = class.strip_prefix("rows-") {
+            if let Ok(n) = rest.parse::<u32>() {
+                props.rows = Some(n);
+            }
+        } else if let Some(rest) = class.strip_prefix("scrollback-") {
+            if let Ok(n) = rest.parse::<u32>() {
+                props.scrollback = Some(n);
+            }
+        }
+    }
+    props
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

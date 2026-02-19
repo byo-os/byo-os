@@ -24,7 +24,7 @@ async fn two_apps_independent() {
     router.add_process(settings);
 
     // Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // App1 sends a view.
     send_byo(&mut router, pid(2), "+view sidebar class=\"w-64\"").await;
@@ -82,8 +82,8 @@ async fn one_expanding_does_not_block_other() {
     router.add_process(app1);
     router.add_process(app2);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App1 sends a button (triggers expansion, blocks app1's queue).
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;

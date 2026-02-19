@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 
 use byo::emitter::Emitter;
 use byo::parser::parse;
-use byo::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
+use byo::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
 use byo::tree::{PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch, write_props};
@@ -162,45 +162,37 @@ impl Router {
         let mut resync_pids: Vec<ProcessId> = Vec::new();
         for cmd in &commands {
             match cmd {
-                Command::Request {
-                    kind: RequestKind::Claim,
-                    seq,
+                Command::Pragma {
+                    kind: PragmaKind::Claim,
                     targets,
-                    ..
                 } => {
                     for target in targets {
-                        self.handle_claim(from, &client, *seq, target).await;
+                        self.handle_claim(from, &client, target).await;
                     }
                 }
-                Command::Request {
-                    kind: RequestKind::Unclaim,
-                    seq,
+                Command::Pragma {
+                    kind: PragmaKind::Unclaim,
                     targets,
-                    ..
                 } => {
                     for target in targets {
-                        self.handle_unclaim(from, &client, *seq, target).await;
+                        self.handle_unclaim(from, &client, target).await;
                     }
                 }
-                Command::Request {
-                    kind: RequestKind::Observe,
-                    seq,
+                Command::Pragma {
+                    kind: PragmaKind::Observe,
                     targets,
-                    ..
                 } => {
                     for target in targets {
-                        self.handle_observe(from, &client, *seq, target);
+                        self.handle_observe(from, &client, target);
                     }
                     resync_pids.push(from);
                 }
-                Command::Request {
-                    kind: RequestKind::Unobserve,
-                    seq,
+                Command::Pragma {
+                    kind: PragmaKind::Unobserve,
                     targets,
-                    ..
                 } => {
                     for target in targets {
-                        self.handle_unobserve(from, &client, *seq, target);
+                        self.handle_unobserve(from, &client, target);
                     }
                     resync_pids.push(from);
                 }
@@ -535,8 +527,8 @@ impl Router {
         self.processes.remove(&process);
     }
 
-    /// Handle a `?claim` request — claim ownership of a type (fire-and-forget).
-    async fn handle_claim(&mut self, from: ProcessId, client: &str, _seq: u64, target_type: &str) {
+    /// Handle a `#claim` pragma — claim ownership of a type (fire-and-forget).
+    async fn handle_claim(&mut self, from: ProcessId, client: &str, target_type: &str) {
         tracing::info!("{client} claims type '{target_type}'");
         self.claims.insert(target_type.to_owned(), from);
 
@@ -565,22 +557,16 @@ impl Router {
         }
     }
 
-    /// Handle a `?unclaim` request — release claim on a type (fire-and-forget).
-    async fn handle_unclaim(
-        &mut self,
-        from: ProcessId,
-        client: &str,
-        _seq: u64,
-        target_type: &str,
-    ) {
+    /// Handle a `#unclaim` pragma — release claim on a type (fire-and-forget).
+    async fn handle_unclaim(&mut self, from: ProcessId, client: &str, target_type: &str) {
         tracing::info!("{client} unclaims type '{target_type}'");
         if self.claims.get(target_type) == Some(&from) {
             self.claims.remove(target_type);
         }
     }
 
-    /// Handle a `?observe` request — observe final output for a type (fire-and-forget).
-    fn handle_observe(&mut self, from: ProcessId, client: &str, _seq: u64, target_type: &str) {
+    /// Handle a `#observe` pragma — observe final output for a type (fire-and-forget).
+    fn handle_observe(&mut self, from: ProcessId, client: &str, target_type: &str) {
         tracing::info!("{client} observes type '{target_type}'");
         let observers = self.observers.entry(target_type.to_owned()).or_default();
         if !observers.contains(&from) {
@@ -592,8 +578,8 @@ impl Router {
             .insert(target_type.to_owned());
     }
 
-    /// Handle a `?unobserve` request — stop observing a type (fire-and-forget).
-    fn handle_unobserve(&mut self, from: ProcessId, client: &str, _seq: u64, target_type: &str) {
+    /// Handle a `#unobserve` pragma — stop observing a type (fire-and-forget).
+    fn handle_unobserve(&mut self, from: ProcessId, client: &str, target_type: &str) {
         tracing::info!("{client} unobserves type '{target_type}'");
         if let Some(observers) = self.observers.get_mut(target_type) {
             observers.retain(|&pid| pid != from);

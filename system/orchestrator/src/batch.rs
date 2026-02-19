@@ -223,8 +223,9 @@ impl PendingBatch {
                 byo::Command::Event { .. }
                 | byo::Command::Ack { .. }
                 | byo::Command::Request { .. }
-                | byo::Command::Response { .. } => {
-                    // Events/requests/responses in a batch are handled
+                | byo::Command::Response { .. }
+                | byo::Command::Pragma { .. } => {
+                    // Events/requests/responses/pragmas in a batch are handled
                     // separately by the router.
                     let mut em = byo::emitter::Emitter::new(&mut *buf);
                     let _ = em.commands(std::slice::from_ref(cmd));
@@ -289,7 +290,8 @@ pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8>
             byo::Command::Event { .. }
             | byo::Command::Ack { .. }
             | byo::Command::Request { .. }
-            | byo::Command::Response { .. } => {
+            | byo::Command::Response { .. }
+            | byo::Command::Pragma { .. } => {
                 let mut em = byo::emitter::Emitter::new(&mut buf);
                 let _ = em.commands(std::slice::from_ref(cmd));
             }

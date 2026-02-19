@@ -14,7 +14,7 @@ async fn observer_registration() {
     let (compositor, mut compositor_rx) = mock_process(1, "compositor");
     router.add_process(compositor);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Fire-and-forget: no message should be sent back to the compositor.
     // (A resync may be sent, but with empty state tree it should be empty/absent.)
@@ -37,7 +37,7 @@ async fn native_upsert_forwarded() {
     router.add_process(app);
 
     // Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // App sends a view upsert.
     send_byo(&mut router, pid(2), "+view sidebar class=\"w-64\"").await;
@@ -87,7 +87,7 @@ async fn upsert_with_children() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(
         &mut router,
         pid(2),
@@ -136,7 +136,7 @@ async fn destroy_forwarded() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Create then destroy.
     send_byo(&mut router, pid(2), "+view sidebar").await;
@@ -167,7 +167,7 @@ async fn patch_forwarded() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     send_byo(&mut router, pid(2), "+view sidebar class=\"w-64\"").await;
     let _ = recv_byo_raw(&mut compositor_rx); // consume upsert
@@ -203,8 +203,8 @@ async fn multiple_observers_same_type() {
     router.add_process(a11y);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     send_byo(&mut router, pid(3), "+view sidebar class=\"w-64\"").await;
 

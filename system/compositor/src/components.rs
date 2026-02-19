@@ -18,6 +18,10 @@ pub struct ByoLayer;
 #[derive(Component)]
 pub struct ByoWindow;
 
+/// Marker for entities created from BYO `tty` type.
+#[derive(Component)]
+pub struct ByoTty;
+
 /// Ordering component extracted from the `order` prop. Used for
 /// child reordering within flex layouts.
 #[derive(Component, Default)]

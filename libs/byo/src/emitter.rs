@@ -274,75 +274,87 @@ impl<W: io::Write> Emitter<W> {
         write_props(&mut self.writer, props)
     }
 
+    // -- Pragmas (#) ---------------------------------------------------------
+
+    /// `#claim type` — Claim ownership of an object type.
+    pub fn claim(&mut self, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n#claim {target_type}")
+    }
+
+    /// `#claim type,type,...` — Claim multiple types.
+    pub fn claim_many(&mut self, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n#claim ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
+    /// `#unclaim type` — Release claim on an object type.
+    pub fn unclaim(&mut self, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n#unclaim {target_type}")
+    }
+
+    /// `#unclaim type,type,...` — Release claim on multiple types.
+    pub fn unclaim_many(&mut self, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n#unclaim ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
+    /// `#observe type` — Observe final output for an object type.
+    pub fn observe(&mut self, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n#observe {target_type}")
+    }
+
+    /// `#observe type,type,...` — Observe multiple types.
+    pub fn observe_many(&mut self, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n#observe ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
+    /// `#unobserve type` — Stop observing an object type.
+    pub fn unobserve(&mut self, target_type: &str) -> io::Result<()> {
+        write!(self.writer, "\n#unobserve {target_type}")
+    }
+
+    /// `#unobserve type,type,...` — Stop observing multiple types.
+    pub fn unobserve_many(&mut self, types: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n#unobserve ")?;
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            }
+            write!(self.writer, "{t}")?;
+        }
+        Ok(())
+    }
+
+    /// `#redirect target` — Route passthrough to named tty.
+    pub fn redirect(&mut self, target: &str) -> io::Result<()> {
+        write!(self.writer, "\n#redirect {target}")
+    }
+
+    /// `#unredirect` — Restore default passthrough routing.
+    pub fn unredirect(&mut self) -> io::Result<()> {
+        write!(self.writer, "\n#unredirect")
+    }
+
     // -- Requests/Responses ---------------------------------------------------
-
-    /// `?claim seq type` — Claim ownership of an object type (fire-and-forget).
-    pub fn claim(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n?claim {seq} {target_type}")
-    }
-
-    /// `?claim seq type,type,...` — Claim multiple types (fire-and-forget).
-    pub fn claim_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n?claim {seq} ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
-    }
-
-    /// `?unclaim seq type` — Release claim on an object type (fire-and-forget).
-    pub fn unclaim(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n?unclaim {seq} {target_type}")
-    }
-
-    /// `?unclaim seq type,type,...` — Release claim on multiple types (fire-and-forget).
-    pub fn unclaim_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n?unclaim {seq} ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
-    }
-
-    /// `?observe seq type` — Observe final output for an object type (fire-and-forget).
-    pub fn observe(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n?observe {seq} {target_type}")
-    }
-
-    /// `?observe seq type,type,...` — Observe multiple types (fire-and-forget).
-    pub fn observe_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n?observe {seq} ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
-    }
-
-    /// `?unobserve seq type` — Stop observing an object type (fire-and-forget).
-    pub fn unobserve(&mut self, seq: u64, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n?unobserve {seq} {target_type}")
-    }
-
-    /// `?unobserve seq type,type,...` — Stop observing multiple types (fire-and-forget).
-    pub fn unobserve_many(&mut self, seq: u64, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n?unobserve {seq} ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
-    }
 
     /// `?expand seq id props...` — Request daemon expansion.
     pub fn expand(&mut self, seq: u64, id: &str, props: &[Prop]) -> io::Result<()> {
@@ -451,18 +463,13 @@ impl<W: io::Write> Emitter<W> {
                     write!(self.writer, "\n!ack {} {seq}", kind.as_str())?;
                     write_props(&mut self.writer, props)?;
                 }
-                Command::Request {
-                    kind,
-                    seq,
-                    targets,
-                    props,
-                } => {
-                    write!(self.writer, "\n?{} {seq}", kind.as_str())?;
+                Command::Pragma { kind, targets } => {
+                    write!(self.writer, "\n#{}", kind.as_str())?;
                     match kind {
-                        crate::protocol::RequestKind::Claim
-                        | crate::protocol::RequestKind::Unclaim
-                        | crate::protocol::RequestKind::Observe
-                        | crate::protocol::RequestKind::Unobserve => {
+                        crate::protocol::PragmaKind::Claim
+                        | crate::protocol::PragmaKind::Unclaim
+                        | crate::protocol::PragmaKind::Observe
+                        | crate::protocol::PragmaKind::Unobserve => {
                             for (i, t) in targets.iter().enumerate() {
                                 if i > 0 {
                                     write!(self.writer, ",")?;
@@ -472,13 +479,34 @@ impl<W: io::Write> Emitter<W> {
                                 write!(self.writer, "{t}")?;
                             }
                         }
-                        _ => {
+                        crate::protocol::PragmaKind::Redirect => {
                             if let Some(target) = targets.first() {
                                 write!(self.writer, " {target}")?;
                             }
-                            write_props(&mut self.writer, props)?;
+                        }
+                        _ => {
+                            for (i, t) in targets.iter().enumerate() {
+                                if i > 0 {
+                                    write!(self.writer, ",")?;
+                                } else {
+                                    write!(self.writer, " ")?;
+                                }
+                                write!(self.writer, "{t}")?;
+                            }
                         }
                     }
+                }
+                Command::Request {
+                    kind,
+                    seq,
+                    targets,
+                    props,
+                } => {
+                    write!(self.writer, "\n?{} {seq}", kind.as_str())?;
+                    if let Some(target) = targets.first() {
+                        write!(self.writer, " {target}")?;
+                    }
+                    write_props(&mut self.writer, props)?;
                 }
                 Command::Response {
                     kind,
@@ -636,27 +664,39 @@ mod tests {
     #[test]
     fn claim_unclaim() {
         let out = emit(|em| {
-            em.claim(0, "button")?;
-            em.claim(1, "slider")?;
-            em.unclaim(2, "checkbox")
+            em.claim("button")?;
+            em.claim("slider")?;
+            em.unclaim("checkbox")
         });
         assert_eq!(
             out,
-            "\x1b_B\n?claim 0 button\n?claim 1 slider\n?unclaim 2 checkbox\n\x1b\\"
+            "\x1b_B\n#claim button\n#claim slider\n#unclaim checkbox\n\x1b\\"
         );
     }
 
     #[test]
     fn observe_unobserve() {
         let out = emit(|em| {
-            em.observe(0, "view")?;
-            em.observe(1, "text")?;
-            em.unobserve(2, "view")
+            em.observe("view")?;
+            em.observe("text")?;
+            em.unobserve("view")
         });
         assert_eq!(
             out,
-            "\x1b_B\n?observe 0 view\n?observe 1 text\n?unobserve 2 view\n\x1b\\"
+            "\x1b_B\n#observe view\n#observe text\n#unobserve view\n\x1b\\"
         );
+    }
+
+    #[test]
+    fn redirect() {
+        let out = emit(|em| em.redirect("term"));
+        assert_eq!(out, "\x1b_B\n#redirect term\n\x1b\\");
+    }
+
+    #[test]
+    fn unredirect() {
+        let out = emit(|em| em.unredirect());
+        assert_eq!(out, "\x1b_B\n#unredirect\n\x1b\\");
     }
 
     #[test]
@@ -862,13 +902,25 @@ mod tests {
     }
 
     #[test]
+    fn pragma_kind_as_str() {
+        use crate::byte_str::ByteStr;
+        use crate::protocol::PragmaKind;
+        assert_eq!(PragmaKind::Claim.as_str(), "claim");
+        assert_eq!(PragmaKind::Unclaim.as_str(), "unclaim");
+        assert_eq!(PragmaKind::Observe.as_str(), "observe");
+        assert_eq!(PragmaKind::Unobserve.as_str(), "unobserve");
+        assert_eq!(PragmaKind::Redirect.as_str(), "redirect");
+        assert_eq!(PragmaKind::Unredirect.as_str(), "unredirect");
+        assert_eq!(
+            PragmaKind::Other(ByteStr::from("custom")).as_str(),
+            "custom"
+        );
+    }
+
+    #[test]
     fn request_kind_as_str() {
         use crate::byte_str::ByteStr;
         use crate::protocol::RequestKind;
-        assert_eq!(RequestKind::Claim.as_str(), "claim");
-        assert_eq!(RequestKind::Unclaim.as_str(), "unclaim");
-        assert_eq!(RequestKind::Observe.as_str(), "observe");
-        assert_eq!(RequestKind::Unobserve.as_str(), "unobserve");
         assert_eq!(RequestKind::Expand.as_str(), "expand");
         assert_eq!(
             RequestKind::Other(ByteStr::from("render-frame")).as_str(),
@@ -912,7 +964,7 @@ mod tests {
             "\n@view sidebar hidden",
             "\n!click 0 save",
             "\n!ack click 0 handled=true",
-            "\n?claim 0 button",
+            "\n#claim button",
         );
         let cmds = parse(input).unwrap();
 
@@ -938,21 +990,21 @@ mod tests {
 
     #[test]
     fn observe_many_output() {
-        let out = emit(|em| em.observe_many(0, &["view", "text", "layer"]));
-        assert_eq!(out, "\x1b_B\n?observe 0 view,text,layer\n\x1b\\");
+        let out = emit(|em| em.observe_many(&["view", "text", "layer"]));
+        assert_eq!(out, "\x1b_B\n#observe view,text,layer\n\x1b\\");
     }
 
     #[test]
     fn claim_many_output() {
-        let out = emit(|em| em.claim_many(0, &["button", "slider"]));
-        assert_eq!(out, "\x1b_B\n?claim 0 button,slider\n\x1b\\");
+        let out = emit(|em| em.claim_many(&["button", "slider"]));
+        assert_eq!(out, "\x1b_B\n#claim button,slider\n\x1b\\");
     }
 
     #[test]
     fn commands_round_trip_multi_type() {
         use crate::parser::parse;
 
-        let cmds = parse("?observe 0 view,text,layer").unwrap();
+        let cmds = parse("#observe view,text,layer").unwrap();
         let out = emit(|em| em.commands(&cmds));
         let payload = out
             .strip_prefix("\x1b_B")
@@ -964,10 +1016,9 @@ mod tests {
         let cmds2 = parse(payload).unwrap();
         assert_eq!(cmds.len(), cmds2.len());
         match &cmds2[0] {
-            Command::Request {
-                kind: crate::protocol::RequestKind::Observe,
+            Command::Pragma {
+                kind: crate::protocol::PragmaKind::Observe,
                 targets,
-                ..
             } => {
                 assert_eq!(targets.len(), 3);
                 assert_eq!(targets[0], "view");

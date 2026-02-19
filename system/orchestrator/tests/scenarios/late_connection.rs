@@ -35,7 +35,7 @@ async fn late_claim_replays() {
     assert_no_message(&mut controls_rx);
 
     // Step 3: Controls daemon claims `button`.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 4: Router should replay reduced state as `?expand` to controls.
     // The replay format from handle_claim is the reduced command with `+`
@@ -72,7 +72,7 @@ async fn late_observer_resync() {
     assert_no_message(&mut compositor_rx);
 
     // Step 2: Compositor observes `view`.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 3-4: Router resyncs -- compositor gets the full state tree replay.
     let s = recv_byo_raw(&mut compositor_rx);
@@ -121,7 +121,7 @@ async fn additional_observe_resync() {
     router.add_process(app);
 
     // Step 1: Compositor observes view only.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: App sends a view with a text child.
     send_byo(
@@ -149,7 +149,7 @@ async fn additional_observe_resync() {
     );
 
     // Step 4: Compositor additionally observes `text`.
-    send_byo(&mut router, pid(1), "?observe 1 text").await;
+    send_byo(&mut router, pid(1), "#observe text").await;
 
     // Step 5: Router resyncs with both view and text.
     let s = recv_byo_raw(&mut compositor_rx);

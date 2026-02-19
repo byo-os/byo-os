@@ -8,6 +8,7 @@ mod props;
 mod render;
 mod style;
 mod transition;
+mod tty;
 
 use std::f32::consts::FRAC_PI_6;
 

@@ -105,6 +105,44 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
             out.push_str(&expect_literal(seq, "sequence number")?);
             serialize_props(props, out)?;
         }
+        IrCommand::Pragma { kind, targets } => {
+            out.push('\n');
+            out.push_str(indent);
+            out.push('#');
+            let kind_str = expect_literal(kind, "pragma kind")?;
+            out.push_str(&kind_str);
+            match kind_str.as_str() {
+                "claim" | "unclaim" | "observe" | "unobserve" => {
+                    out.push(' ');
+                    for (i, t) in targets.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&expect_literal(t, "target")?);
+                    }
+                }
+                "redirect" => {
+                    if let Some(t) = targets.first() {
+                        out.push(' ');
+                        out.push_str(&expect_literal(t, "target")?);
+                    }
+                }
+                "unredirect" => {
+                    // no targets
+                }
+                _ => {
+                    if !targets.is_empty() {
+                        out.push(' ');
+                        for (i, t) in targets.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            out.push_str(&expect_literal(t, "target")?);
+                        }
+                    }
+                }
+            }
+        }
         IrCommand::Request {
             kind,
             seq,
@@ -119,23 +157,10 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
             out.push(' ');
             out.push_str(&expect_literal(seq, "sequence number")?);
             out.push(' ');
-            // Subscription commands use comma-separated targets
-            match kind_str.as_str() {
-                "claim" | "unclaim" | "observe" | "unobserve" => {
-                    for (i, t) in targets.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        out.push_str(&expect_literal(t, "target")?);
-                    }
-                }
-                _ => {
-                    if let Some(t) = targets.first() {
-                        out.push_str(&expect_literal(t, "target")?);
-                    }
-                    serialize_props(props, out)?;
-                }
+            if let Some(t) = targets.first() {
+                out.push_str(&expect_literal(t, "target")?);
             }
+            serialize_props(props, out)?;
         }
         IrCommand::Response {
             kind,

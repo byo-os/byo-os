@@ -17,7 +17,7 @@ async fn claim_registration() {
     let (controls, mut controls_rx) = mock_process(1, "controls");
     router.add_process(controls);
 
-    send_byo(&mut router, pid(1), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#claim button").await;
 
     // Fire-and-forget: no echo, no replay (state tree is empty).
     assert_no_message(&mut controls_rx);
@@ -47,10 +47,10 @@ async fn basic_expansion() {
     router.add_process(app);
 
     // Step 1: Compositor observes view and text.
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
 
     // Step 2: Controls daemon claims button.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 3: App sends a button upsert.
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;
@@ -138,8 +138,8 @@ async fn expansion_with_native_siblings() {
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends a view with native children and one button.
     send_byo(
@@ -229,8 +229,8 @@ async fn expansion_blocks_output() {
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends a button (triggers expansion, blocks output queue).
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;
@@ -285,8 +285,8 @@ async fn multiple_expansions_one_batch() {
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends two buttons in one batch.
     send_byo(
@@ -375,8 +375,8 @@ async fn anonymous_not_expanded() {
     router.add_process(app);
 
     // Compositor observes both view and button so it receives the anonymous button directly.
-    send_byo(&mut router, pid(1), "?observe 0 view,button").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends anonymous button.
     send_byo(&mut router, pid(3), "+button _ label=\"Save\"").await;
@@ -418,9 +418,9 @@ async fn unclaim_stops_expansion() {
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,button").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
-    send_byo(&mut router, pid(2), "?unclaim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
+    send_byo(&mut router, pid(2), "#unclaim button").await;
 
     // App sends a button. Since unclaimed, no expansion should happen.
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;

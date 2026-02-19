@@ -23,10 +23,10 @@ async fn setup_initial_expansion() -> (
     router.add_process(app);
 
     // Compositor observes view and text.
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
 
     // Controls claims button.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends a button.
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;
@@ -210,8 +210,8 @@ async fn re_expansion_removes_node() {
     router.add_process(controls);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App sends button.
     send_byo(&mut router, pid(3), "+button save label=\"Save\"").await;
@@ -302,10 +302,10 @@ async fn setup_two_buttons() -> (
     router.add_process(app);
 
     // Compositor observes view and text.
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
 
     // Controls claims button.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // App creates settings button (initial expansion).
     send_byo(&mut router, pid(3), "+button settings label=\"Settings\"").await;

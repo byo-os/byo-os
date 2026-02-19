@@ -140,7 +140,8 @@ impl Prop {
 /// | `Patch`   | `@type id props...`   | Update specific props on an object   |
 /// | `Event`   | `!type seq id props`  | Input or system event                |
 /// | `Ack`     | `!ack type seq props` | Acknowledge a received event         |
-/// | `Request` | `?kind seq target`    | Request (sub, unsub, expand, custom) |
+/// | `Pragma`  | `#kind targets`       | Stream pragma (fire-and-forget)      |
+/// | `Request` | `?kind seq target`    | Request (expand, custom)             |
 /// | `Response`| `.kind seq props body`| Response (expand, custom)            |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -177,10 +178,12 @@ pub enum Command {
         seq: u64,
         props: Vec<Prop>,
     },
-    /// `?kind seq target(s) props...` — Request (sub, unsub, expand, custom).
-    /// Subscription commands (claim, unclaim, observe, unobserve) use
-    /// `targets` for one or more type names. Expand/other use a single
-    /// target (ID).
+    /// `#kind targets...` — Stream pragma (fire-and-forget, no seq).
+    Pragma {
+        kind: PragmaKind,
+        targets: Vec<ByteStr>,
+    },
+    /// `?kind seq target props...` — Request (expand, custom).
     Request {
         kind: RequestKind,
         seq: u64,
@@ -319,23 +322,65 @@ impl EventKind {
     }
 }
 
+/// Known pragma types for `#` commands.
+///
+/// Pragmas are fire-and-forget stream directives (no sequence number,
+/// no response expected). `Claim`/`Unclaim` register/release type
+/// ownership. `Observe`/`Unobserve` subscribe to final output.
+/// `Redirect`/`Unredirect` control passthrough routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PragmaKind {
+    /// `#claim` — claim ownership of object type(s)
+    Claim,
+    /// `#unclaim` — release claim on object type(s)
+    Unclaim,
+    /// `#observe` — observe final output for object type(s)
+    Observe,
+    /// `#unobserve` — stop observing object type(s)
+    Unobserve,
+    /// `#redirect` — route passthrough to named tty
+    Redirect,
+    /// `#unredirect` — restore default passthrough routing
+    Unredirect,
+    /// Custom pragma
+    Other(ByteStr),
+}
+
+impl PragmaKind {
+    /// Returns the wire-format string for this pragma kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            PragmaKind::Claim => "claim",
+            PragmaKind::Unclaim => "unclaim",
+            PragmaKind::Observe => "observe",
+            PragmaKind::Unobserve => "unobserve",
+            PragmaKind::Redirect => "redirect",
+            PragmaKind::Unredirect => "unredirect",
+            PragmaKind::Other(s) => s,
+        }
+    }
+
+    /// Maps a wire-format pragma name to the corresponding variant.
+    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
+        let s = s.into();
+        match s.as_ref() {
+            "claim" => PragmaKind::Claim,
+            "unclaim" => PragmaKind::Unclaim,
+            "observe" => PragmaKind::Observe,
+            "unobserve" => PragmaKind::Unobserve,
+            "redirect" => PragmaKind::Redirect,
+            "unredirect" => PragmaKind::Unredirect,
+            _ => PragmaKind::Other(s),
+        }
+    }
+}
+
 /// Known request types for `?` commands.
 ///
-/// `Claim` and `Unclaim` register/release ownership of a type (daemon
-/// expansion). `Observe` and `Unobserve` register/release consumption
-/// of final output for a type. All four are fire-and-forget (no response).
 /// `Expand` expects a `.expand` response from the daemon.
 /// Third-party request types use [`Other`](RequestKind::Other).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
-    /// `?claim` — claim ownership of an object type (daemon expansion)
-    Claim,
-    /// `?unclaim` — release claim on an object type
-    Unclaim,
-    /// `?observe` — observe final output for an object type
-    Observe,
-    /// `?unobserve` — stop observing an object type
-    Unobserve,
     /// `?expand` — request daemon expansion
     Expand,
     /// Custom request (e.g. `?render-frame`)
@@ -346,10 +391,6 @@ impl RequestKind {
     /// Returns the wire-format string for this request kind.
     pub fn as_str(&self) -> &str {
         match self {
-            RequestKind::Claim => "claim",
-            RequestKind::Unclaim => "unclaim",
-            RequestKind::Observe => "observe",
-            RequestKind::Unobserve => "unobserve",
             RequestKind::Expand => "expand",
             RequestKind::Other(s) => s,
         }
@@ -359,10 +400,6 @@ impl RequestKind {
     pub fn from_wire(s: impl Into<ByteStr>) -> Self {
         let s = s.into();
         match s.as_ref() {
-            "claim" => RequestKind::Claim,
-            "unclaim" => RequestKind::Unclaim,
-            "observe" => RequestKind::Observe,
-            "unobserve" => RequestKind::Unobserve,
             "expand" => RequestKind::Expand,
             _ => RequestKind::Other(s),
         }

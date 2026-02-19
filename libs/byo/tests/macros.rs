@@ -144,13 +144,13 @@ fn ack() {
 fn claim_unclaim() {
     let out = emit(|em| {
         byo_write!(em,
-            ?claim 0 button
-            ?unclaim 1 slider
+            #claim button
+            #unclaim slider
         )
     });
     byo_assert_eq!(out,
-        ?claim 0 button
-        ?unclaim 1 slider
+        #claim button
+        #unclaim slider
     );
 }
 
@@ -158,13 +158,33 @@ fn claim_unclaim() {
 fn observe_unobserve() {
     let out = emit(|em| {
         byo_write!(em,
-            ?observe 0 view
-            ?unobserve 1 text
+            #observe view
+            #unobserve text
         )
     });
     byo_assert_eq!(out,
-        ?observe 0 view
-        ?unobserve 1 text
+        #observe view
+        #unobserve text
+    );
+}
+
+#[test]
+fn redirect_unredirect() {
+    let out = emit(|em| {
+        byo_write!(em,
+            #redirect term
+        )
+    });
+    byo_assert_eq!(out,
+        #redirect term
+    );
+    let out2 = emit(|em| {
+        byo_write!(em,
+            #unredirect
+        )
+    });
+    byo_assert_eq!(out2,
+        #unredirect
     );
 }
 
@@ -417,11 +437,11 @@ fn round_trip_parse() {
             @view sidebar hidden
             !click 0 save
             !ack click 0 handled=true
-            ?claim 0 button
+            #claim button
         )
     });
     let cmds = parse(strip_apc(&out)).unwrap();
-    // Upsert + Push + Text + Pop + Destroy + Patch + Event + Ack + Request = 9
+    // Upsert + Push + Text + Pop + Destroy + Patch + Event + Ack + Pragma = 9
     assert_eq!(cmds.len(), 9);
 }
 

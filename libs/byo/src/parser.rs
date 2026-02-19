@@ -21,7 +21,7 @@ use bytes::Bytes;
 
 use crate::byte_str::ByteStr;
 use crate::lexer::{ParseError, ParseErrorKind, Span, Spanned, Token, tokenize};
-use crate::protocol::{Command, EventKind, Prop, RequestKind, ResponseKind};
+use crate::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
 
 /// Zero-copy parse from a `Bytes` source.
 ///
@@ -178,11 +178,12 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             Token::Minus => self.parse_destroy(cmds),
             Token::At => self.parse_patch(cmds),
             Token::Bang => self.parse_event(cmds),
+            Token::Hash => self.parse_pragma(cmds),
             Token::Question => self.parse_request(cmds),
             Token::Dot => self.parse_response(cmds),
             _ => Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "command operator (+, -, @, !, ?, .)",
+                    expected: "command operator (+, -, @, !, #, ?, .)",
                     found: self.describe_token(tok),
                 },
                 span: tok.span,
@@ -277,6 +278,88 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         Ok(())
     }
 
+    // -- Pragma (#) -----------------------------------------------------------
+
+    fn parse_pragma(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
+        self.advance(); // consume #
+
+        let word = self.expect_word("pragma kind")?;
+        let span = self.tokens[self.pos - 1].span;
+
+        if !is_valid_type(word) {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "pragma kind",
+                    found: format!("{word:?}"),
+                },
+                span,
+            });
+        }
+
+        let kind = PragmaKind::from_wire(self.byte_str_at(span));
+
+        match kind {
+            PragmaKind::Claim
+            | PragmaKind::Unclaim
+            | PragmaKind::Observe
+            | PragmaKind::Unobserve => {
+                let mut targets = vec![self.expect_type()?];
+                while matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::Comma,
+                        ..
+                    })
+                ) {
+                    self.advance(); // consume comma
+                    targets.push(self.expect_type()?);
+                }
+                cmds.push(Command::Pragma { kind, targets });
+                Ok(())
+            }
+            PragmaKind::Redirect => {
+                let target = self.expect_id()?;
+                cmds.push(Command::Pragma {
+                    kind,
+                    targets: vec![target],
+                });
+                Ok(())
+            }
+            PragmaKind::Unredirect => {
+                cmds.push(Command::Pragma {
+                    kind,
+                    targets: Vec::new(),
+                });
+                Ok(())
+            }
+            _ => {
+                // Generic pragma — consume optional targets
+                let mut targets = Vec::new();
+                while matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::Word(_),
+                        ..
+                    })
+                ) {
+                    targets.push(self.expect_type()?);
+                    if !matches!(
+                        self.peek(),
+                        Some(Spanned {
+                            token: Token::Comma,
+                            ..
+                        })
+                    ) {
+                        break;
+                    }
+                    self.advance(); // consume comma
+                }
+                cmds.push(Command::Pragma { kind, targets });
+                Ok(())
+            }
+        }
+    }
+
     // -- Request (?) ----------------------------------------------------------
 
     fn parse_request(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
@@ -295,43 +378,17 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             });
         }
 
-        match word {
-            "claim" | "unclaim" | "observe" | "unobserve" => {
-                let kind = RequestKind::from_wire(self.byte_str_at(span));
-                let seq = self.expect_seqnum()?;
-                let mut targets = vec![self.expect_type()?];
-                while matches!(
-                    self.peek(),
-                    Some(Spanned {
-                        token: Token::Comma,
-                        ..
-                    })
-                ) {
-                    self.advance(); // consume comma
-                    targets.push(self.expect_type()?);
-                }
-                cmds.push(Command::Request {
-                    kind,
-                    seq,
-                    targets,
-                    props: Vec::new(),
-                });
-                Ok(())
-            }
-            _ => {
-                let kind = RequestKind::from_wire(self.byte_str_at(span));
-                let seq = self.expect_seqnum()?;
-                let id = self.expect_id()?;
-                let props = self.parse_props()?;
-                cmds.push(Command::Request {
-                    kind,
-                    seq,
-                    targets: vec![id],
-                    props,
-                });
-                Ok(())
-            }
-        }
+        let kind = RequestKind::from_wire(self.byte_str_at(span));
+        let seq = self.expect_seqnum()?;
+        let id = self.expect_id()?;
+        let props = self.parse_props()?;
+        cmds.push(Command::Request {
+            kind,
+            seq,
+            targets: vec![id],
+            props,
+        });
+        Ok(())
     }
 
     // -- Response (.) ---------------------------------------------------------
@@ -507,6 +564,9 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 | Some(Spanned {
                     token: Token::Question,
                     ..
+                })
+                | Some(Spanned {
+                    token: Token::Hash, ..
                 })
                 | Some(Spanned {
                     token: Token::Dot, ..
@@ -736,6 +796,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             Token::Tilde => "'~'".into(),
             Token::Eq => "'='".into(),
             Token::Comma => "','".into(),
+            Token::Hash => "'#'".into(),
             Token::Word(w) => format!("word {w:?}"),
             Token::Str(s) => format!("string {s:?}"),
         }
@@ -999,75 +1060,60 @@ mod tests {
 
     #[test]
     fn claim() {
-        let cmds = parse("?claim 0 button").unwrap();
+        let cmds = parse("#claim button").unwrap();
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets.len(), 1);
                 assert_eq!(targets[0], "button");
             }
-            _ => panic!("expected Claim request"),
+            _ => panic!("expected Claim pragma"),
         }
     }
 
     #[test]
     fn unclaim() {
-        let cmds = parse("?unclaim 2 checkbox").unwrap();
+        let cmds = parse("#unclaim checkbox").unwrap();
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Unclaim);
-                assert_eq!(*seq, 2);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Unclaim);
                 assert_eq!(targets[0], "checkbox");
             }
-            _ => panic!("expected Unclaim request"),
+            _ => panic!("expected Unclaim pragma"),
         }
     }
 
     #[test]
     fn observe() {
-        let cmds = parse("?observe 0 view").unwrap();
+        let cmds = parse("#observe view").unwrap();
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Observe);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Observe);
                 assert_eq!(targets[0], "view");
             }
-            _ => panic!("expected Observe request"),
+            _ => panic!("expected Observe pragma"),
         }
     }
 
     #[test]
     fn unobserve() {
-        let cmds = parse("?unobserve 1 text").unwrap();
+        let cmds = parse("#unobserve text").unwrap();
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Unobserve);
-                assert_eq!(*seq, 1);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Unobserve);
                 assert_eq!(targets[0], "text");
             }
-            _ => panic!("expected Unobserve request"),
+            _ => panic!("expected Unobserve pragma"),
         }
     }
 
     #[test]
     fn multi_type_observe() {
-        let cmds = parse("?observe 0 view,text,layer").unwrap();
+        let cmds = parse("#observe view,text,layer").unwrap();
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Observe);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Observe);
                 assert_eq!(targets.len(), 3);
                 assert_eq!(targets[0], "view");
                 assert_eq!(targets[1], "text");
@@ -1079,14 +1125,11 @@ mod tests {
 
     #[test]
     fn multi_type_observe_spaces() {
-        let cmds = parse("?observe 0 view, text, layer").unwrap();
+        let cmds = parse("#observe view, text, layer").unwrap();
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Observe);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Observe);
                 assert_eq!(targets.len(), 3);
                 assert_eq!(targets[0], "view");
                 assert_eq!(targets[1], "text");
@@ -1098,20 +1141,54 @@ mod tests {
 
     #[test]
     fn multi_type_claim() {
-        let cmds = parse("?claim 0 button,slider,checkbox").unwrap();
+        let cmds = parse("#claim button,slider,checkbox").unwrap();
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets.len(), 3);
                 assert_eq!(targets[0], "button");
                 assert_eq!(targets[1], "slider");
                 assert_eq!(targets[2], "checkbox");
             }
             _ => panic!("expected multi-type Claim"),
+        }
+    }
+
+    #[test]
+    fn redirect() {
+        let cmds = parse("#redirect term").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Redirect);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0], "term");
+            }
+            _ => panic!("expected Redirect pragma"),
+        }
+    }
+
+    #[test]
+    fn redirect_discard() {
+        let cmds = parse("#redirect _").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Redirect);
+                assert_eq!(targets[0], "_");
+            }
+            _ => panic!("expected Redirect pragma"),
+        }
+    }
+
+    #[test]
+    fn unredirect() {
+        let cmds = parse("#unredirect").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Unredirect);
+                assert!(targets.is_empty());
+            }
+            _ => panic!("expected Unredirect pragma"),
         }
     }
 
@@ -1235,34 +1312,25 @@ mod tests {
 
     #[test]
     fn mixed_batch() {
-        let cmds = parse("?claim 0 button ?claim 1 slider ?claim 2 checkbox").unwrap();
+        let cmds = parse("#claim button #claim slider #claim checkbox").unwrap();
         assert_eq!(cmds.len(), 3);
         match &cmds[0] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets[0], "button");
             }
             _ => panic!("expected Claim"),
         }
         match &cmds[1] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 1);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets[0], "slider");
             }
             _ => panic!("expected Claim"),
         }
         match &cmds[2] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 2);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets[0], "checkbox");
             }
             _ => panic!("expected Claim"),
@@ -1515,8 +1583,8 @@ mod tests {
         em.frame(|em| {
             em.event("click", 0, "save", &[])?;
             em.ack("click", 0, &[Prop::val("handled", "true")])?;
-            em.claim(0, "button")?;
-            em.unclaim(1, "slider")
+            em.claim("button")?;
+            em.unclaim("slider")
         })
         .unwrap();
 
@@ -1549,21 +1617,15 @@ mod tests {
             } if kind == &EventKind::Click
         ));
         match &cmds[2] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Claim);
-                assert_eq!(*seq, 0);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Claim);
                 assert_eq!(targets[0], "button");
             }
             _ => panic!("expected Claim"),
         }
         match &cmds[3] {
-            Command::Request {
-                kind, seq, targets, ..
-            } => {
-                assert_eq!(*kind, RequestKind::Unclaim);
-                assert_eq!(*seq, 1);
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Unclaim);
                 assert_eq!(targets[0], "slider");
             }
             _ => panic!("expected Unclaim"),

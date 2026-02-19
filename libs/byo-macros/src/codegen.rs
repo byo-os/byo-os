@@ -119,6 +119,7 @@ impl Codegen {
                     }
                 }
             }
+            IrCommand::Pragma { kind, targets } => self.gen_pragma(kind, targets, em_ident),
             IrCommand::Request {
                 kind,
                 seq,
@@ -257,6 +258,83 @@ impl Codegen {
         }
     }
 
+    /// Generate code for a pragma command.
+    fn gen_pragma(
+        &mut self,
+        kind: &IrValue,
+        targets: &[IrValue],
+        em_ident: &proc_macro2::Ident,
+    ) -> TokenStream {
+        // Optimize known literal kinds to direct emitter methods
+        if let IrValue::Literal(k) = kind {
+            match k.as_str() {
+                "claim" | "unclaim" | "observe" | "unobserve" => {
+                    let method = format_ident!("{k}");
+                    let many_method = format_ident!("{k}_many");
+
+                    if targets.len() == 1 {
+                        let (target_binds, target_expr) = self.gen_str_value(&targets[0]);
+                        return quote! {
+                            #target_binds
+                            #em_ident.#method(#target_expr)?;
+                        };
+                    } else {
+                        // Multiple targets — build a slice
+                        let target_items: Vec<TokenStream> = targets
+                            .iter()
+                            .map(|t| match t {
+                                IrValue::Literal(s) => quote! { #s },
+                                IrValue::Interpolation(expr) => {
+                                    quote! { (#expr).as_ref() }
+                                }
+                            })
+                            .collect();
+                        return quote! {
+                            #em_ident.#many_method(&[#(#target_items),*])?;
+                        };
+                    }
+                }
+                "redirect" => {
+                    let (target_binds, target_expr) =
+                        self.gen_str_value(targets.first().expect("redirect needs a target"));
+                    return quote! {
+                        #target_binds
+                        #em_ident.redirect(#target_expr)?;
+                    };
+                }
+                "unredirect" => {
+                    return quote! {
+                        #em_ident.unredirect()?;
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        // Generic pragma: fall back to writing raw
+        let (kind_binds, kind_expr) = self.gen_str_value(kind);
+        if targets.is_empty() {
+            quote! {
+                #kind_binds
+                write!(#em_ident.writer, "\n#{}", #kind_expr)?;
+            }
+        } else {
+            let target_items: Vec<TokenStream> = targets
+                .iter()
+                .map(|t| match t {
+                    IrValue::Literal(s) => quote! { #s },
+                    IrValue::Interpolation(expr) => {
+                        quote! { (#expr).as_ref() }
+                    }
+                })
+                .collect();
+            quote! {
+                #kind_binds
+                write!(#em_ident.writer, "\n#{} {}", #kind_expr, [#(#target_items),*].join(","))?;
+            }
+        }
+    }
+
     /// Generate code for a request command.
     fn gen_request(
         &mut self,
@@ -271,34 +349,6 @@ impl Codegen {
         // Optimize known literal kinds to direct emitter methods
         if let IrValue::Literal(k) = kind {
             match k.as_str() {
-                "claim" | "unclaim" | "observe" | "unobserve" => {
-                    let method = format_ident!("{k}");
-                    let many_method = format_ident!("{k}_many");
-
-                    if targets.len() == 1 {
-                        let (target_binds, target_expr) = self.gen_str_value(&targets[0]);
-                        return quote! {
-                            #seq_binds
-                            #target_binds
-                            #em_ident.#method(#seq_expr, #target_expr)?;
-                        };
-                    } else {
-                        // Multiple targets — build a slice
-                        let target_items: Vec<TokenStream> = targets
-                            .iter()
-                            .map(|t| match t {
-                                IrValue::Literal(s) => quote! { #s },
-                                IrValue::Interpolation(expr) => {
-                                    quote! { (#expr).as_ref() }
-                                }
-                            })
-                            .collect();
-                        return quote! {
-                            #seq_binds
-                            #em_ident.#many_method(#seq_expr, &[#(#target_items),*])?;
-                        };
-                    }
-                }
                 "expand" => {
                     let (target_binds, target_expr) =
                         self.gen_str_value(targets.first().expect("expand needs a target"));

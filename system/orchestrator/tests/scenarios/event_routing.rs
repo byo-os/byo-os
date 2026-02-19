@@ -20,7 +20,7 @@ async fn event_basic() {
     router.add_process(app);
 
     // Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // App creates an object.
     send_byo(&mut router, pid(2), "+view btn").await;
@@ -53,7 +53,7 @@ async fn event_seq_remapping() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view btn").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -91,7 +91,7 @@ async fn event_per_destination_isolation() {
     router.add_process(app1);
     router.add_process(app2);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     send_byo(&mut router, pid(2), "+view btn").await;
     let _ = recv_byo_raw(&mut compositor_rx);
@@ -133,7 +133,7 @@ async fn ack_routing() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view btn").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -176,7 +176,7 @@ async fn ack_with_handled_prop() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view btn").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -231,8 +231,8 @@ async fn event_cross_daemon() {
     router.add_process(app);
     router.add_process(controls);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(3), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(3), "#claim button").await;
 
     // App creates a button (triggers expansion).
     send_byo(&mut router, pid(2), "+button save label=Save").await;
@@ -284,7 +284,7 @@ async fn disconnect_cleans_pending_acks() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view btn").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -323,7 +323,7 @@ async fn request_basic() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view surface").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -355,7 +355,7 @@ async fn response_routing() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view surface").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -398,7 +398,7 @@ async fn response_with_body() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view surface").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -446,7 +446,7 @@ async fn request_seq_isolation() {
     router.add_process(app1);
     router.add_process(app2);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view s1").await;
     let _ = recv_byo_raw(&mut compositor_rx);
     send_byo(&mut router, pid(3), "+view s2").await;
@@ -480,7 +480,7 @@ async fn disconnect_cleans_pending_responses() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view surface").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 
@@ -513,7 +513,7 @@ async fn request_with_props() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
     send_byo(&mut router, pid(2), "+view surface").await;
     let _ = recv_byo_raw(&mut compositor_rx);
 

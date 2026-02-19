@@ -8,7 +8,7 @@ structure within that payload.
 # -- Top level --
 
 batch      = whitespace? (command whitespace?)*
-command    = upsert | destroy | patch | event | request | response
+command    = upsert | destroy | patch | event | pragma | request | response
 
 # -- Comments (stripped by lexer, not part of command stream) --
 
@@ -29,15 +29,21 @@ event      = '!' (ack | other_event)
 ack        = 'ack' type seqnum prop*
 other_event = type seqnum id prop*
 
+# -- Pragmas (fire-and-forget, no sequence numbers) --
+
+pragma     = '#' (claim | unclaim | observe | unobserve | redirect | unredirect | other_pragma)
+claim      = 'claim' types
+unclaim    = 'unclaim' types
+observe    = 'observe' types
+unobserve  = 'unobserve' types
+redirect   = 'redirect' id
+unredirect = 'unredirect'
+other_pragma = type (types | id)?
+types      = type (',' type)*
+
 # -- Requests --
 
-request      = '?' (claim_req | unclaim_req | observe_req | unobserve_req | other_req)
-claim_req    = 'claim' seqnum types
-unclaim_req  = 'unclaim' seqnum types
-observe_req  = 'observe' seqnum types
-unobserve_req = 'unobserve' seqnum types
-types        = type (',' type)*
-other_req    = type seqnum id prop*
+request    = '?' type seqnum id prop*
 
 # -- Responses --
 
@@ -57,7 +63,7 @@ dqchar     = [^"\\] | escape
 sqstring   = "'" sqchar* "'"
 sqchar     = [^'\\] | escape
 escape     = '\\' ["'\\/nrt0]
-bare       = [^\s{}="'~\\,+\-@!?.] [^\s{}="'~\\,]*
+bare       = [^\s{}="'~\\,+\-@!?.#] [^\s{}="'~\\,]*
 
 # -- Atoms --
 
@@ -97,10 +103,10 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
 
 - **Greedy props.** `prop*` is delimited by whitespace. The parser
   greedily consumes props until it hits a character that starts a
-  new command (`+`, `-`, `@`, `!`, `?`, `.`, `{`, `}`) or end-of-input.
+  new command (`+`, `-`, `@`, `!`, `?`, `.`, `#`, `{`, `}`) or end-of-input.
 
 - **Whitespace.** Mandatory between tokens, except immediately after
-  operator characters (`+`, `-`, `@`, `!`, `?`, `.`) and around braces
+  operator characters (`+`, `-`, `@`, `!`, `?`, `.`, `#`) and around braces
   (`{`, `}`).
 
 - **Anonymous ID.** The `id` rule includes `_` for anonymous objects
@@ -110,7 +116,7 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
   cross-client references used by daemons and the orchestrator.
 
 - **Bare values and operators.** Operator characters (`+`, `-`, `@`,
-  `!`, `?`, `.`) cannot start a bare value — they are always parsed
+  `!`, `?`, `.`, `#`) cannot start a bare value — they are always parsed
   as command operators at a token boundary. They are valid mid-value
   (e.g. `notes-app`, `w-64`, `a+b`, `com.example.foo`). To use a
   value that starts with an operator character, quote it: `value="+5"`.
@@ -119,9 +125,15 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
   then falls back to `other_event` for all other event types (both
   built-in like `click` and third-party like `com.example.spell-check`).
 
-- **Request dispatch.** The `request` rule tries `claim`, `unclaim`,
-  `observe`, and `unobserve` as keywords first, then falls back to
-  `other_req` (including `expand` and custom request types).
+- **Pragma commands.** `#` is the sigil for fire-and-forget stream
+  pragmas — they have no sequence numbers and no responses. `#claim`,
+  `#unclaim`, `#observe`, `#unobserve` manage subscriptions.
+  `#redirect` and `#unredirect` control passthrough routing to TTY
+  entities.
+
+- **Request simplification.** The `request` rule now only handles
+  generic/custom requests (`?kind seq target props`). Subscription
+  commands have moved to `pragma`.
 
 - **Response dispatch.** The `response` rule tries `expand` first
   (which requires a mandatory children body), then falls back to

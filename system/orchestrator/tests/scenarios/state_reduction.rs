@@ -30,7 +30,7 @@ async fn create_patch_replay() {
     assert_no_message(&mut compositor_rx);
 
     // Step 3: Compositor observes view.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 4: Resync should deliver a single reduced upsert.
     let s = recv_byo_raw(&mut compositor_rx);
@@ -101,7 +101,7 @@ async fn create_destroy_replay() {
     send_byo(&mut router, pid(1), "-view b").await;
 
     // Step 3: Compositor observes view.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 4: Resync should deliver survivors a and c.
     let s = recv_byo_raw(&mut compositor_rx);
@@ -171,7 +171,7 @@ async fn patch_removes_prop_replay() {
     send_byo(&mut router, pid(1), "@view sidebar ~tooltip").await;
 
     // Step 3: Compositor observes view.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 4: Resync should deliver view without tooltip.
     let s = recv_byo_raw(&mut compositor_rx);
@@ -248,7 +248,7 @@ async fn children_preserved_replay() {
     send_byo(&mut router, pid(1), "@view root class=\"p-8\"").await;
 
     // Step 3: Compositor observes view.
-    send_byo(&mut router, pid(2), "?observe 0 view").await;
+    send_byo(&mut router, pid(2), "#observe view").await;
 
     // Step 4: Resync should deliver the full tree.
     let s = recv_byo_raw(&mut compositor_rx);
@@ -349,7 +349,7 @@ async fn daemon_replay_reduced() {
     assert_no_message(&mut controls_rx);
 
     // Step 3: Controls claims button.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 4: Controls should receive ?expand with fully reduced state.
     // The replay format from handle_claim is the reduced command with `+`

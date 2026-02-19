@@ -1,13 +1,15 @@
 //! BYO compositor plugin — registers resources, events, and systems.
 
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 
 use crate::commands;
 use crate::events;
 use crate::id_map::IdMap;
-use crate::io::{self, ByoBatch};
+use crate::io::{self, ByoBatch, TtyInput};
 use crate::style;
 use crate::transition;
+use crate::tty;
 
 /// Conversion factor from protocol pixel coordinates to 3D world units (meters).
 /// Computed from the assumed logical PPI: `world_scale = 1.0 / (ppi * 39.3701)`.
@@ -21,10 +23,20 @@ impl Plugin for ByoPlugin {
         app.init_resource::<IdMap>()
             .init_resource::<events::observers::PointerEnterState>()
             .add_message::<ByoBatch>()
-            .add_systems(Startup, (io::setup_io, setup_engine).chain())
+            .add_message::<TtyInput>()
+            .add_systems(
+                Startup,
+                (io::setup_io, setup_engine, tty::setup_root_tty).chain(),
+            )
             .add_systems(
                 PreUpdate,
-                (io::drain_commands, commands::process_commands).chain(),
+                (
+                    io::drain_commands,
+                    io::drain_tty_input,
+                    commands::process_commands,
+                    tty::feed_tty_input,
+                )
+                    .chain(),
             )
             .add_systems(
                 PostUpdate,
@@ -35,6 +47,7 @@ impl Plugin for ByoPlugin {
                     style::reconcile_views,
                     style::reconcile_view_transforms,
                     style::reconcile_text,
+                    style::reconcile_tty_style,
                     style::reconcile_windows,
                     style::reconcile_layers,
                     style::reconcile_view_picking,
@@ -42,8 +55,12 @@ impl Plugin for ByoPlugin {
                     style::reconcile_layer_picking,
                     style::reconcile_window_picking,
                     style::reorder_children,
+                    tty::resize_tty,
+                    tty::reconcile_tty,
+                    ApplyDeferred,
                 )
-                    .chain(),
+                    .chain()
+                    .before(UiSystems::Prepare),
             )
             .add_systems(
                 Update,

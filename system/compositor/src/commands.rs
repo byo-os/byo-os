@@ -12,12 +12,14 @@ use crate::io::ByoBatch;
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
+use crate::props::tty::TtyProps;
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::{LayerRender, spawn_layer_render};
 use crate::render::window::WindowRender;
 use crate::transition::config::TransitionConfig;
 use crate::transition::state::ActiveTransitions;
+use crate::tty::TtyState;
 
 /// PreUpdate system: processes BYO batches and applies them to the ECS.
 #[allow(clippy::too_many_arguments)]
@@ -32,6 +34,7 @@ pub fn process_commands(
     mut texts: Query<&mut TextProps>,
     mut layers: Query<&mut LayerProps>,
     mut windows: Query<&mut WindowProps>,
+    mut ttys: Query<&mut TtyProps>,
     layer_renders: Query<&LayerRender>,
     primary_window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     world_scale: Res<WorldScale>,
@@ -80,6 +83,11 @@ pub fn process_commands(
                             "window" => {
                                 if let Ok(mut wp) = windows.get_mut(existing) {
                                     *wp = WindowProps::from_props(props);
+                                }
+                            }
+                            "tty" => {
+                                if let Ok(mut tp) = ttys.get_mut(existing) {
+                                    *tp = TtyProps::from_props(props);
                                 }
                             }
                             _ => {}
@@ -145,6 +153,11 @@ pub fn process_commands(
                             "window" => {
                                 if let Ok(mut wp) = windows.get_mut(entity) {
                                     wp.apply_props(props);
+                                }
+                            }
+                            "tty" => {
+                                if let Ok(mut tp) = ttys.get_mut(entity) {
+                                    tp.apply_props(props);
                                 }
                             }
                             _ => {}
@@ -322,6 +335,31 @@ fn spawn_entity(
                 ActiveTransitions::default(),
             ));
             if let Some(p) = parent {
+                ec.insert(ChildOf(p));
+            }
+            ec.id()
+        }
+        "tty" => {
+            let tp = TtyProps::from_props(props);
+            let resolved_tty = crate::style::resolve_tty_props(&tp);
+            let state = TtyState::new(80, 24, resolved_tty.scrollback as usize);
+            let resolved = resolve_parent(parent, layer_renders, pending_layer_ui_roots);
+            let mut ec = commands.spawn((
+                ByoTty,
+                tp,
+                state,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    overflow: Overflow::clip(),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Start,
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor::default(),
+            ));
+            if let Some(p) = resolved {
                 ec.insert(ChildOf(p));
             }
             ec.id()

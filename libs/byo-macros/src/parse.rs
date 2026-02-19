@@ -169,7 +169,7 @@ impl Parser {
                 let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                 return match inner.first() {
                     Some(TokenTree::Punct(p)) => {
-                        matches!(p.as_char(), '+' | '-' | '@' | '!' | '?' | '.')
+                        matches!(p.as_char(), '+' | '-' | '@' | '!' | '#' | '?' | '.')
                     }
                     Some(TokenTree::Ident(id)) => id == "if" || id == "for",
                     _ => false,
@@ -319,6 +319,7 @@ impl Parser {
                 || self.peek_punct('-')
                 || self.peek_punct('@')
                 || self.peek_punct('!')
+                || self.peek_punct('#')
                 || self.peek_punct('?')
                 || self.peek_punct('.')
             {
@@ -559,7 +560,12 @@ impl Parser {
             return self.parse_event_command();
         }
 
-        // `?` — request (sub, unsub, expand, custom)
+        // `#` — pragma (claim, unclaim, observe, unobserve, redirect, unredirect)
+        if self.eat_punct('#') {
+            return self.parse_pragma_command();
+        }
+
+        // `?` — request (expand, custom)
         if self.eat_punct('?') {
             return self.parse_request_command();
         }
@@ -570,7 +576,7 @@ impl Parser {
         }
 
         Err(format!(
-            "expected command (+, -, @, !, ?, ., if, for), found {:?}",
+            "expected command (+, -, @, !, #, ?, ., if, for), found {:?}",
             self.peek()
         ))
     }
@@ -605,30 +611,63 @@ impl Parser {
         })
     }
 
-    /// Parse a request command after the `?` has been consumed.
-    fn parse_request_command(&mut self) -> Result<IrCommand, String> {
-        // claim/unclaim/observe/unobserve: ?claim seq type[,type,...], etc.
+    /// Parse a pragma command after the `#` has been consumed.
+    fn parse_pragma_command(&mut self) -> Result<IrCommand, String> {
+        // claim/unclaim/observe/unobserve: #claim type[,type,...], etc.
         if self.peek_keyword("claim")
             || self.peek_keyword("unclaim")
             || self.peek_keyword("observe")
             || self.peek_keyword("unobserve")
         {
-            let kind_str = self.expect_ident("expected request kind")?;
+            let kind_str = self.expect_ident("expected pragma kind")?;
             let kind = IrValue::Literal(kind_str);
-            let seq = self.parse_seq()?;
             let mut targets = vec![self.parse_type()?];
             while self.peek_punct(',') {
                 self.pos += 1; // consume ','
                 targets.push(self.parse_type()?);
             }
-            return Ok(IrCommand::Request {
-                kind,
-                seq,
-                targets,
-                props: Vec::new(),
+            return Ok(IrCommand::Pragma { kind, targets });
+        }
+
+        // redirect: #redirect target (accepts `_` for discard)
+        if self.peek_keyword("redirect") {
+            self.pos += 1;
+            let target = self.parse_id()?;
+            return Ok(IrCommand::Pragma {
+                kind: IrValue::Literal("redirect".to_string()),
+                targets: vec![target],
             });
         }
 
+        // unredirect: #unredirect (no targets)
+        if self.peek_keyword("unredirect") {
+            self.pos += 1;
+            return Ok(IrCommand::Pragma {
+                kind: IrValue::Literal("unredirect".to_string()),
+                targets: Vec::new(),
+            });
+        }
+
+        // Generic pragma: #kind targets...
+        let kind = self.parse_type()?;
+        let mut targets = Vec::new();
+        while matches!(
+            self.peek(),
+            Some(TokenTree::Ident(_)) | Some(TokenTree::Literal(_)) | Some(TokenTree::Group(_))
+        ) && !self.peek_keyword("if")
+            && !self.peek_keyword("for")
+        {
+            targets.push(self.parse_type()?);
+            if !self.peek_punct(',') {
+                break;
+            }
+            self.pos += 1; // consume ','
+        }
+        Ok(IrCommand::Pragma { kind, targets })
+    }
+
+    /// Parse a request command after the `?` has been consumed.
+    fn parse_request_command(&mut self) -> Result<IrCommand, String> {
         // Generic request: ?kind seq target props...
         let kind = self.parse_type()?;
         let seq = self.parse_seq()?;
@@ -814,86 +853,77 @@ mod tests {
         }
     }
 
+    /// Helper: parse from string (needed for `#` pragma syntax since `quote!`
+    /// uses `#` for interpolation).
+    fn parse_str(s: &str) -> Result<Vec<IrCommand>, String> {
+        let input: TokenStream = s.parse().expect("valid token stream");
+        parse(input, false)
+    }
+
     #[test]
     fn parse_claim_unclaim() {
-        let input = quote! { ?claim 0 button ?unclaim 1 slider };
-        let cmds = parse(input, false).unwrap();
+        let cmds = parse_str("# claim button # unclaim slider").unwrap();
         assert_eq!(cmds.len(), 2);
         match &cmds[0] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
-                seq: IrValue::Literal(s),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "claim");
-                assert_eq!(s, "0");
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(&targets[0], IrValue::Literal(t) if t == "button"));
             }
-            _ => panic!("expected Claim request"),
+            _ => panic!("expected Claim pragma"),
         }
         match &cmds[1] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
-                seq: IrValue::Literal(s),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "unclaim");
-                assert_eq!(s, "1");
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(&targets[0], IrValue::Literal(t) if t == "slider"));
             }
-            _ => panic!("expected Unclaim request"),
+            _ => panic!("expected Unclaim pragma"),
         }
     }
 
     #[test]
     fn parse_observe_unobserve() {
-        let input = quote! { ?observe 0 view ?unobserve 1 text };
-        let cmds = parse(input, false).unwrap();
+        let cmds = parse_str("# observe view # unobserve text").unwrap();
         assert_eq!(cmds.len(), 2);
         match &cmds[0] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
-                seq: IrValue::Literal(s),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "observe");
-                assert_eq!(s, "0");
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(&targets[0], IrValue::Literal(t) if t == "view"));
             }
-            _ => panic!("expected Observe request"),
+            _ => panic!("expected Observe pragma"),
         }
         match &cmds[1] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
-                seq: IrValue::Literal(s),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "unobserve");
-                assert_eq!(s, "1");
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(&targets[0], IrValue::Literal(t) if t == "text"));
             }
-            _ => panic!("expected Unobserve request"),
+            _ => panic!("expected Unobserve pragma"),
         }
     }
 
     #[test]
     fn parse_multi_type_observe() {
-        let input = quote! { ?observe 0 view, text, layer };
-        let cmds = parse(input, false).unwrap();
+        let cmds = parse_str("# observe view, text, layer").unwrap();
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "observe");
                 assert_eq!(targets.len(), 3);
@@ -907,14 +937,12 @@ mod tests {
 
     #[test]
     fn parse_multi_type_claim() {
-        let input = quote! { ?claim 0 button, slider };
-        let cmds = parse(input, false).unwrap();
+        let cmds = parse_str("# claim button, slider").unwrap();
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IrCommand::Request {
+            IrCommand::Pragma {
                 kind: IrValue::Literal(k),
                 targets,
-                ..
             } => {
                 assert_eq!(k, "claim");
                 assert_eq!(targets.len(), 2);
@@ -922,6 +950,39 @@ mod tests {
                 assert!(matches!(&targets[1], IrValue::Literal(t) if t == "slider"));
             }
             _ => panic!("expected multi-type Claim"),
+        }
+    }
+
+    #[test]
+    fn parse_redirect() {
+        let cmds = parse_str("# redirect term").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Pragma {
+                kind: IrValue::Literal(k),
+                targets,
+            } => {
+                assert_eq!(k, "redirect");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "term"));
+            }
+            _ => panic!("expected Redirect pragma"),
+        }
+    }
+
+    #[test]
+    fn parse_unredirect() {
+        let cmds = parse_str("# unredirect").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Pragma {
+                kind: IrValue::Literal(k),
+                targets,
+            } => {
+                assert_eq!(k, "unredirect");
+                assert!(targets.is_empty());
+            }
+            _ => panic!("expected Unredirect pragma"),
         }
     }
 

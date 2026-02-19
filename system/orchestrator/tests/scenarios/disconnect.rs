@@ -21,7 +21,7 @@ async fn app_disconnect_cleans_state() {
     router.add_process(app);
 
     // Step 1: Compositor observes view.
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // Step 2: App sends a view upsert.
     send_byo(&mut router, pid(2), "+view sidebar class=\"w-64\"").await;
@@ -62,7 +62,7 @@ async fn app_disconnect_cleans_state() {
     // Step 5: Register a NEW observer. State was cleaned, so no resync.
     let (a11y, mut a11y_rx) = mock_process(3, "a11y");
     router.add_process(a11y);
-    send_byo(&mut router, pid(3), "?observe 0 view").await;
+    send_byo(&mut router, pid(3), "#observe view").await;
 
     assert_no_message(&mut a11y_rx);
 }
@@ -87,10 +87,10 @@ async fn daemon_disconnect_removes_claims() {
     router.add_process(app);
 
     // Step 1: Compositor observes view and button.
-    send_byo(&mut router, pid(1), "?observe 0 view,button").await;
+    send_byo(&mut router, pid(1), "#observe view,button").await;
 
     // Step 2: Controls daemon claims button.
-    send_byo(&mut router, pid(2), "?claim 0 button").await;
+    send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 3: Controls disconnects.
     router
@@ -139,8 +139,8 @@ async fn app_disconnect_with_expansion_notifies_observers() {
     router.add_process(app);
     router.add_process(controls);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(3), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(3), "#claim button").await;
 
     // App creates a button (triggers expansion).
     send_byo(&mut router, pid(2), "+button save label=Save").await;
@@ -237,8 +237,8 @@ async fn daemon_disconnect_removes_expansion_from_compositor() {
     router.add_process(app);
     router.add_process(controls);
 
-    send_byo(&mut router, pid(1), "?observe 0 view,text").await;
-    send_byo(&mut router, pid(3), "?claim 0 button").await;
+    send_byo(&mut router, pid(1), "#observe view,text").await;
+    send_byo(&mut router, pid(3), "#claim button").await;
 
     // App creates a button (triggers expansion).
     send_byo(&mut router, pid(2), "+button save label=Save").await;
@@ -287,7 +287,7 @@ async fn daemon_disconnect_removes_expansion_from_compositor() {
     // receive a re-expand for the app's existing button.
     let (controls2, mut controls2_rx) = mock_process(4, "controls2");
     router.add_process(controls2);
-    send_byo(&mut router, pid(4), "?claim 0 button").await;
+    send_byo(&mut router, pid(4), "#claim button").await;
 
     let replay_msg = recv_byo_raw(&mut controls2_rx);
     assert!(
@@ -307,7 +307,7 @@ async fn disconnect_multiple_objects() {
     router.add_process(compositor);
     router.add_process(app);
 
-    send_byo(&mut router, pid(1), "?observe 0 view").await;
+    send_byo(&mut router, pid(1), "#observe view").await;
 
     // App creates multiple views.
     send_byo(

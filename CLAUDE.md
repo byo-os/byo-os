@@ -112,30 +112,27 @@ ACK carries a handling disposition for event bubbling:
 - `handled=true` — event was consumed, stop propagation
 - `handled=false` — event was not handled, bubble to parent
 
-#### Requests and responses
+#### Pragmas
 
-| Op  | Form                   | Meaning                             |
-|-----|------------------------|-------------------------------------|
-| `?` | `?claim seq type`      | Claim ownership of an object type   |
-| `?` | `?unclaim seq type`    | Release claim on an object type     |
-| `?` | `?observe seq type`    | Observe final output for a type     |
-| `?` | `?unobserve seq type`  | Stop observing a type               |
-| `?` | `?expand seq id`       | Request daemon expansion            |
-| `?` | `?kind seq target`     | Generic/custom request              |
-| `.` | `.expand seq { body }` | Expansion response with body        |
-| `.` | `.kind seq props`      | Generic/custom response             |
+| Op  | Form                  | Meaning                                |
+|-----|-----------------------|----------------------------------------|
+| `#` | `#claim type,...`     | Claim ownership of object type(s)      |
+| `#` | `#unclaim type,...`   | Release claim on object type(s)        |
+| `#` | `#observe type,...`   | Observe final output for type(s)       |
+| `#` | `#unobserve type,...` | Stop observing type(s)                 |
+| `#` | `#redirect id`        | Route passthrough to named tty         |
+| `#` | `#unredirect`         | Restore default passthrough (root tty) |
 
-Requests (`?`) and responses (`.`) handle system commands and
-daemon interactions. `?claim`/`?unclaim`/`?observe`/`?unobserve`
-are fire-and-forget (no response needed). `?expand` expects a
-`.expand` response from the daemon.
+Pragmas are fire-and-forget stream directives — they have no
+sequence numbers and no responses. They manage subscriptions and
+passthrough routing.
 
 **Two subscription modes:**
 
 | Command | Mode | Meaning | Counterpart |
 |---------|------|---------|-------------|
-| `?claim seq type` | Expand | "I own this type — send me `?expand`" | `?unclaim seq type` |
-| `?observe seq type` | Consume | "I consume final output for this type" | `?unobserve seq type` |
+| `#claim type` | Expand | "I own this type — send me `?expand`" | `#unclaim type` |
+| `#observe type` | Consume | "I consume final output for this type" | `#unobserve type` |
 
 **Claim** is singular — only one daemon can claim a type at a time.
 A claim means the daemon receives:
@@ -145,16 +142,33 @@ A claim means the daemon receives:
 
 **Observe** is plural — multiple processes can observe the same type.
 Observers receive the final expanded output. Use cases:
-- Compositor observes `view`, `text`, `layer` → renders them
+- Compositor observes `view`, `text`, `layer`, `tty` → renders them
 - Accessibility service observes `view`, `text` → builds a11y tree
+
+**Passthrough routing:** `#redirect id` routes passthrough bytes
+(plain text/VT100 output outside APC sequences) to the named tty
+entity. `#redirect _` discards passthrough. `#unredirect` restores
+routing to the implicit root tty (`/`).
 
 For example, the controls daemon at startup:
 ```
-\e_B ?claim 0 button ?claim 1 slider ?claim 2 checkbox \e\
+\e_B #claim button #claim slider #claim checkbox \e\
 ```
 
 After this, any `+button` from any app triggers a `?expand` to
 the controls daemon.
+
+#### Requests and responses
+
+| Op  | Form                   | Meaning                             |
+|-----|------------------------|-------------------------------------|
+| `?` | `?expand seq id`       | Request daemon expansion            |
+| `?` | `?kind seq target`     | Generic/custom request              |
+| `.` | `.expand seq { body }` | Expansion response with body        |
+| `.` | `.kind seq props`      | Generic/custom response             |
+
+Requests (`?`) and responses (`.`) handle daemon interactions.
+`?expand` expects a `.expand` response from the daemon.
 
 `?expand` carries the qualified ID and original props (e.g.
 `?expand 0 notes-app:save kind=button label="Save"`). The daemon
@@ -171,7 +185,7 @@ commands:
 \e\
 ```
 
-#### Reserved event and request names
+#### Reserved event, pragma, and request names
 
 Unqualified names are reserved for BYO/OS built-ins.
 Third-party events/requests must use dot-qualified names (same rule
@@ -188,11 +202,15 @@ the protocol extensible.
 **Event responses (`!`):**
 - `ack` — acknowledge a received event
 
-**Requests (`?`):**
+**Pragmas (`#`):**
 - `claim` — claim ownership of an object type
 - `unclaim` — release claim on an object type
 - `observe` — observe final output for a type
 - `unobserve` — stop observing a type
+- `redirect` — route passthrough to a named tty
+- `unredirect` — restore default passthrough routing
+
+**Requests (`?`):**
 - `expand` — request daemon expansion
 
 **Responses (`.`):**
@@ -280,7 +298,7 @@ equivalent of a single `+` with the final props. This enables:
 **Daemon crash recovery:**
 1. Daemon disconnects — orchestrator removes all `daemon:*` nodes
    from the compositor
-2. Daemon restarts, re-claims types via `?claim`
+2. Daemon restarts, re-claims types via `#claim`
 3. Orchestrator replays the reduced state for all objects of the
    daemon's claimed types as `?expand` requests
 4. Daemon re-expands everything, compositor gets fresh subtrees
@@ -435,7 +453,7 @@ App ACKs:
 Daemon claims (fire-and-forget, no response needed):
 
 ```
-\e_B ?claim 0 button ?claim 1 slider ?claim 2 checkbox \e\
+\e_B #claim button #claim slider #claim checkbox \e\
 ```
 
 Expansion request (orchestrator → daemon):
