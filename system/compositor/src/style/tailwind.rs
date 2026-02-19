@@ -2214,4 +2214,196 @@ mod tests {
         assert_eq!(s.clearcoat, Some(0.5));
         assert_eq!(s.ior, Some(1.5));
     }
+
+    // ── Format classes ──────────────────────────────────────────────
+
+    #[test]
+    fn format_rgba8unorm_srgb() {
+        let s = transform_from("format-rgba8unorm-srgb");
+        assert!(matches!(s.format, Some(ByoTextureFormat::Rgba8UnormSrgb)));
+    }
+
+    #[test]
+    fn format_rgba8unorm() {
+        let s = transform_from("format-rgba8unorm");
+        assert!(matches!(s.format, Some(ByoTextureFormat::Rgba8Unorm)));
+    }
+
+    #[test]
+    fn format_rgb10a2unorm() {
+        let s = transform_from("format-rgb10a2unorm");
+        assert!(matches!(s.format, Some(ByoTextureFormat::Rgb10a2Unorm)));
+    }
+
+    #[test]
+    fn format_rgba16float() {
+        let s = transform_from("format-rgba16float");
+        assert!(matches!(s.format, Some(ByoTextureFormat::Rgba16Float)));
+    }
+
+    #[test]
+    fn format_rgba32float() {
+        let s = transform_from("format-rgba32float");
+        assert!(matches!(s.format, Some(ByoTextureFormat::Rgba32Float)));
+    }
+
+    #[test]
+    fn format_default_none() {
+        let s = transform_from("lit alpha-blend");
+        assert!(s.format.is_none());
+    }
+
+    // ── Transition classes (view-level) ─────────────────────────────
+
+    #[test]
+    fn transition_default() {
+        let p = props_from("transition");
+        assert!(p.tw_transition_property.is_some());
+        assert_eq!(p.tw_transition_duration, Some(0.15));
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::SmoothStep));
+    }
+
+    #[test]
+    fn transition_all() {
+        let p = props_from("transition-all");
+        assert!(matches!(
+            p.tw_transition_property,
+            Some(TransitionProperty::All)
+        ));
+        assert_eq!(p.tw_transition_duration, Some(0.15));
+    }
+
+    #[test]
+    fn transition_colors() {
+        let p = props_from("transition-colors");
+        assert!(p.tw_transition_property.is_some());
+        assert_eq!(p.tw_transition_duration, Some(0.15));
+    }
+
+    #[test]
+    fn transition_opacity() {
+        let p = props_from("transition-opacity");
+        assert!(p.tw_transition_property.is_some());
+    }
+
+    #[test]
+    fn transition_none() {
+        let p = props_from("transition transition-none");
+        assert!(p.tw_transition_property.is_none());
+        assert!(p.tw_transition_duration.is_none());
+        assert!(p.tw_transition_easing.is_none());
+        assert!(p.tw_transition_delay.is_none());
+    }
+
+    #[test]
+    fn ease_linear() {
+        let p = props_from("transition ease-linear");
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::Linear));
+    }
+
+    #[test]
+    fn ease_in() {
+        let p = props_from("transition ease-in");
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::CubicIn));
+    }
+
+    #[test]
+    fn ease_out() {
+        let p = props_from("transition ease-out");
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::CubicOut));
+    }
+
+    #[test]
+    fn ease_in_out() {
+        let p = props_from("transition ease-in-out");
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::CubicInOut));
+    }
+
+    #[test]
+    fn duration_150() {
+        let p = props_from("transition duration-150");
+        assert_eq!(p.tw_transition_duration, Some(0.15));
+    }
+
+    #[test]
+    fn duration_300() {
+        let p = props_from("transition duration-300");
+        assert_eq!(p.tw_transition_duration, Some(0.3));
+    }
+
+    #[test]
+    fn duration_1000() {
+        let p = props_from("transition duration-1000");
+        assert_eq!(p.tw_transition_duration, Some(1.0));
+    }
+
+    #[test]
+    fn duration_arbitrary_ms() {
+        let p = props_from("transition duration-[200ms]");
+        assert_eq!(p.tw_transition_duration, Some(0.2));
+    }
+
+    #[test]
+    fn duration_arbitrary_s() {
+        let p = props_from("transition duration-[0.5s]");
+        assert_eq!(p.tw_transition_duration, Some(0.5));
+    }
+
+    #[test]
+    fn delay_100() {
+        let p = props_from("transition delay-100");
+        assert_eq!(p.tw_transition_delay, Some(0.1));
+    }
+
+    #[test]
+    fn delay_arbitrary_ms() {
+        let p = props_from("transition delay-[500ms]");
+        assert_eq!(p.tw_transition_delay, Some(0.5));
+    }
+
+    #[test]
+    fn transition_combined() {
+        let p = props_from("transition-all duration-500 ease-out delay-100");
+        assert!(matches!(
+            p.tw_transition_property,
+            Some(TransitionProperty::All)
+        ));
+        assert_eq!(p.tw_transition_duration, Some(0.5));
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::CubicOut));
+        assert_eq!(p.tw_transition_delay, Some(0.1));
+    }
+
+    // ── Transition classes (transform/layer-level) ──────────────────
+
+    #[test]
+    fn transform_transition_default() {
+        let s = transform_from("transition lit");
+        assert!(s.tw_transition_property.is_some());
+        assert_eq!(s.tw_transition_duration, Some(0.15));
+        assert_eq!(s.tw_transition_easing, Some(EaseFn::SmoothStep));
+    }
+
+    #[test]
+    fn transform_transition_all_with_duration() {
+        let s = transform_from("transition-all duration-700 ease-in");
+        assert!(matches!(
+            s.tw_transition_property,
+            Some(TransitionProperty::All)
+        ));
+        assert_eq!(s.tw_transition_duration, Some(0.7));
+        assert_eq!(s.tw_transition_easing, Some(EaseFn::CubicIn));
+    }
+
+    #[test]
+    fn transform_transition_none_clears() {
+        let s = transform_from("transition-all duration-500 transition-none");
+        assert!(s.tw_transition_property.is_none());
+        assert!(s.tw_transition_duration.is_none());
+    }
+
+    #[test]
+    fn transform_delay() {
+        let s = transform_from("transition delay-[250ms]");
+        assert_eq!(s.tw_transition_delay, Some(0.25));
+    }
 }
