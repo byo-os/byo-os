@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn parse_empty() {
         let subs = EventSubscriptions::parse("");
-        assert!(subs.is_empty());
+        assert!(subs.subs.is_empty());
     }
 
     #[test]
@@ -193,14 +193,15 @@ mod tests {
     fn subscribes_in_phase() {
         let subs = EventSubscriptions::parse("pointerdown capture bubble, pointermove capture");
 
-        assert!(subs.subscribes_in_phase(&EventKind::PointerDown, true));
-        assert!(subs.subscribes_in_phase(&EventKind::PointerDown, false));
+        let down = subs.get(&EventKind::PointerDown).unwrap();
+        assert!(down.phase.includes_capture());
+        assert!(down.phase.includes_bubble());
 
-        assert!(subs.subscribes_in_phase(&EventKind::PointerMove, true));
-        assert!(!subs.subscribes_in_phase(&EventKind::PointerMove, false));
+        let mv = subs.get(&EventKind::PointerMove).unwrap();
+        assert!(mv.phase.includes_capture());
+        assert!(!mv.phase.includes_bubble());
 
-        assert!(!subs.subscribes_in_phase(&EventKind::Click, true));
-        assert!(!subs.subscribes_in_phase(&EventKind::Click, false));
+        assert!(subs.get(&EventKind::Click).is_none());
     }
 
     #[test]
@@ -214,7 +215,7 @@ mod tests {
     #[test]
     fn default_is_empty() {
         let subs = EventSubscriptions::default();
-        assert!(subs.is_empty());
+        assert!(subs.subs.is_empty());
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::style::color::parse_color;
 use crate::style::palette::tailwind_color;
 use crate::transition::config::{
     EaseFn, TransitionProperty, tw_transition_colors, tw_transition_default, tw_transition_opacity,
+    tw_transition_transform,
 };
 
 /// Apply all Tailwind utility classes in `class_str` to `props`.
@@ -1343,6 +1344,16 @@ fn apply_transition_class(
             }
             return;
         }
+        "transition-transform" => {
+            *property = Some(tw_transition_transform());
+            if duration.is_none() {
+                *duration = Some(0.15);
+            }
+            if easing.is_none() {
+                *easing = Some(EaseFn::SmoothStep);
+            }
+            return;
+        }
         "transition-none" => {
             *property = None;
             *duration = None;
@@ -2398,6 +2409,14 @@ mod tests {
     fn transition_opacity() {
         let p = props_from("transition-opacity");
         assert!(p.tw_transition_property.is_some());
+    }
+
+    #[test]
+    fn transition_transform() {
+        let p = props_from("transition-transform");
+        assert!(p.tw_transition_property.is_some());
+        assert_eq!(p.tw_transition_duration, Some(0.15));
+        assert_eq!(p.tw_transition_easing, Some(EaseFn::SmoothStep));
     }
 
     #[test]

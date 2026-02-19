@@ -498,6 +498,15 @@ pub fn tw_transition_default() -> TransitionProperty {
         AnimatableProp::BackgroundColor,
         AnimatableProp::BorderColor,
         AnimatableProp::Opacity,
+        AnimatableProp::TranslateX,
+        AnimatableProp::TranslateY,
+        AnimatableProp::TranslateZ,
+        AnimatableProp::RotateX,
+        AnimatableProp::RotateY,
+        AnimatableProp::RotateZ,
+        AnimatableProp::Scale,
+        AnimatableProp::ScaleX,
+        AnimatableProp::ScaleY,
     ])
 }
 
@@ -513,6 +522,21 @@ pub fn tw_transition_colors() -> TransitionProperty {
 /// Property list for Tailwind `transition-opacity` class.
 pub fn tw_transition_opacity() -> TransitionProperty {
     TransitionProperty::Properties(vec![AnimatableProp::Opacity])
+}
+
+/// Property list for Tailwind `transition-transform` class (all transform props).
+pub fn tw_transition_transform() -> TransitionProperty {
+    TransitionProperty::Properties(vec![
+        AnimatableProp::TranslateX,
+        AnimatableProp::TranslateY,
+        AnimatableProp::TranslateZ,
+        AnimatableProp::RotateX,
+        AnimatableProp::RotateY,
+        AnimatableProp::RotateZ,
+        AnimatableProp::Scale,
+        AnimatableProp::ScaleX,
+        AnimatableProp::ScaleY,
+    ])
 }
 
 // ---------------------------------------------------------------------------
