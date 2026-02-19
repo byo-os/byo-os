@@ -55,33 +55,105 @@ impl AnimatableValue {
     }
 }
 
+/// The internal animation state of a transition.
+#[derive(Debug, Clone)]
+pub enum TransitionState {
+    /// Standard timed transition: interpolates from→to over a fixed duration.
+    Eased {
+        from: AnimatableValue,
+        to: AnimatableValue,
+        duration_secs: f32,
+        delay_secs: f32,
+        easing: EaseFn,
+        elapsed: f32,
+    },
+    /// Velocity-based damped spring (ODE integration per frame).
+    /// Supports retargeting: when target changes mid-animation, velocity is preserved.
+    PhysicsSpring {
+        current: f32,
+        velocity: f32,
+        target: f32,
+        stiffness: f32,
+        damping: f32,
+    },
+}
+
 /// A single active transition being animated.
 #[derive(Debug, Clone)]
 pub struct ActiveTransition {
     pub prop: AnimatableProp,
-    pub from: AnimatableValue,
-    pub to: AnimatableValue,
-    pub duration_secs: f32,
-    pub delay_secs: f32,
-    pub easing: EaseFn,
-    pub elapsed: f32,
+    pub state: TransitionState,
 }
 
 impl ActiveTransition {
+    /// Advance the animation by `delta` seconds.
+    pub fn tick(&mut self, delta: f32) {
+        match &mut self.state {
+            TransitionState::Eased { elapsed, .. } => {
+                *elapsed += delta;
+            }
+            TransitionState::PhysicsSpring {
+                current,
+                velocity,
+                target,
+                stiffness,
+                damping,
+            } => {
+                // Semi-implicit Euler (symplectic — stable and simple)
+                let accel = -*stiffness * (*current - *target) - *damping * *velocity;
+                *velocity += accel * delta;
+                *current += *velocity * delta;
+            }
+        }
+    }
+
     /// Compute the current interpolated value.
     pub fn current_value(&self) -> AnimatableValue {
-        let progress = ((self.elapsed - self.delay_secs) / self.duration_secs.max(f32::EPSILON))
-            .clamp(0.0, 1.0);
-        if progress <= 0.0 {
-            return self.from.clone();
+        match &self.state {
+            TransitionState::Eased {
+                from,
+                to,
+                duration_secs,
+                delay_secs,
+                easing,
+                elapsed,
+            } => {
+                let progress =
+                    ((elapsed - delay_secs) / duration_secs.max(f32::EPSILON)).clamp(0.0, 1.0);
+                if progress <= 0.0 {
+                    return from.clone();
+                }
+                let eased = easing.sample(progress);
+                from.interpolate(to, eased)
+            }
+            TransitionState::PhysicsSpring { current, .. } => AnimatableValue::F32(*current),
         }
-        let eased = self.easing.sample(progress);
-        self.from.interpolate(&self.to, eased)
+    }
+
+    /// The final/target value this transition is animating towards.
+    pub fn final_value(&self) -> AnimatableValue {
+        match &self.state {
+            TransitionState::Eased { to, .. } => to.clone(),
+            TransitionState::PhysicsSpring { target, .. } => AnimatableValue::F32(*target),
+        }
     }
 
     /// Whether this transition has completed.
     pub fn is_complete(&self) -> bool {
-        self.elapsed >= self.delay_secs + self.duration_secs
+        match &self.state {
+            TransitionState::Eased {
+                duration_secs,
+                delay_secs,
+                elapsed,
+                ..
+            } => *elapsed >= *delay_secs + *duration_secs,
+            TransitionState::PhysicsSpring {
+                current,
+                velocity,
+                target,
+                ..
+            } => (*current - *target).abs() < 0.001 && velocity.abs() < 0.01,
+        }
     }
 }
 
@@ -188,7 +260,7 @@ pub fn color_approx_eq(a: Color, b: Color) -> bool {
         && (a.alpha - b.alpha).abs() < 0.005
 }
 
-/// Insert or update a transition in the list (upsert by prop).
+/// Insert or update a timed (eased) transition in the list (upsert by prop).
 pub fn upsert_transition(
     transitions: &mut Vec<ActiveTransition>,
     prop: AnimatableProp,
@@ -200,17 +272,70 @@ pub fn upsert_transition(
 ) {
     let t = ActiveTransition {
         prop,
-        from,
-        to,
-        duration_secs,
-        delay_secs,
-        easing,
-        elapsed: 0.0,
+        state: TransitionState::Eased {
+            from,
+            to,
+            duration_secs,
+            delay_secs,
+            easing,
+            elapsed: 0.0,
+        },
     };
     if let Some(existing) = transitions.iter_mut().find(|e| e.prop == prop) {
         *existing = t;
     } else {
         transitions.push(t);
+    }
+}
+
+/// Insert or retarget a physics spring transition (upsert by prop).
+///
+/// If an existing physics spring exists for this prop, only the target is updated
+/// (velocity and current position are preserved — this is the key retargeting behavior).
+/// If an eased transition exists, it is replaced with a new spring.
+pub fn upsert_physics_spring(
+    transitions: &mut Vec<ActiveTransition>,
+    prop: AnimatableProp,
+    current_bevy: f32,
+    target: f32,
+    stiffness: f32,
+    damping: f32,
+) {
+    if let Some(existing) = transitions.iter_mut().find(|e| e.prop == prop) {
+        match &mut existing.state {
+            TransitionState::PhysicsSpring {
+                target: t,
+                stiffness: k,
+                damping: d,
+                ..
+            } => {
+                // Retarget: preserve velocity and current position
+                *t = target;
+                *k = stiffness;
+                *d = damping;
+            }
+            _ => {
+                // Replace eased transition with new spring
+                existing.state = TransitionState::PhysicsSpring {
+                    current: current_bevy,
+                    velocity: 0.0,
+                    target,
+                    stiffness,
+                    damping,
+                };
+            }
+        }
+    } else {
+        transitions.push(ActiveTransition {
+            prop,
+            state: TransitionState::PhysicsSpring {
+                current: current_bevy,
+                velocity: 0.0,
+                target,
+                stiffness,
+                damping,
+            },
+        });
     }
 }
 
@@ -280,12 +405,14 @@ mod tests {
     fn active_transition_delay() {
         let t = ActiveTransition {
             prop: AnimatableProp::Width,
-            from: AnimatableValue::F32(0.0),
-            to: AnimatableValue::F32(100.0),
-            duration_secs: 1.0,
-            delay_secs: 0.5,
-            easing: EaseFn::Linear,
-            elapsed: 0.3, // still in delay
+            state: TransitionState::Eased {
+                from: AnimatableValue::F32(0.0),
+                to: AnimatableValue::F32(100.0),
+                duration_secs: 1.0,
+                delay_secs: 0.5,
+                easing: EaseFn::Linear,
+                elapsed: 0.3, // still in delay
+            },
         };
         assert_eq!(t.current_value().as_f32(), Some(0.0));
     }
@@ -294,12 +421,14 @@ mod tests {
     fn active_transition_midway() {
         let t = ActiveTransition {
             prop: AnimatableProp::Width,
-            from: AnimatableValue::F32(0.0),
-            to: AnimatableValue::F32(100.0),
-            duration_secs: 1.0,
-            delay_secs: 0.0,
-            easing: EaseFn::Linear,
-            elapsed: 0.5,
+            state: TransitionState::Eased {
+                from: AnimatableValue::F32(0.0),
+                to: AnimatableValue::F32(100.0),
+                duration_secs: 1.0,
+                delay_secs: 0.0,
+                easing: EaseFn::Linear,
+                elapsed: 0.5,
+            },
         };
         let v = t.current_value().as_f32().unwrap();
         assert!((v - 50.0).abs() < 0.01);
@@ -327,6 +456,175 @@ mod tests {
             EaseFn::CubicOut,
         );
         assert_eq!(transitions.len(), 1);
-        assert_eq!(transitions[0].to.as_f32(), Some(200.0));
+        assert_eq!(transitions[0].final_value().as_f32(), Some(200.0));
+    }
+
+    // --- Physics spring tests ---
+
+    #[test]
+    fn physics_spring_current_value() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::TranslateX,
+            state: TransitionState::PhysicsSpring {
+                current: 50.0,
+                velocity: 10.0,
+                target: 100.0,
+                stiffness: 100.0,
+                damping: 12.0,
+            },
+        };
+        assert_eq!(t.current_value().as_f32(), Some(50.0));
+        assert_eq!(t.final_value().as_f32(), Some(100.0));
+        assert!(!t.is_complete());
+    }
+
+    #[test]
+    fn physics_spring_settled() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::TranslateX,
+            state: TransitionState::PhysicsSpring {
+                current: 100.0005,
+                velocity: 0.005,
+                target: 100.0,
+                stiffness: 100.0,
+                damping: 12.0,
+            },
+        };
+        assert!(t.is_complete());
+    }
+
+    #[test]
+    fn physics_spring_tick_moves_towards_target() {
+        let mut t = ActiveTransition {
+            prop: AnimatableProp::TranslateX,
+            state: TransitionState::PhysicsSpring {
+                current: 0.0,
+                velocity: 0.0,
+                target: 100.0,
+                stiffness: 100.0,
+                damping: 12.0,
+            },
+        };
+        // Tick a few frames
+        for _ in 0..100 {
+            t.tick(1.0 / 60.0);
+        }
+        let v = t.current_value().as_f32().unwrap();
+        // Should be close to target after ~1.67s of simulation
+        assert!(
+            (v - 100.0).abs() < 5.0,
+            "spring should approach target, got {v}"
+        );
+    }
+
+    #[test]
+    fn physics_spring_retarget_preserves_velocity() {
+        let mut transitions = Vec::new();
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::TranslateX,
+            0.0,
+            100.0,
+            100.0,
+            12.0,
+        );
+        assert_eq!(transitions.len(), 1);
+
+        // Simulate a few ticks to build velocity
+        for _ in 0..10 {
+            transitions[0].tick(1.0 / 60.0);
+        }
+        let TransitionState::PhysicsSpring {
+            velocity: vel_before,
+            current: pos_before,
+            ..
+        } = transitions[0].state
+        else {
+            panic!()
+        };
+        assert!(
+            vel_before.abs() > 0.1,
+            "should have velocity, got {vel_before}"
+        );
+
+        // Retarget to a new position
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::TranslateX,
+            pos_before,
+            200.0,
+            100.0,
+            12.0,
+        );
+        assert_eq!(transitions.len(), 1);
+
+        let TransitionState::PhysicsSpring {
+            velocity: vel_after,
+            current: pos_after,
+            target,
+            ..
+        } = transitions[0].state
+        else {
+            panic!()
+        };
+        // Velocity and position should be preserved
+        assert_eq!(vel_after, vel_before);
+        assert_eq!(pos_after, pos_before);
+        // Target should be updated
+        assert_eq!(target, 200.0);
+    }
+
+    #[test]
+    fn upsert_physics_spring_new() {
+        let mut transitions = Vec::new();
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::TranslateX,
+            0.0,
+            100.0,
+            100.0,
+            12.0,
+        );
+        assert_eq!(transitions.len(), 1);
+        let TransitionState::PhysicsSpring {
+            current,
+            velocity,
+            target,
+            ..
+        } = transitions[0].state
+        else {
+            panic!()
+        };
+        assert_eq!(current, 0.0);
+        assert_eq!(velocity, 0.0);
+        assert_eq!(target, 100.0);
+    }
+
+    #[test]
+    fn upsert_physics_spring_replaces_eased() {
+        let mut transitions = Vec::new();
+        upsert_transition(
+            &mut transitions,
+            AnimatableProp::TranslateX,
+            AnimatableValue::F32(0.0),
+            AnimatableValue::F32(50.0),
+            0.3,
+            0.0,
+            EaseFn::Linear,
+        );
+        // Now replace with physics spring
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::TranslateX,
+            25.0,
+            100.0,
+            100.0,
+            12.0,
+        );
+        assert_eq!(transitions.len(), 1);
+        assert!(matches!(
+            transitions[0].state,
+            TransitionState::PhysicsSpring { .. }
+        ));
     }
 }

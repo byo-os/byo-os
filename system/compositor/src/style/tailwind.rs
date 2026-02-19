@@ -1382,6 +1382,34 @@ fn apply_transition_class(
             *easing = Some(EaseFn::spring(50.0, 8.0));
             return;
         }
+        "ease-physics-spring" => {
+            *easing = Some(EaseFn::PhysicsSpring {
+                stiffness: 100.0,
+                damping: 12.0,
+            });
+            return;
+        }
+        "ease-physics-spring-bouncy" => {
+            *easing = Some(EaseFn::PhysicsSpring {
+                stiffness: 80.0,
+                damping: 6.0,
+            });
+            return;
+        }
+        "ease-physics-spring-stiff" => {
+            *easing = Some(EaseFn::PhysicsSpring {
+                stiffness: 300.0,
+                damping: 24.0,
+            });
+            return;
+        }
+        "ease-physics-spring-soft" => {
+            *easing = Some(EaseFn::PhysicsSpring {
+                stiffness: 50.0,
+                damping: 8.0,
+            });
+            return;
+        }
         _ => {}
     }
 
@@ -2406,6 +2434,38 @@ mod tests {
     }
 
     #[test]
+    fn ease_physics_spring() {
+        let p = props_from("transition-all ease-physics-spring");
+        assert!(
+            matches!(p.tw_transition_easing, Some(EaseFn::PhysicsSpring { stiffness, damping }) if (stiffness - 100.0).abs() < 0.01 && (damping - 12.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn ease_physics_spring_bouncy() {
+        let p = props_from("transition-all ease-physics-spring-bouncy");
+        assert!(
+            matches!(p.tw_transition_easing, Some(EaseFn::PhysicsSpring { stiffness, damping }) if (stiffness - 80.0).abs() < 0.01 && (damping - 6.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn ease_physics_spring_stiff() {
+        let p = props_from("transition-all ease-physics-spring-stiff");
+        assert!(
+            matches!(p.tw_transition_easing, Some(EaseFn::PhysicsSpring { stiffness, damping }) if (stiffness - 300.0).abs() < 0.01 && (damping - 24.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn ease_physics_spring_soft() {
+        let p = props_from("transition-all ease-physics-spring-soft");
+        assert!(
+            matches!(p.tw_transition_easing, Some(EaseFn::PhysicsSpring { stiffness, damping }) if (stiffness - 50.0).abs() < 0.01 && (damping - 8.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
     fn duration_150() {
         let p = props_from("transition duration-150");
         assert_eq!(p.tw_transition_duration, Some(0.15));
@@ -2491,6 +2551,15 @@ mod tests {
     fn transform_delay() {
         let s = transform_from("transition delay-[250ms]");
         assert_eq!(s.tw_transition_delay, Some(0.25));
+    }
+
+    #[test]
+    fn transform_physics_spring() {
+        let s = transform_from("transition-all ease-physics-spring");
+        assert!(matches!(
+            s.tw_transition_easing,
+            Some(EaseFn::PhysicsSpring { .. })
+        ));
     }
 
     // ── Width / Height classes ───────────────────────────────────────

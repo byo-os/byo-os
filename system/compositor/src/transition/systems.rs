@@ -441,10 +441,31 @@ pub fn handle_view_transitions(
         if transitions.len() > count_before {
             started_new = true;
             for t in &transitions[count_before..] {
-                debug!(
-                    "transition started: {:?} from {:?} to {:?} over {:.3}s",
-                    t.prop, t.from, t.to, t.duration_secs
-                );
+                match &t.state {
+                    TransitionState::Eased {
+                        from,
+                        to,
+                        duration_secs,
+                        ..
+                    } => {
+                        debug!(
+                            "transition started: {:?} from {:?} to {:?} over {:.3}s",
+                            t.prop, from, to, duration_secs
+                        );
+                    }
+                    TransitionState::PhysicsSpring {
+                        current,
+                        target,
+                        stiffness,
+                        damping,
+                        ..
+                    } => {
+                        debug!(
+                            "physics spring started: {:?} from {:.3} to {:.3} (k={}, d={})",
+                            t.prop, current, target, stiffness, damping
+                        );
+                    }
+                }
             }
         }
 
@@ -711,7 +732,7 @@ pub fn tick_view_transitions(
 
         // Advance all and collect interpolated values
         active.transitions.retain_mut(|t| {
-            t.elapsed += delta;
+            t.tick(delta);
             let value = t.current_value();
 
             write_view_value(
@@ -725,9 +746,10 @@ pub fn tick_view_transitions(
 
             if t.is_complete() {
                 // Write exact final value
+                let final_val = t.final_value();
                 write_view_value(
                     t.prop,
-                    &t.to,
+                    &final_val,
                     &mut node,
                     &mut bg,
                     &mut border_color,
@@ -769,9 +791,9 @@ pub fn tick_window_transitions(
             continue;
         }
 
-        // Advance elapsed
+        // Advance all transitions
         for t in &mut active.transitions {
-            t.elapsed += delta;
+            t.tick(delta);
         }
 
         // Resolve base values from props
@@ -852,9 +874,9 @@ pub fn tick_layer_transitions(
             continue;
         }
 
-        // Advance elapsed
+        // Advance all transitions
         for t in &mut active.transitions {
-            t.elapsed += delta;
+            t.tick(delta);
         }
 
         // --- 3D Transform on plane entity ---
@@ -981,15 +1003,23 @@ fn check_border_radius(
     if (from - to).abs() > 0.01
         && let Some(rule) = config.find_rule(prop)
     {
-        upsert_transition(
-            transitions,
-            prop,
-            AnimatableValue::Val(Val::Px(from)),
-            AnimatableValue::Val(Val::Px(to)),
-            rule.duration_secs,
-            rule.delay_secs,
-            rule.easing,
-        );
+        // Physics springs only support f32; border radius uses Val → skip
+        if let TransitionType::Eased {
+            duration_secs,
+            delay_secs,
+            easing,
+        } = &rule.transition_type
+        {
+            upsert_transition(
+                transitions,
+                prop,
+                AnimatableValue::Val(Val::Px(from)),
+                AnimatableValue::Val(Val::Px(to)),
+                *duration_secs,
+                *delay_secs,
+                *easing,
+            );
+        }
     }
 }
 
@@ -1005,15 +1035,23 @@ fn check_val(
         && !val_approx_eq(current, target)
         && let Some(rule) = config.find_rule(prop)
     {
-        upsert_transition(
-            transitions,
-            prop,
-            AnimatableValue::Val(current),
-            AnimatableValue::Val(target),
-            rule.duration_secs,
-            rule.delay_secs,
-            rule.easing,
-        );
+        // Physics springs only support f32; Val properties use eased transitions only
+        if let TransitionType::Eased {
+            duration_secs,
+            delay_secs,
+            easing,
+        } = &rule.transition_type
+        {
+            upsert_transition(
+                transitions,
+                prop,
+                AnimatableValue::Val(current),
+                AnimatableValue::Val(target),
+                *duration_secs,
+                *delay_secs,
+                *easing,
+            );
+        }
     }
 }
 
@@ -1040,15 +1078,23 @@ fn check_val_clamped(
         if !val_approx_eq(clamped_from, clamped_to)
             && let Some(rule) = config.find_rule(prop)
         {
-            upsert_transition(
-                transitions,
-                prop,
-                AnimatableValue::Val(clamped_from),
-                AnimatableValue::Val(clamped_to),
-                rule.duration_secs,
-                rule.delay_secs,
-                rule.easing,
-            );
+            // Physics springs only support f32; Val properties use eased transitions only
+            if let TransitionType::Eased {
+                duration_secs,
+                delay_secs,
+                easing,
+            } = &rule.transition_type
+            {
+                upsert_transition(
+                    transitions,
+                    prop,
+                    AnimatableValue::Val(clamped_from),
+                    AnimatableValue::Val(clamped_to),
+                    *duration_secs,
+                    *delay_secs,
+                    *easing,
+                );
+            }
         }
     }
 }
@@ -1088,7 +1134,7 @@ fn clamp_val(val: Val, min: Val, max: Val) -> Val {
     }
 }
 
-/// Check an f32 field for transition.
+/// Check an f32 field for transition (supports both eased and physics spring).
 fn check_f32(
     transitions: &mut Vec<ActiveTransition>,
     config: &TransitionConfig,
@@ -1097,18 +1143,33 @@ fn check_f32(
     target: Option<f32>,
 ) {
     if let Some(target) = target
-        && (current - target).abs() > 0.001
         && let Some(rule) = config.find_rule(prop)
     {
-        upsert_transition(
-            transitions,
-            prop,
-            AnimatableValue::F32(current),
-            AnimatableValue::F32(target),
-            rule.duration_secs,
-            rule.delay_secs,
-            rule.easing,
-        );
+        match &rule.transition_type {
+            TransitionType::Eased {
+                duration_secs,
+                delay_secs,
+                easing,
+            } => {
+                if (current - target).abs() > 0.001 {
+                    upsert_transition(
+                        transitions,
+                        prop,
+                        AnimatableValue::F32(current),
+                        AnimatableValue::F32(target),
+                        *duration_secs,
+                        *delay_secs,
+                        *easing,
+                    );
+                }
+            }
+            TransitionType::PhysicsSpring { stiffness, damping } => {
+                let has_active = transitions.iter().any(|t| t.prop == prop);
+                if has_active || (current - target).abs() > 0.001 {
+                    upsert_physics_spring(transitions, prop, current, target, *stiffness, *damping);
+                }
+            }
+        }
     }
 }
 
@@ -1124,15 +1185,23 @@ fn check_color(
         && !color_approx_eq(current, target)
         && let Some(rule) = config.find_rule(prop)
     {
-        upsert_transition(
-            transitions,
-            prop,
-            AnimatableValue::Color(current),
-            AnimatableValue::Color(target),
-            rule.duration_secs,
-            rule.delay_secs,
-            rule.easing,
-        );
+        // Physics springs only support f32; color properties use eased transitions only
+        if let TransitionType::Eased {
+            duration_secs,
+            delay_secs,
+            easing,
+        } = &rule.transition_type
+        {
+            upsert_transition(
+                transitions,
+                prop,
+                AnimatableValue::Color(current),
+                AnimatableValue::Color(target),
+                *duration_secs,
+                *delay_secs,
+                *easing,
+            );
+        }
     }
 }
 

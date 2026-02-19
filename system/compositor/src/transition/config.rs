@@ -127,6 +127,10 @@ pub enum EaseFn {
         zeta: f32,
         settle_duration: f32,
     },
+    /// Marker variant for the config builder — signals that a physics spring
+    /// ODE integrator should be used instead of a timed easing curve.
+    /// Never used for `sample()`; handled by `build_transition_config`.
+    PhysicsSpring { stiffness: f32, damping: f32 },
 }
 
 impl EaseFn {
@@ -159,6 +163,7 @@ impl EaseFn {
             Self::Spring {
                 settle_duration, ..
             } => Some(*settle_duration),
+            Self::PhysicsSpring { .. } => None, // duration determined by ODE integration
             _ => None,
         }
     }
@@ -188,6 +193,10 @@ impl EaseFn {
                 zeta,
                 settle_duration,
             } => spring_eval(omega0, zeta, t * settle_duration),
+            Self::PhysicsSpring { .. } => {
+                // Not a timing curve; handled by ODE integrator. Fallback to linear.
+                t
+            }
         }
     }
 }
@@ -244,13 +253,25 @@ fn compute_settle_time(omega0: f32, zeta: f32) -> f32 {
     }
 }
 
-/// A single transition rule specifying property, duration, easing, and delay.
+/// Determines how a transition is animated.
+#[derive(Debug, Clone)]
+pub enum TransitionType {
+    /// Standard timed transition with from→to interpolation via easing curve.
+    Eased {
+        duration_secs: f32,
+        delay_secs: f32,
+        easing: EaseFn,
+    },
+    /// Velocity-based damped spring (ODE integration per frame).
+    /// Supports retargeting: when target changes mid-animation, velocity is preserved.
+    PhysicsSpring { stiffness: f32, damping: f32 },
+}
+
+/// A single transition rule specifying property and animation type.
 #[derive(Debug, Clone)]
 pub struct TransitionRule {
     pub property: TransitionProperty,
-    pub duration_secs: f32,
-    pub easing: EaseFn,
-    pub delay_secs: f32,
+    pub transition_type: TransitionType,
 }
 
 /// Configuration component storing all active transition rules for an entity.
@@ -286,7 +307,8 @@ impl TransitionConfig {
 /// Format: `"property duration [easing] [delay], ..."`
 ///
 /// Also supports `"property spring(k,d) [delay]"` where the spring
-/// determines its own duration from the parameters.
+/// determines its own duration from the parameters, and
+/// `"property physics-spring(k,d)"` for velocity-based springs.
 pub fn parse_transition_prop(value: &str) -> Vec<TransitionRule> {
     split_respecting_parens(value, ',')
         .iter()
@@ -298,17 +320,29 @@ pub fn parse_transition_prop(value: &str) -> Vec<TransitionRule> {
 
             let property = parse_property_name(tokens[0])?;
 
-            // Classify remaining tokens: easing vs time values.
-            // This handles both `"all 300ms ease-in-out 100ms"` (standard)
-            // and `"all spring(100,10) 100ms"` (spring replaces duration).
+            // Classify remaining tokens: physics-spring, easing, or time values.
+            let mut physics_spring = None;
             let mut easing = None;
             let mut times = Vec::new();
             for token in &tokens[1..] {
-                if easing.is_none() && parse_easing(token).is_some() {
+                if physics_spring.is_none()
+                    && easing.is_none()
+                    && let Some(ps) = parse_physics_spring(token)
+                {
+                    physics_spring = Some(ps);
+                } else if easing.is_none() && parse_easing(token).is_some() {
                     easing = parse_easing(token);
                 } else if let Some(d) = parse_duration(token) {
                     times.push(d);
                 }
+            }
+
+            // Physics spring: velocity-based ODE integration (no timed duration)
+            if let Some((stiffness, damping)) = physics_spring {
+                return Some(TransitionRule {
+                    property,
+                    transition_type: TransitionType::PhysicsSpring { stiffness, damping },
+                });
             }
 
             let easing = easing.unwrap_or(EaseFn::SmoothStep);
@@ -325,12 +359,23 @@ pub fn parse_transition_prop(value: &str) -> Vec<TransitionRule> {
 
             Some(TransitionRule {
                 property,
-                duration_secs,
-                easing,
-                delay_secs,
+                transition_type: TransitionType::Eased {
+                    duration_secs,
+                    delay_secs,
+                    easing,
+                },
             })
         })
         .collect()
+}
+
+/// Parse a `physics-spring(stiffness,damping)` token.
+pub fn parse_physics_spring(s: &str) -> Option<(f32, f32)> {
+    let inner = s.strip_prefix("physics-spring(")?.strip_suffix(')')?;
+    let (a, b) = inner.split_once(',')?;
+    let stiffness = a.trim().parse::<f32>().ok()?;
+    let damping = b.trim().parse::<f32>().ok()?;
+    Some((stiffness, damping))
 }
 
 /// Split a string by `sep`, but not inside parentheses.
@@ -496,7 +541,18 @@ pub fn build_transition_config(
         None => return TransitionConfig::default(),
     };
     let easing = tw_easing.unwrap_or(EaseFn::SmoothStep);
-    // Spring easing overrides explicit duration with its natural settle time.
+
+    // PhysicsSpring marker on EaseFn → produce PhysicsSpring TransitionType
+    if let EaseFn::PhysicsSpring { stiffness, damping } = easing {
+        return TransitionConfig {
+            rules: vec![TransitionRule {
+                property,
+                transition_type: TransitionType::PhysicsSpring { stiffness, damping },
+            }],
+        };
+    }
+
+    // Standard timed easing (spring easing overrides duration with its natural settle time)
     let duration_secs = easing
         .natural_duration()
         .unwrap_or(tw_duration.unwrap_or(0.15));
@@ -504,9 +560,11 @@ pub fn build_transition_config(
     TransitionConfig {
         rules: vec![TransitionRule {
             property,
-            duration_secs,
-            easing,
-            delay_secs,
+            transition_type: TransitionType::Eased {
+                duration_secs,
+                delay_secs,
+                easing,
+            },
         }],
     }
 }
@@ -589,9 +647,17 @@ mod tests {
     fn parse_transition_single() {
         let rules = parse_transition_prop("background-color 300ms ease-in-out");
         assert_eq!(rules.len(), 1);
-        assert!((rules[0].duration_secs - 0.3).abs() < 0.001);
-        assert_eq!(rules[0].easing, EaseFn::CubicInOut);
-        assert_eq!(rules[0].delay_secs, 0.0);
+        let TransitionType::Eased {
+            duration_secs,
+            easing,
+            delay_secs,
+        } = &rules[0].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!((*duration_secs - 0.3).abs() < 0.001);
+        assert_eq!(*easing, EaseFn::CubicInOut);
+        assert_eq!(*delay_secs, 0.0);
     }
 
     #[test]
@@ -599,10 +665,26 @@ mod tests {
         let rules =
             parse_transition_prop("background-color 300ms ease-in-out 150ms, opacity 150ms linear");
         assert_eq!(rules.len(), 2);
-        assert!((rules[0].duration_secs - 0.3).abs() < 0.001);
-        assert!((rules[0].delay_secs - 0.15).abs() < 0.001);
-        assert!((rules[1].duration_secs - 0.15).abs() < 0.001);
-        assert_eq!(rules[1].easing, EaseFn::Linear);
+        let TransitionType::Eased {
+            duration_secs: d0,
+            delay_secs: del0,
+            ..
+        } = &rules[0].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!((*d0 - 0.3).abs() < 0.001);
+        assert!((*del0 - 0.15).abs() < 0.001);
+        let TransitionType::Eased {
+            duration_secs: d1,
+            easing: e1,
+            ..
+        } = &rules[1].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!((*d1 - 0.15).abs() < 0.001);
+        assert_eq!(*e1, EaseFn::Linear);
     }
 
     #[test]
@@ -612,15 +694,26 @@ mod tests {
         assert!(matches!(rules[0].property, TransitionProperty::All));
     }
 
+    /// Helper to construct an Eased TransitionRule for tests.
+    fn eased_rule(
+        property: TransitionProperty,
+        duration_secs: f32,
+        easing: EaseFn,
+    ) -> TransitionRule {
+        TransitionRule {
+            property,
+            transition_type: TransitionType::Eased {
+                duration_secs,
+                delay_secs: 0.0,
+                easing,
+            },
+        }
+    }
+
     #[test]
     fn find_rule_all() {
         let config = TransitionConfig {
-            rules: vec![TransitionRule {
-                property: TransitionProperty::All,
-                duration_secs: 0.3,
-                easing: EaseFn::Linear,
-                delay_secs: 0.0,
-            }],
+            rules: vec![eased_rule(TransitionProperty::All, 0.3, EaseFn::Linear)],
         };
         assert!(config.find_rule(AnimatableProp::Width).is_some());
         assert!(config.find_rule(AnimatableProp::BackgroundColor).is_some());
@@ -629,12 +722,11 @@ mod tests {
     #[test]
     fn find_rule_specific() {
         let config = TransitionConfig {
-            rules: vec![TransitionRule {
-                property: TransitionProperty::Properties(vec![AnimatableProp::BackgroundColor]),
-                duration_secs: 0.3,
-                easing: EaseFn::Linear,
-                delay_secs: 0.0,
-            }],
+            rules: vec![eased_rule(
+                TransitionProperty::Properties(vec![AnimatableProp::BackgroundColor]),
+                0.3,
+                EaseFn::Linear,
+            )],
         };
         assert!(config.find_rule(AnimatableProp::BackgroundColor).is_some());
         assert!(config.find_rule(AnimatableProp::Width).is_none());
@@ -643,12 +735,11 @@ mod tests {
     #[test]
     fn find_rule_scale_inheritance() {
         let config = TransitionConfig {
-            rules: vec![TransitionRule {
-                property: TransitionProperty::Properties(vec![AnimatableProp::Scale]),
-                duration_secs: 0.3,
-                easing: EaseFn::Linear,
-                delay_secs: 0.0,
-            }],
+            rules: vec![eased_rule(
+                TransitionProperty::Properties(vec![AnimatableProp::Scale]),
+                0.3,
+                EaseFn::Linear,
+            )],
         };
         assert!(config.find_rule(AnimatableProp::ScaleX).is_some());
         assert!(config.find_rule(AnimatableProp::ScaleY).is_some());
@@ -682,7 +773,10 @@ mod tests {
         );
         assert_eq!(config.rules.len(), 1);
         assert!(config.find_rule(AnimatableProp::BackgroundColor).is_some());
-        assert_eq!(config.rules[0].easing, EaseFn::CubicOut);
+        let TransitionType::Eased { easing, .. } = &config.rules[0].transition_type else {
+            panic!("expected Eased")
+        };
+        assert_eq!(*easing, EaseFn::CubicOut);
     }
 
     // --- Spring tests ---
@@ -762,27 +856,47 @@ mod tests {
     fn parse_transition_spring_only() {
         let rules = parse_transition_prop("all spring(100,10)");
         assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].easing, EaseFn::Spring { .. }));
+        let TransitionType::Eased {
+            easing,
+            duration_secs,
+            ..
+        } = &rules[0].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!(matches!(easing, EaseFn::Spring { .. }));
         // Duration should come from the spring, not default
-        assert!(rules[0].duration_secs > 0.5);
+        assert!(*duration_secs > 0.5);
     }
 
     #[test]
     fn parse_transition_spring_with_delay() {
         let rules = parse_transition_prop("all spring(100,10) 200ms");
         assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].easing, EaseFn::Spring { .. }));
-        assert!((rules[0].delay_secs - 0.2).abs() < 0.001);
+        let TransitionType::Eased {
+            easing,
+            delay_secs,
+            duration_secs,
+            ..
+        } = &rules[0].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!(matches!(easing, EaseFn::Spring { .. }));
+        assert!((*delay_secs - 0.2).abs() < 0.001);
         // Duration from spring, not 200ms
-        assert!(rules[0].duration_secs > 0.5);
+        assert!(*duration_secs > 0.5);
     }
 
     #[test]
     fn parse_transition_spring_overrides_duration() {
         let rules = parse_transition_prop("all 300ms spring(100,10)");
         assert_eq!(rules.len(), 1);
+        let TransitionType::Eased { duration_secs, .. } = &rules[0].transition_type else {
+            panic!("expected Eased")
+        };
         // Spring duration overrides the 300ms
-        assert!(rules[0].duration_secs > 0.5);
+        assert!(*duration_secs > 0.5);
     }
 
     #[test]
@@ -791,9 +905,100 @@ mod tests {
         let rules =
             parse_transition_prop("background-color 300ms ease-in-out, opacity spring(100,10)");
         assert_eq!(rules.len(), 2);
-        assert!((rules[0].duration_secs - 0.3).abs() < 0.001);
-        assert_eq!(rules[0].easing, EaseFn::CubicInOut);
-        assert!(matches!(rules[1].easing, EaseFn::Spring { .. }));
+        let TransitionType::Eased {
+            duration_secs: d0,
+            easing: e0,
+            ..
+        } = &rules[0].transition_type
+        else {
+            panic!("expected Eased")
+        };
+        assert!((*d0 - 0.3).abs() < 0.001);
+        assert_eq!(*e0, EaseFn::CubicInOut);
+        let TransitionType::Eased { easing: e1, .. } = &rules[1].transition_type else {
+            panic!("expected Eased")
+        };
+        assert!(matches!(e1, EaseFn::Spring { .. }));
+    }
+
+    // --- Physics spring parsing tests ---
+
+    #[test]
+    fn parse_physics_spring_basic() {
+        assert_eq!(
+            parse_physics_spring("physics-spring(100,10)"),
+            Some((100.0, 10.0))
+        );
+        assert_eq!(
+            parse_physics_spring("physics-spring(80, 6)"),
+            Some((80.0, 6.0))
+        );
+        assert_eq!(
+            parse_physics_spring("physics-spring(300,24)"),
+            Some((300.0, 24.0))
+        );
+    }
+
+    #[test]
+    fn parse_physics_spring_invalid() {
+        assert_eq!(parse_physics_spring("spring(100,10)"), None);
+        assert_eq!(parse_physics_spring("physics-spring(100)"), None);
+        assert_eq!(parse_physics_spring("physics-spring(abc,10)"), None);
+    }
+
+    #[test]
+    fn parse_transition_physics_spring() {
+        let rules = parse_transition_prop("all physics-spring(100,12)");
+        assert_eq!(rules.len(), 1);
+        assert!(
+            matches!(rules[0].transition_type, TransitionType::PhysicsSpring { stiffness, damping } if (stiffness - 100.0).abs() < 0.01 && (damping - 12.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn parse_transition_physics_spring_per_property() {
+        let rules = parse_transition_prop("translate-x physics-spring(200,15)");
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(
+            rules[0].transition_type,
+            TransitionType::PhysicsSpring { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_transition_mixed_eased_and_physics() {
+        let rules = parse_transition_prop(
+            "translate-x physics-spring(100,12), background-color 300ms ease-in-out",
+        );
+        assert_eq!(rules.len(), 2);
+        assert!(matches!(
+            rules[0].transition_type,
+            TransitionType::PhysicsSpring { .. }
+        ));
+        assert!(matches!(
+            rules[1].transition_type,
+            TransitionType::Eased { .. }
+        ));
+    }
+
+    #[test]
+    fn build_config_tw_physics_spring() {
+        let config = build_transition_config(
+            &None,
+            &Some(TransitionProperty::All),
+            None,
+            Some(EaseFn::PhysicsSpring {
+                stiffness: 100.0,
+                damping: 12.0,
+            }),
+            None,
+        );
+        assert_eq!(config.rules.len(), 1);
+        assert!(matches!(
+            config.rules[0].transition_type,
+            TransitionType::PhysicsSpring { stiffness, damping }
+            if (stiffness - 100.0).abs() < 0.01 && (damping - 12.0).abs() < 0.01
+        ));
     }
 
     #[test]
