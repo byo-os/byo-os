@@ -3,10 +3,11 @@
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 
-use crate::components::{ByoLayer, ByoView, ByoWindow};
+use crate::components::{ByoLayer, ByoTty, ByoView, ByoWindow};
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
-use crate::props::types::ByoOrderMode;
+use crate::props::tty::TtyProps;
+use crate::props::types::{ByoOrderMode, ByoShadow, shadow_list_approx_eq};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::LayerRender;
@@ -37,6 +38,7 @@ pub fn handle_view_transitions(
             &ComputedNode,
             &BackgroundColor,
             &BorderColor,
+            &BoxShadow,
             &UiTransform,
             &mut TransitionConfig,
             &mut ActiveTransitions,
@@ -48,8 +50,18 @@ pub fn handle_view_transitions(
 ) {
     let mut started_new = false;
 
-    for (entity, props, node, computed, bg, border_color, ui_transform, mut config, mut active) in
-        &mut query
+    for (
+        entity,
+        props,
+        node,
+        computed,
+        bg,
+        border_color,
+        box_shadow,
+        ui_transform,
+        mut config,
+        mut active,
+    ) in &mut query
     {
         let resolved = style::resolve_view_props(props);
 
@@ -373,6 +385,14 @@ pub fn handle_view_transitions(
             AnimatableProp::BorderColor,
             border_color.top,
             resolved.border_color.as_ref().map(|c| c.0),
+        );
+
+        // --- BoxShadow ---
+        check_shadow_list(
+            &mut transitions,
+            &config,
+            &box_shadow.0,
+            &style::resolve_box_shadow(&resolved),
         );
 
         // --- f32 fields ---
@@ -708,6 +728,7 @@ pub fn tick_view_transitions(
             &mut Node,
             &mut BackgroundColor,
             &mut BorderColor,
+            &mut BoxShadow,
             &mut UiTransform,
         ),
         (With<ByoView>, Without<ByoWindow>, Without<ByoLayer>),
@@ -721,7 +742,9 @@ pub fn tick_view_transitions(
     let delta = raw_delta.min(MAX_TICK_DELTA);
     let mut needs_redraw = false;
 
-    for (mut active, mut node, mut bg, mut border_color, mut ui_transform) in &mut query {
+    for (mut active, mut node, mut bg, mut border_color, mut box_shadow, mut ui_transform) in
+        &mut query
+    {
         if active.transitions.is_empty() {
             continue;
         }
@@ -741,6 +764,7 @@ pub fn tick_view_transitions(
                 &mut node,
                 &mut bg,
                 &mut border_color,
+                &mut box_shadow,
                 &mut ui_transform,
             );
 
@@ -753,6 +777,7 @@ pub fn tick_view_transitions(
                     &mut node,
                     &mut bg,
                     &mut border_color,
+                    &mut box_shadow,
                     &mut ui_transform,
                 );
                 debug!("transition complete: {:?}", t.prop);
@@ -1173,6 +1198,43 @@ fn check_f32(
     }
 }
 
+/// Check shadow list for transition.
+fn check_shadow_list(
+    transitions: &mut Vec<ActiveTransition>,
+    config: &TransitionConfig,
+    current_bevy: &[bevy::ui::ShadowStyle],
+    target: &[ByoShadow],
+) {
+    // Convert current Bevy ShadowStyle list to ByoShadow for comparison
+    // (doubles blur_radius back from Bevy sigma to CSS convention)
+    let current: Vec<ByoShadow> = current_bevy
+        .iter()
+        .map(ByoShadow::from_shadow_style)
+        .collect();
+    // Filter out inset from target (Bevy doesn't support inset)
+    let filtered_target: Vec<ByoShadow> = target.iter().filter(|s| !s.inset).cloned().collect();
+    if !shadow_list_approx_eq(&current, &filtered_target)
+        && let Some(rule) = config.find_rule(AnimatableProp::BoxShadow)
+    {
+        if let TransitionType::Eased {
+            duration_secs,
+            delay_secs,
+            easing,
+        } = &rule.transition_type
+        {
+            upsert_transition(
+                transitions,
+                AnimatableProp::BoxShadow,
+                AnimatableValue::ShadowList(current),
+                AnimatableValue::ShadowList(filtered_target),
+                *duration_secs,
+                *delay_secs,
+                *easing,
+            );
+        }
+    }
+}
+
 /// Check a Color field for transition.
 fn check_color(
     transitions: &mut Vec<ActiveTransition>,
@@ -1373,6 +1435,7 @@ fn write_view_value(
     node: &mut Node,
     bg: &mut BackgroundColor,
     border_color: &mut BorderColor,
+    box_shadow: &mut BoxShadow,
     ui_transform: &mut UiTransform,
 ) {
     match prop {
@@ -1574,7 +1637,226 @@ fn write_view_value(
             }
         }
 
+        // Box shadow
+        AnimatableProp::BoxShadow => {
+            if let Some(shadows) = value.as_shadow_list() {
+                box_shadow.0 = shadows.iter().map(|s| s.to_shadow_style()).collect();
+            }
+        }
+
         // Properties not applicable to views
+        _ => {}
+    }
+}
+
+// ===========================================================================
+// TTY transitions
+// ===========================================================================
+
+/// Combined extract + start for TTY transitions.
+/// Reads Changed<TtyProps>, builds TransitionConfig, starts ActiveTransitions.
+#[allow(clippy::type_complexity)]
+pub fn handle_tty_transitions(
+    mut query: Query<
+        (
+            Entity,
+            &TtyProps,
+            &BackgroundColor,
+            &BorderColor,
+            &BoxShadow,
+            &mut TransitionConfig,
+            &mut ActiveTransitions,
+        ),
+        Changed<TtyProps>,
+    >,
+    new_ttys: Query<Entity, Added<TtyProps>>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    let mut started_new = false;
+
+    for (entity, props, bg, border_color, box_shadow, mut config, mut active) in &mut query {
+        // Resolve TW classes into a temporary ViewProps for transition config + targets
+        let mut resolved = ViewProps::default();
+        if let Some(ref class) = props.class {
+            tailwind::apply_classes(&mut resolved, class);
+        }
+        // Merge wire-level shadow/transition props
+        if props.box_shadow.is_some() {
+            resolved.box_shadow.clone_from(&props.box_shadow);
+        }
+        if props.transition.is_some() {
+            resolved.transition.clone_from(&props.transition);
+        }
+
+        // Build transition config
+        *config = build_transition_config(
+            &resolved.transition,
+            &resolved.tw_transition_property,
+            resolved.tw_transition_duration,
+            resolved.tw_transition_easing,
+            resolved.tw_transition_delay,
+        );
+
+        // Skip first appearance
+        if new_ttys.contains(entity) {
+            continue;
+        }
+
+        if config.rules.is_empty() {
+            active.transitions.clear();
+            continue;
+        }
+
+        let mut transitions = std::mem::take(&mut active.transitions);
+        let count_before = transitions.len();
+
+        // --- Color fields ---
+        check_color(
+            &mut transitions,
+            &config,
+            AnimatableProp::BackgroundColor,
+            bg.0,
+            resolved.background_color.as_ref().map(|c| c.0),
+        );
+        check_color(
+            &mut transitions,
+            &config,
+            AnimatableProp::BorderColor,
+            border_color.top,
+            resolved.border_color.as_ref().map(|c| c.0),
+        );
+
+        // --- BoxShadow ---
+        check_shadow_list(
+            &mut transitions,
+            &config,
+            &box_shadow.0,
+            &style::resolve_box_shadow(&resolved),
+        );
+
+        if transitions.len() > count_before {
+            started_new = true;
+            for t in &transitions[count_before..] {
+                match &t.state {
+                    TransitionState::Eased {
+                        from,
+                        to,
+                        duration_secs,
+                        ..
+                    } => {
+                        debug!(
+                            "tty transition started: {:?} from {:?} to {:?} over {:.3}s",
+                            t.prop, from, to, duration_secs
+                        );
+                    }
+                    TransitionState::PhysicsSpring {
+                        current,
+                        target,
+                        stiffness,
+                        damping,
+                        ..
+                    } => {
+                        debug!(
+                            "tty physics spring started: {:?} from {:.3} to {:.3} (k={}, d={})",
+                            t.prop, current, target, stiffness, damping
+                        );
+                    }
+                }
+            }
+        }
+
+        active.transitions = transitions;
+    }
+
+    if started_new {
+        redraw.write(RequestRedraw);
+    }
+}
+
+/// Advance TTY transitions and write interpolated values.
+#[allow(clippy::type_complexity)]
+pub fn tick_tty_transitions(
+    mut query: Query<
+        (
+            &mut ActiveTransitions,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &mut BoxShadow,
+        ),
+        With<ByoTty>,
+    >,
+    time: Res<Time>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    let raw_delta = time.delta_secs();
+    let delta = raw_delta.min(MAX_TICK_DELTA);
+    let mut needs_redraw = false;
+
+    for (mut active, mut bg, mut border_color, mut box_shadow) in &mut query {
+        if active.transitions.is_empty() {
+            continue;
+        }
+
+        if raw_delta > 0.1 {
+            debug!("tick_tty: capped delta {:.3}s → {:.3}s", raw_delta, delta);
+        }
+
+        active.transitions.retain_mut(|t| {
+            t.tick(delta);
+            let value = t.current_value();
+
+            write_tty_value(t.prop, &value, &mut bg, &mut border_color, &mut box_shadow);
+
+            if t.is_complete() {
+                let final_val = t.final_value();
+                write_tty_value(
+                    t.prop,
+                    &final_val,
+                    &mut bg,
+                    &mut border_color,
+                    &mut box_shadow,
+                );
+                debug!("tty transition complete: {:?}", t.prop);
+                false
+            } else {
+                true
+            }
+        });
+
+        if !active.transitions.is_empty() {
+            needs_redraw = true;
+        }
+    }
+
+    if needs_redraw {
+        redraw.write(RequestRedraw);
+    }
+}
+
+/// Write a single animated value onto TTY Bevy components.
+fn write_tty_value(
+    prop: AnimatableProp,
+    value: &AnimatableValue,
+    bg: &mut BackgroundColor,
+    border_color: &mut BorderColor,
+    box_shadow: &mut BoxShadow,
+) {
+    match prop {
+        AnimatableProp::BackgroundColor => {
+            if let Some(c) = value.as_color() {
+                *bg = BackgroundColor(c);
+            }
+        }
+        AnimatableProp::BorderColor => {
+            if let Some(c) = value.as_color() {
+                *border_color = BorderColor::all(c);
+            }
+        }
+        AnimatableProp::BoxShadow => {
+            if let Some(shadows) = value.as_shadow_list() {
+                box_shadow.0 = shadows.iter().map(|s| s.to_shadow_style()).collect();
+            }
+        }
         _ => {}
     }
 }

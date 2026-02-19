@@ -3,6 +3,7 @@
 
 pub mod color;
 pub mod palette;
+pub mod shadow;
 pub mod tailwind;
 
 use bevy::prelude::*;
@@ -14,7 +15,7 @@ use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
 use crate::props::tty::TtyProps;
-use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents};
+use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents, ByoShadow};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::{LayerRender, resize_layer_render};
@@ -82,11 +83,38 @@ pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
         tw_transition_delay,
         events,
         pointer_events,
+        box_shadow,
+        tw_box_shadow,
+        tw_shadow_color,
     );
     if props.hidden {
         r.hidden = true;
     }
     r
+}
+
+/// Resolve the final box-shadow list from wire prop, TW preset, and TW shadow color.
+///
+/// Priority: wire `box-shadow` prop > TW preset. Shadow color override is applied
+/// to TW-derived shadows only.
+pub(crate) fn resolve_box_shadow(resolved: &ViewProps) -> Vec<ByoShadow> {
+    // Wire prop takes priority
+    if let Some(ref wire) = resolved.box_shadow {
+        return shadow::parse_box_shadow(wire);
+    }
+    // TW-derived preset
+    if let Some(ref shadows) = resolved.tw_box_shadow {
+        let mut result = shadows.clone();
+        // Apply shadow color override — replaces color entirely (Tailwind convention:
+        // the preset defines geometry, the color utility defines the full color).
+        if let Some(color) = resolved.tw_shadow_color {
+            for s in &mut result {
+                s.color = color;
+            }
+        }
+        return result;
+    }
+    Vec::new()
 }
 
 /// Reconcile `ViewProps` changes onto Bevy `Node` + `BackgroundColor` etc.
@@ -99,13 +127,16 @@ pub fn reconcile_views(
             &mut Node,
             &mut BackgroundColor,
             &mut BorderColor,
+            &mut BoxShadow,
             Option<&mut Visibility>,
             Option<&ActiveTransitions>,
         ),
         Changed<ViewProps>,
     >,
 ) {
-    for (props, mut node, mut bg, mut border_color, visibility, active) in &mut query {
+    for (props, mut node, mut bg, mut border_color, mut box_shadow, visibility, active) in
+        &mut query
+    {
         let resolved = resolve_view_props(props);
         let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
 
@@ -301,6 +332,16 @@ pub fn reconcile_views(
             node.flex_basis = v.0;
         }
 
+        // Box Shadow
+        if !has(AnimatableProp::BoxShadow) {
+            let shadows = resolve_box_shadow(&resolved);
+            box_shadow.0 = shadows
+                .iter()
+                .filter(|s| !s.inset) // Bevy doesn't support inset shadows
+                .map(|s| s.to_shadow_style())
+                .collect();
+        }
+
         // Visibility
         if let Some(mut vis) = visibility {
             *vis = if resolved.hidden {
@@ -388,132 +429,168 @@ pub fn resolve_tty_props(props: &TtyProps) -> ResolvedTtyProps {
     }
 }
 
-/// Reconcile `TtyProps` class onto the tty's `Node`, `BackgroundColor`, and `BorderColor`.
+/// Reconcile `TtyProps` class onto the tty's `Node`, `BackgroundColor`, `BorderColor`,
+/// and `BoxShadow`.
 ///
 /// Parses the tailwind class string from `TtyProps.class` using the same parser as views.
 /// Only fields specified by the class are overridden; tty defaults (flex column, overflow clip,
 /// 100% size) set at spawn time are preserved for unspecified fields.
+#[allow(clippy::type_complexity)]
 pub fn reconcile_tty_style(
     mut query: Query<
-        (&TtyProps, &mut Node, &mut BackgroundColor, &mut BorderColor),
+        (
+            &TtyProps,
+            &mut Node,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &mut BoxShadow,
+            Option<&ActiveTransitions>,
+        ),
         (Changed<TtyProps>, With<ByoTty>),
     >,
 ) {
-    for (props, mut node, mut bg, mut border_color) in &mut query {
-        let Some(ref class) = props.class else {
-            continue;
-        };
+    for (props, mut node, mut bg, mut border_color, mut box_shadow, active) in &mut query {
+        let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
+
+        // Parse TW classes into a temporary ViewProps
         let mut resolved = ViewProps::default();
-        tailwind::apply_classes(&mut resolved, class);
+        if let Some(ref class) = props.class {
+            tailwind::apply_classes(&mut resolved, class);
+        }
+        // Merge wire-level shadow/transition props from TtyProps
+        if props.box_shadow.is_some() {
+            resolved.box_shadow.clone_from(&props.box_shadow);
+        }
+        if props.transition.is_some() {
+            resolved.transition.clone_from(&props.transition);
+        }
+        // TW-derived shadow fields are already on `resolved` from apply_classes
 
-        // Sizing
-        if let Some(ref v) = resolved.width {
-            node.width = v.0;
-        }
-        if let Some(ref v) = resolved.height {
-            node.height = v.0;
-        }
-        if let Some(ref v) = resolved.min_width {
-            node.min_width = v.0;
-        }
-        if let Some(ref v) = resolved.max_width {
-            node.max_width = v.0;
-        }
-        if let Some(ref v) = resolved.min_height {
-            node.min_height = v.0;
-        }
-        if let Some(ref v) = resolved.max_height {
-            node.max_height = v.0;
+        // Only apply non-shadow styling if we have a class
+        if props.class.is_some() {
+            // Sizing
+            if let Some(ref v) = resolved.width {
+                node.width = v.0;
+            }
+            if let Some(ref v) = resolved.height {
+                node.height = v.0;
+            }
+            if let Some(ref v) = resolved.min_width {
+                node.min_width = v.0;
+            }
+            if let Some(ref v) = resolved.max_width {
+                node.max_width = v.0;
+            }
+            if let Some(ref v) = resolved.min_height {
+                node.min_height = v.0;
+            }
+            if let Some(ref v) = resolved.max_height {
+                node.max_height = v.0;
+            }
+
+            // Colors
+            if let Some(ref c) = resolved.background_color
+                && !has(AnimatableProp::BackgroundColor)
+            {
+                *bg = BackgroundColor(c.0);
+            }
+            if let Some(ref c) = resolved.border_color
+                && !has(AnimatableProp::BorderColor)
+            {
+                *border_color = BorderColor::all(c.0);
+            }
+
+            // Border
+            if let Some(ref r) = resolved.border_width {
+                node.border = r.0;
+            }
+            if let Some(ref r) = resolved.border_radius {
+                node.border_radius = r.0;
+            }
+
+            // Spacing
+            if let Some(ref r) = resolved.padding {
+                node.padding = r.0;
+            }
+            if let Some(ref r) = resolved.margin {
+                node.margin = r.0;
+            }
+
+            // Gap
+            if let Some(ref v) = resolved.gap {
+                node.column_gap = v.0;
+                node.row_gap = v.0;
+            }
+            if let Some(ref v) = resolved.column_gap {
+                node.column_gap = v.0;
+            }
+            if let Some(ref v) = resolved.row_gap {
+                node.row_gap = v.0;
+            }
+
+            // Layout
+            if let Some(ref d) = resolved.display {
+                node.display = d.to_bevy();
+            }
+            if let Some(ref d) = resolved.flex_direction {
+                node.flex_direction = d.to_bevy();
+            }
+            if let Some(ref a) = resolved.align_items {
+                node.align_items = a.to_bevy();
+            }
+            if let Some(ref a) = resolved.align_self {
+                node.align_self = a.to_bevy();
+            }
+            if let Some(ref j) = resolved.justify_content {
+                node.justify_content = j.to_bevy();
+            }
+            if let Some(ref w) = resolved.flex_wrap {
+                node.flex_wrap = w.to_bevy();
+            }
+            if let Some(ref p) = resolved.position {
+                node.position_type = p.to_bevy();
+            }
+
+            // Overflow
+            if let Some(ref o) = resolved.overflow {
+                let axis = o.to_bevy();
+                node.overflow = Overflow { x: axis, y: axis };
+            }
+
+            // Position
+            if let Some(ref v) = resolved.left {
+                node.left = v.0;
+            }
+            if let Some(ref v) = resolved.right {
+                node.right = v.0;
+            }
+            if let Some(ref v) = resolved.top {
+                node.top = v.0;
+            }
+            if let Some(ref v) = resolved.bottom {
+                node.bottom = v.0;
+            }
+
+            // Flex
+            if let Some(v) = resolved.flex_grow {
+                node.flex_grow = v;
+            }
+            if let Some(v) = resolved.flex_shrink {
+                node.flex_shrink = v;
+            }
+            if let Some(ref v) = resolved.flex_basis {
+                node.flex_basis = v.0;
+            }
         }
 
-        // Colors
-        if let Some(ref c) = resolved.background_color {
-            *bg = BackgroundColor(c.0);
-        }
-        if let Some(ref c) = resolved.border_color {
-            *border_color = BorderColor::all(c.0);
-        }
-
-        // Border
-        if let Some(ref r) = resolved.border_width {
-            node.border = r.0;
-        }
-        if let Some(ref r) = resolved.border_radius {
-            node.border_radius = r.0;
-        }
-
-        // Spacing
-        if let Some(ref r) = resolved.padding {
-            node.padding = r.0;
-        }
-        if let Some(ref r) = resolved.margin {
-            node.margin = r.0;
-        }
-
-        // Gap
-        if let Some(ref v) = resolved.gap {
-            node.column_gap = v.0;
-            node.row_gap = v.0;
-        }
-        if let Some(ref v) = resolved.column_gap {
-            node.column_gap = v.0;
-        }
-        if let Some(ref v) = resolved.row_gap {
-            node.row_gap = v.0;
-        }
-
-        // Layout
-        if let Some(ref d) = resolved.display {
-            node.display = d.to_bevy();
-        }
-        if let Some(ref d) = resolved.flex_direction {
-            node.flex_direction = d.to_bevy();
-        }
-        if let Some(ref a) = resolved.align_items {
-            node.align_items = a.to_bevy();
-        }
-        if let Some(ref a) = resolved.align_self {
-            node.align_self = a.to_bevy();
-        }
-        if let Some(ref j) = resolved.justify_content {
-            node.justify_content = j.to_bevy();
-        }
-        if let Some(ref w) = resolved.flex_wrap {
-            node.flex_wrap = w.to_bevy();
-        }
-        if let Some(ref p) = resolved.position {
-            node.position_type = p.to_bevy();
-        }
-
-        // Overflow
-        if let Some(ref o) = resolved.overflow {
-            let axis = o.to_bevy();
-            node.overflow = Overflow { x: axis, y: axis };
-        }
-
-        // Position
-        if let Some(ref v) = resolved.left {
-            node.left = v.0;
-        }
-        if let Some(ref v) = resolved.right {
-            node.right = v.0;
-        }
-        if let Some(ref v) = resolved.top {
-            node.top = v.0;
-        }
-        if let Some(ref v) = resolved.bottom {
-            node.bottom = v.0;
-        }
-
-        // Flex
-        if let Some(v) = resolved.flex_grow {
-            node.flex_grow = v;
-        }
-        if let Some(v) = resolved.flex_shrink {
-            node.flex_shrink = v;
-        }
-        if let Some(ref v) = resolved.flex_basis {
-            node.flex_basis = v.0;
+        // Box Shadow (resolved from TW classes + wire prop, same as views)
+        if !has(AnimatableProp::BoxShadow) {
+            let shadows = resolve_box_shadow(&resolved);
+            box_shadow.0 = shadows
+                .iter()
+                .filter(|s| !s.inset)
+                .map(|s| s.to_shadow_style())
+                .collect();
         }
     }
 }

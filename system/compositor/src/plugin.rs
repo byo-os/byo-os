@@ -44,6 +44,7 @@ impl Plugin for ByoPlugin {
                     transition::systems::handle_view_transitions,
                     transition::systems::handle_window_transitions,
                     transition::systems::handle_layer_transitions,
+                    transition::systems::handle_tty_transitions,
                     style::reconcile_views,
                     style::reconcile_view_transforms,
                     style::reconcile_text,
@@ -68,6 +69,7 @@ impl Plugin for ByoPlugin {
                     transition::systems::tick_view_transitions,
                     transition::systems::tick_window_transitions,
                     transition::systems::tick_layer_transitions,
+                    transition::systems::tick_tty_transitions,
                     events::observers::handle_cursor_left,
                 ),
             );

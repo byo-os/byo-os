@@ -248,6 +248,7 @@ fn spawn_entity(
                 Node::default(),
                 BackgroundColor::default(),
                 BorderColor::default(),
+                BoxShadow::default(),
                 TransitionConfig::default(),
                 ActiveTransitions::default(),
             ));
@@ -358,6 +359,9 @@ fn spawn_entity(
                 },
                 BackgroundColor(Color::NONE),
                 BorderColor::default(),
+                BoxShadow::default(),
+                TransitionConfig::default(),
+                ActiveTransitions::default(),
             ));
             if let Some(p) = resolved {
                 ec.insert(ChildOf(p));

@@ -519,6 +519,179 @@ impl WriteProp for ByoPointerEvents {
 }
 
 // ---------------------------------------------------------------------------
+// ByoShadow — parsed CSS box-shadow value
+// ---------------------------------------------------------------------------
+
+/// A single parsed CSS box-shadow value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ByoShadow {
+    pub color: Color,
+    pub x_offset: Val,
+    pub y_offset: Val,
+    pub blur_radius: Val,
+    pub spread_radius: Val,
+    pub inset: bool,
+}
+
+impl Default for ByoShadow {
+    fn default() -> Self {
+        Self {
+            color: Color::srgba(0.0, 0.0, 0.0, 1.0),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(0.0),
+            blur_radius: Val::Px(0.0),
+            spread_radius: Val::Px(0.0),
+            inset: false,
+        }
+    }
+}
+
+impl ByoShadow {
+    /// Transparent zero-offset shadow, used for CSS list padding during transitions.
+    pub const TRANSPARENT_ZERO: Self = Self {
+        color: Color::NONE,
+        x_offset: Val::Px(0.0),
+        y_offset: Val::Px(0.0),
+        blur_radius: Val::Px(0.0),
+        spread_radius: Val::Px(0.0),
+        inset: false,
+    };
+
+    /// Convert to Bevy's `ShadowStyle` for rendering.
+    ///
+    /// Bevy's blur_radius is the Gaussian standard deviation (sigma),
+    /// while CSS `blur-radius` is 2*sigma. We halve the value here to
+    /// match CSS visual expectations.
+    pub fn to_shadow_style(&self) -> bevy::ui::ShadowStyle {
+        bevy::ui::ShadowStyle {
+            color: self.color,
+            x_offset: self.x_offset,
+            y_offset: self.y_offset,
+            blur_radius: halve_val(self.blur_radius),
+            spread_radius: self.spread_radius,
+        }
+    }
+
+    /// Create a `ByoShadow` from a Bevy `ShadowStyle`, doubling the blur
+    /// radius to convert from Bevy's sigma back to CSS convention.
+    pub fn from_shadow_style(s: &bevy::ui::ShadowStyle) -> Self {
+        Self {
+            color: s.color,
+            x_offset: s.x_offset,
+            y_offset: s.y_offset,
+            blur_radius: double_val(s.blur_radius),
+            spread_radius: s.spread_radius,
+            inset: false,
+        }
+    }
+
+    /// Interpolate between two shadows at parameter `t` in [0, 1].
+    /// Mismatched `inset` flags snap to `b` (CSS spec: discrete interpolation).
+    pub fn interpolate(&self, b: &ByoShadow, t: f32) -> ByoShadow {
+        if self.inset != b.inset {
+            // CSS spec: mismatched inset → discrete snap
+            return if t < 0.5 { self.clone() } else { b.clone() };
+        }
+        ByoShadow {
+            color: lerp_color(self.color, b.color, t),
+            x_offset: lerp_val(self.x_offset, b.x_offset, t),
+            y_offset: lerp_val(self.y_offset, b.y_offset, t),
+            blur_radius: lerp_val(self.blur_radius, b.blur_radius, t),
+            spread_radius: lerp_val(self.spread_radius, b.spread_radius, t),
+            inset: self.inset,
+        }
+    }
+}
+
+/// Halve a Val (CSS blur-radius → Bevy sigma).
+fn halve_val(v: Val) -> Val {
+    match v {
+        Val::Px(x) => Val::Px(x * 0.5),
+        Val::Percent(x) => Val::Percent(x * 0.5),
+        Val::Vw(x) => Val::Vw(x * 0.5),
+        Val::Vh(x) => Val::Vh(x * 0.5),
+        Val::VMin(x) => Val::VMin(x * 0.5),
+        Val::VMax(x) => Val::VMax(x * 0.5),
+        other => other,
+    }
+}
+
+/// Double a Val (Bevy sigma → CSS blur-radius).
+fn double_val(v: Val) -> Val {
+    match v {
+        Val::Px(x) => Val::Px(x * 2.0),
+        Val::Percent(x) => Val::Percent(x * 2.0),
+        Val::Vw(x) => Val::Vw(x * 2.0),
+        Val::Vh(x) => Val::Vh(x * 2.0),
+        Val::VMin(x) => Val::VMin(x * 2.0),
+        Val::VMax(x) => Val::VMax(x * 2.0),
+        other => other,
+    }
+}
+
+/// Linearly interpolate between two `Val` values (same-variant only, else snap).
+fn lerp_val(a: Val, b: Val, t: f32) -> Val {
+    match (a, b) {
+        (Val::Px(a), Val::Px(b)) => Val::Px(a + (b - a) * t),
+        (Val::Percent(a), Val::Percent(b)) => Val::Percent(a + (b - a) * t),
+        (Val::Vw(a), Val::Vw(b)) => Val::Vw(a + (b - a) * t),
+        (Val::Vh(a), Val::Vh(b)) => Val::Vh(a + (b - a) * t),
+        (Val::VMin(a), Val::VMin(b)) => Val::VMin(a + (b - a) * t),
+        (Val::VMax(a), Val::VMax(b)) => Val::VMax(a + (b - a) * t),
+        (_, b) => b,
+    }
+}
+
+/// Linearly interpolate between two colors in sRGB space.
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    Color::srgba(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        a.alpha + (b.alpha - a.alpha) * t,
+    )
+}
+
+/// Approximate equality for shadow lists (used to detect changes).
+pub fn shadow_list_approx_eq(a: &[ByoShadow], b: &[ByoShadow]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(sa, sb)| {
+        sa.inset == sb.inset
+            && val_approx_eq(sa.x_offset, sb.x_offset)
+            && val_approx_eq(sa.y_offset, sb.y_offset)
+            && val_approx_eq(sa.blur_radius, sb.blur_radius)
+            && val_approx_eq(sa.spread_radius, sb.spread_radius)
+            && color_approx_eq(sa.color, sb.color)
+    })
+}
+
+fn val_approx_eq(a: Val, b: Val) -> bool {
+    match (a, b) {
+        (Val::Auto, Val::Auto) => true,
+        (Val::Px(a), Val::Px(b)) => (a - b).abs() < 0.01,
+        (Val::Percent(a), Val::Percent(b)) => (a - b).abs() < 0.01,
+        (Val::Vw(a), Val::Vw(b)) => (a - b).abs() < 0.01,
+        (Val::Vh(a), Val::Vh(b)) => (a - b).abs() < 0.01,
+        (Val::VMin(a), Val::VMin(b)) => (a - b).abs() < 0.01,
+        (Val::VMax(a), Val::VMax(b)) => (a - b).abs() < 0.01,
+        _ => false,
+    }
+}
+
+fn color_approx_eq(a: Color, b: Color) -> bool {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    (a.red - b.red).abs() < 0.005
+        && (a.green - b.green).abs() < 0.005
+        && (a.blue - b.blue).abs() < 0.005
+        && (a.alpha - b.alpha).abs() < 0.005
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -602,5 +775,74 @@ mod tests {
         d.apply(&Prop::val("display", "grid"));
         assert!(matches!(d, ByoDisplay::Grid));
         assert!(matches!(d.to_bevy(), Display::Grid));
+    }
+
+    // ── ByoShadow blur radius conversion (CSS 2*sigma → Bevy sigma) ────
+
+    #[test]
+    fn to_shadow_style_halves_blur_radius() {
+        let shadow = ByoShadow {
+            blur_radius: Val::Px(20.0),
+            ..ByoShadow::default()
+        };
+        let style = shadow.to_shadow_style();
+        // CSS blur-radius 20px → Bevy sigma 10px
+        assert_eq!(style.blur_radius, Val::Px(10.0));
+    }
+
+    #[test]
+    fn to_shadow_style_preserves_other_fields() {
+        let shadow = ByoShadow {
+            x_offset: Val::Px(4.0),
+            y_offset: Val::Px(8.0),
+            blur_radius: Val::Px(12.0),
+            spread_radius: Val::Px(-2.0),
+            color: Color::srgba(1.0, 0.0, 0.0, 0.5),
+            inset: false,
+        };
+        let style = shadow.to_shadow_style();
+        assert_eq!(style.x_offset, Val::Px(4.0));
+        assert_eq!(style.y_offset, Val::Px(8.0));
+        assert_eq!(style.blur_radius, Val::Px(6.0)); // halved
+        assert_eq!(style.spread_radius, Val::Px(-2.0));
+        let c = style.color.to_srgba();
+        assert!((c.red - 1.0).abs() < 0.01);
+        assert!((c.alpha - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn from_shadow_style_doubles_blur_radius() {
+        let style = bevy::ui::ShadowStyle {
+            color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(4.0),
+            blur_radius: Val::Px(10.0), // Bevy sigma
+            spread_radius: Val::Px(0.0),
+        };
+        let shadow = ByoShadow::from_shadow_style(&style);
+        // Bevy sigma 10px → CSS blur-radius 20px
+        assert_eq!(shadow.blur_radius, Val::Px(20.0));
+        assert_eq!(shadow.y_offset, Val::Px(4.0));
+    }
+
+    #[test]
+    fn shadow_roundtrip_preserves_blur() {
+        let original = ByoShadow {
+            blur_radius: Val::Px(16.0),
+            ..ByoShadow::default()
+        };
+        let style = original.to_shadow_style();
+        let roundtrip = ByoShadow::from_shadow_style(&style);
+        assert_eq!(roundtrip.blur_radius, Val::Px(16.0));
+    }
+
+    #[test]
+    fn halve_val_percent() {
+        assert_eq!(halve_val(Val::Percent(50.0)), Val::Percent(25.0));
+    }
+
+    #[test]
+    fn double_val_auto_unchanged() {
+        assert_eq!(double_val(Val::Auto), Val::Auto);
     }
 }

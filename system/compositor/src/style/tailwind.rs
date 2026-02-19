@@ -492,6 +492,129 @@ fn apply_class(props: &mut ViewProps, class: &str) {
             return;
         }
 
+        // Box shadow presets (Tailwind v3)
+        "shadow-sm" => {
+            props.tw_box_shadow = Some(vec![ByoShadow {
+                x_offset: Val::Px(0.0),
+                y_offset: Val::Px(1.0),
+                blur_radius: Val::Px(2.0),
+                spread_radius: Val::Px(0.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.05),
+                inset: false,
+            }]);
+            return;
+        }
+        "shadow" => {
+            props.tw_box_shadow = Some(vec![
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(1.0),
+                    blur_radius: Val::Px(3.0),
+                    spread_radius: Val::Px(0.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(1.0),
+                    blur_radius: Val::Px(2.0),
+                    spread_radius: Val::Px(-1.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+            ]);
+            return;
+        }
+        "shadow-md" => {
+            props.tw_box_shadow = Some(vec![
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(4.0),
+                    blur_radius: Val::Px(6.0),
+                    spread_radius: Val::Px(-1.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(2.0),
+                    blur_radius: Val::Px(4.0),
+                    spread_radius: Val::Px(-2.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+            ]);
+            return;
+        }
+        "shadow-lg" => {
+            props.tw_box_shadow = Some(vec![
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(10.0),
+                    blur_radius: Val::Px(15.0),
+                    spread_radius: Val::Px(-3.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(4.0),
+                    blur_radius: Val::Px(6.0),
+                    spread_radius: Val::Px(-4.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+            ]);
+            return;
+        }
+        "shadow-xl" => {
+            props.tw_box_shadow = Some(vec![
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(20.0),
+                    blur_radius: Val::Px(25.0),
+                    spread_radius: Val::Px(-5.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+                ByoShadow {
+                    x_offset: Val::Px(0.0),
+                    y_offset: Val::Px(8.0),
+                    blur_radius: Val::Px(10.0),
+                    spread_radius: Val::Px(-6.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+                    inset: false,
+                },
+            ]);
+            return;
+        }
+        "shadow-2xl" => {
+            props.tw_box_shadow = Some(vec![ByoShadow {
+                x_offset: Val::Px(0.0),
+                y_offset: Val::Px(25.0),
+                blur_radius: Val::Px(50.0),
+                spread_radius: Val::Px(-12.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.25),
+                inset: false,
+            }]);
+            return;
+        }
+        "shadow-inner" => {
+            props.tw_box_shadow = Some(vec![ByoShadow {
+                x_offset: Val::Px(0.0),
+                y_offset: Val::Px(2.0),
+                blur_radius: Val::Px(4.0),
+                spread_radius: Val::Px(0.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.05),
+                inset: true,
+            }]);
+            return;
+        }
+        "shadow-none" => {
+            props.tw_box_shadow = Some(Vec::new());
+            return;
+        }
+
         _ => {}
     }
 
@@ -738,6 +861,17 @@ fn apply_class(props: &mut ViewProps, class: &str) {
         // Border color: border-{color}-{shade}[/{opacity}]
         if let Some(color) = parse_color_class(rest) {
             props.border_color = Some(ByoColor(color));
+        }
+        return;
+    }
+
+    // Shadow color: shadow-{color}-{shade}[/{opacity}]
+    // Must come before bg- to avoid prefix conflicts, and after shadow exact matches
+    if let Some(rest) = class.strip_prefix("shadow-") {
+        // Already handled exact matches (sm/md/lg/xl/2xl/inner/none) above.
+        // If we get here, try as color.
+        if let Some(color) = parse_color_class(rest) {
+            props.tw_shadow_color = Some(color);
         }
         return;
     }
@@ -2730,6 +2864,97 @@ mod tests {
     fn cull_back_class() {
         let s = transform_from("cull-back");
         assert!(matches!(s.cull_mode, Some(ByoCullMode::Back)));
+    }
+
+    // ── Box shadow classes ─────────────────────────────────────────
+
+    #[test]
+    fn shadow_sm_preset() {
+        let p = props_from("shadow-sm");
+        let shadows = p.tw_box_shadow.unwrap();
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].y_offset, Val::Px(1.0));
+        assert_eq!(shadows[0].blur_radius, Val::Px(2.0));
+    }
+
+    #[test]
+    fn shadow_lg_preset() {
+        let p = props_from("shadow-lg");
+        let shadows = p.tw_box_shadow.unwrap();
+        assert_eq!(shadows.len(), 2);
+        assert_eq!(shadows[0].blur_radius, Val::Px(15.0));
+        assert_eq!(shadows[1].blur_radius, Val::Px(6.0));
+    }
+
+    #[test]
+    fn shadow_2xl_preset() {
+        let p = props_from("shadow-2xl");
+        let shadows = p.tw_box_shadow.unwrap();
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].y_offset, Val::Px(25.0));
+    }
+
+    #[test]
+    fn shadow_none_clears() {
+        let p = props_from("shadow-lg shadow-none");
+        let shadows = p.tw_box_shadow.unwrap();
+        assert!(shadows.is_empty());
+    }
+
+    #[test]
+    fn shadow_inner_is_inset() {
+        let p = props_from("shadow-inner");
+        let shadows = p.tw_box_shadow.unwrap();
+        assert_eq!(shadows.len(), 1);
+        assert!(shadows[0].inset);
+    }
+
+    #[test]
+    fn shadow_color_sets_tw_shadow_color() {
+        let p = props_from("shadow-blue-500");
+        assert!(p.tw_shadow_color.is_some());
+    }
+
+    #[test]
+    fn shadow_color_full_replace_not_alpha_preserving() {
+        // In Tailwind, shadow-lg shadow-blue-500 replaces the shadow color
+        // entirely — the preset's rgba(0,0,0,0.1) alpha is NOT preserved.
+        // The color utility sets the full color (100% alpha for palette colors).
+        use crate::style::resolve_box_shadow;
+
+        let p = props_from("shadow-lg shadow-blue-500");
+        let resolved = resolve_box_shadow(&p);
+        assert_eq!(resolved.len(), 2);
+        for shadow in &resolved {
+            let c = shadow.color.to_srgba();
+            // blue-500 = #3b82f6, should be at full opacity
+            assert!(
+                (c.alpha - 1.0).abs() < 0.02,
+                "Shadow color alpha should be 1.0 (full replace), got {}",
+                c.alpha
+            );
+            // Verify it's actually blue (not black)
+            assert!(c.blue > 0.9, "Should be blue, got blue={}", c.blue);
+        }
+    }
+
+    #[test]
+    fn shadow_color_with_opacity_modifier() {
+        // shadow-blue-500/50 should produce blue at 50% alpha
+        use crate::style::resolve_box_shadow;
+
+        let p = props_from("shadow-lg shadow-blue-500/50");
+        let resolved = resolve_box_shadow(&p);
+        assert_eq!(resolved.len(), 2);
+        for shadow in &resolved {
+            let c = shadow.color.to_srgba();
+            assert!(
+                (c.alpha - 0.5).abs() < 0.02,
+                "Expected alpha ~0.5, got {}",
+                c.alpha
+            );
+            assert!(c.blue > 0.9);
+        }
     }
 
     // ── Combined sizing + order + cull ───────────────────────────────

@@ -80,6 +80,8 @@ pub enum AnimatableProp {
     FontSize,
     TextColor,
     LineHeight,
+    // Shadow
+    BoxShadow,
 }
 
 /// The 3D transform AnimatableProp variants.
@@ -486,6 +488,7 @@ pub fn parse_property_name(s: &str) -> Option<TransitionProperty> {
         "font-size" => AnimatableProp::FontSize,
         "text-color" => AnimatableProp::TextColor,
         "line-height" => AnimatableProp::LineHeight,
+        "box-shadow" => AnimatableProp::BoxShadow,
         _ => return None,
     };
 
@@ -498,6 +501,7 @@ pub fn tw_transition_default() -> TransitionProperty {
         AnimatableProp::BackgroundColor,
         AnimatableProp::BorderColor,
         AnimatableProp::Opacity,
+        AnimatableProp::BoxShadow,
         AnimatableProp::TranslateX,
         AnimatableProp::TranslateY,
         AnimatableProp::TranslateZ,

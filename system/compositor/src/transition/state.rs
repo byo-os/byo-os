@@ -2,6 +2,8 @@
 
 use bevy::prelude::*;
 
+use crate::props::types::ByoShadow;
+
 use super::config::{AnimatableProp, EaseFn, TRANSFORM_3D_PROPS};
 
 /// A value that can be interpolated during a transition.
@@ -10,6 +12,7 @@ pub enum AnimatableValue {
     Val(Val),
     F32(f32),
     Color(Color),
+    ShadowList(Vec<ByoShadow>),
 }
 
 impl AnimatableValue {
@@ -24,6 +27,9 @@ impl AnimatableValue {
             }
             (AnimatableValue::Val(a), AnimatableValue::Val(b)) => {
                 AnimatableValue::Val(lerp_val(*a, *b, t))
+            }
+            (AnimatableValue::ShadowList(a), AnimatableValue::ShadowList(b)) => {
+                AnimatableValue::ShadowList(interpolate_shadow_lists(a, b, t))
             }
             // Mismatched types: snap to target
             _ => to.clone(),
@@ -50,6 +56,14 @@ impl AnimatableValue {
     pub fn as_val(&self) -> Option<Val> {
         match self {
             AnimatableValue::Val(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Extract shadow list, returning None for other types.
+    pub fn as_shadow_list(&self) -> Option<&Vec<ByoShadow>> {
+        match self {
+            AnimatableValue::ShadowList(v) => Some(v),
             _ => None,
         }
     }
@@ -234,6 +248,19 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
         a.blue + (b.blue - a.blue) * t,
         a.alpha + (b.alpha - a.alpha) * t,
     )
+}
+
+/// Interpolate two shadow lists per CSS spec: pad shorter list with transparent zeros,
+/// then interpolate each pair 1:1.
+fn interpolate_shadow_lists(a: &[ByoShadow], b: &[ByoShadow], t: f32) -> Vec<ByoShadow> {
+    let max_len = a.len().max(b.len());
+    (0..max_len)
+        .map(|i| {
+            let sa = a.get(i).unwrap_or(&ByoShadow::TRANSPARENT_ZERO);
+            let sb = b.get(i).unwrap_or(&ByoShadow::TRANSPARENT_ZERO);
+            sa.interpolate(sb, t)
+        })
+        .collect()
 }
 
 /// Approximate equality for `Val` values (avoids spurious transitions).
@@ -598,6 +625,96 @@ mod tests {
         assert_eq!(current, 0.0);
         assert_eq!(velocity, 0.0);
         assert_eq!(target, 100.0);
+    }
+
+    // --- Shadow list interpolation tests ---
+
+    #[test]
+    fn interpolate_shadow_list_equal_length() {
+        let a = vec![ByoShadow {
+            color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(0.0),
+            blur_radius: Val::Px(0.0),
+            spread_radius: Val::Px(0.0),
+            inset: false,
+        }];
+        let b = vec![ByoShadow {
+            color: Color::srgba(0.0, 0.0, 0.0, 0.1),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(10.0),
+            blur_radius: Val::Px(20.0),
+            spread_radius: Val::Px(0.0),
+            inset: false,
+        }];
+        let va = AnimatableValue::ShadowList(a);
+        let vb = AnimatableValue::ShadowList(b);
+        let mid = va.interpolate(&vb, 0.5);
+        let list = mid.as_shadow_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].y_offset, Val::Px(5.0));
+        assert_eq!(list[0].blur_radius, Val::Px(10.0));
+    }
+
+    #[test]
+    fn interpolate_shadow_list_unequal_length() {
+        let a = vec![ByoShadow {
+            color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(4.0),
+            blur_radius: Val::Px(6.0),
+            spread_radius: Val::Px(0.0),
+            inset: false,
+        }];
+        let b = vec![
+            ByoShadow {
+                color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+                x_offset: Val::Px(0.0),
+                y_offset: Val::Px(4.0),
+                blur_radius: Val::Px(6.0),
+                spread_radius: Val::Px(0.0),
+                inset: false,
+            },
+            ByoShadow {
+                color: Color::srgba(1.0, 0.0, 0.0, 1.0),
+                x_offset: Val::Px(0.0),
+                y_offset: Val::Px(10.0),
+                blur_radius: Val::Px(20.0),
+                spread_radius: Val::Px(0.0),
+                inset: false,
+            },
+        ];
+        let va = AnimatableValue::ShadowList(a);
+        let vb = AnimatableValue::ShadowList(b);
+        let mid = va.interpolate(&vb, 1.0);
+        let list = mid.as_shadow_list().unwrap();
+        assert_eq!(list.len(), 2);
+        // Second shadow should be fully the target
+        assert_eq!(list[1].y_offset, Val::Px(10.0));
+    }
+
+    #[test]
+    fn interpolate_shadow_list_transparent_fadein() {
+        // From empty list to a single shadow
+        let a: Vec<ByoShadow> = vec![];
+        let b = vec![ByoShadow {
+            color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+            x_offset: Val::Px(0.0),
+            y_offset: Val::Px(10.0),
+            blur_radius: Val::Px(20.0),
+            spread_radius: Val::Px(0.0),
+            inset: false,
+        }];
+        let va = AnimatableValue::ShadowList(a);
+        let vb = AnimatableValue::ShadowList(b);
+        let mid = va.interpolate(&vb, 0.5);
+        let list = mid.as_shadow_list().unwrap();
+        assert_eq!(list.len(), 1);
+        // y_offset should be halfway
+        assert_eq!(list[0].y_offset, Val::Px(5.0));
+        // alpha should be halfway from 0 to 0.5
+        let c = list[0].color.to_srgba();
+        assert!((c.alpha - 0.25).abs() < 0.02);
     }
 
     #[test]

@@ -54,6 +54,12 @@ pub struct ViewProps {
     // Input events
     pub events: Option<String>,
     pub pointer_events: Option<ByoPointerEvents>,
+    // Box shadow
+    pub box_shadow: Option<String>,
+    #[prop(skip)]
+    pub tw_box_shadow: Option<Vec<ByoShadow>>,
+    #[prop(skip)]
+    pub tw_shadow_color: Option<Color>,
     // Transition
     pub transition: Option<String>,
     #[prop(skip)]

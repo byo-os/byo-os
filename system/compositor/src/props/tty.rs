@@ -7,6 +7,10 @@ use byo::{FromProps, ToProps};
 ///
 /// Wire props override class-derived values. Defaults are applied at
 /// resolution time, not here (so class values can take effect).
+///
+/// Shadow and transition TW-derived fields (tw_box_shadow, tw_shadow_color,
+/// tw_transition_*) are not stored here — they flow through a temporary
+/// `ViewProps` during reconciliation/transition handling via `apply_classes`.
 #[derive(Component, Debug, Clone, Default, FromProps, ToProps)]
 pub struct TtyProps {
     pub font_size: Option<f32>,
@@ -14,6 +18,8 @@ pub struct TtyProps {
     pub cols: Option<u32>,
     pub rows: Option<u32>,
     pub class: Option<String>,
+    pub box_shadow: Option<String>,
+    pub transition: Option<String>,
 }
 
 /// Defaults applied at resolution time.
