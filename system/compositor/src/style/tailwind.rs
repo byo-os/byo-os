@@ -1296,6 +1296,22 @@ fn apply_transition_class(
             *easing = Some(EaseFn::CubicInOut);
             return;
         }
+        "ease-spring" => {
+            *easing = Some(EaseFn::spring(100.0, 12.0));
+            return;
+        }
+        "ease-spring-bouncy" => {
+            *easing = Some(EaseFn::spring(100.0, 6.0));
+            return;
+        }
+        "ease-spring-stiff" => {
+            *easing = Some(EaseFn::spring(300.0, 24.0));
+            return;
+        }
+        "ease-spring-soft" => {
+            *easing = Some(EaseFn::spring(50.0, 8.0));
+            return;
+        }
         _ => {}
     }
 
