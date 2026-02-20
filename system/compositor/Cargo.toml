@@ -8,3 +8,5 @@ byo.workspace = true
 bevy.workspace = true
 bytes.workspace = true
 alacritty_terminal = { version = "0.25", default-features = false }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

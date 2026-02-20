@@ -7,6 +7,7 @@
 pub mod assert;
 pub mod byte_str;
 pub mod emitter;
+pub mod kitty_gfx;
 pub mod lexer;
 pub mod parser;
 pub mod props;
@@ -14,6 +15,7 @@ pub mod protocol;
 pub mod scanner;
 pub mod tree;
 pub mod types;
+pub mod vars;
 
 pub use byte_str::{ByteStr, ByteString};
 pub use props::{FromProps, ReadProp, ToProps, WriteProp};

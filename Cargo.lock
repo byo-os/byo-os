@@ -1715,9 +1715,11 @@ name = "byo-compositor"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "bevy",
  "byo",
  "bytes",
+ "image",
 ]
 
 [[package]]

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use bytes::Bytes;
 
 use byo::scanner::{Handler, Scanner};
-use byo::{APC_START, GRAPHICS_PROTOCOL_ID, PROTOCOL_ID, ST};
+use byo::{APC_START, KITTY_GFX_PROTOCOL_ID, PROTOCOL_ID, ST};
 
 use crate::router::RouterMsg;
 
@@ -65,7 +65,7 @@ impl Handler for CollectHandler {
         let _ = self.router_tx.try_send(msg);
     }
 
-    fn on_graphics(&mut self, payload: &[u8]) {
+    fn on_kitty_gfx(&mut self, payload: &[u8]) {
         let msg = RouterMsg::Graphics {
             from: self.process_id,
             raw: payload.to_vec(),
@@ -185,7 +185,7 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
                 frame.clear();
                 frame.reserve(APC_START.len() + 1 + payload.len() + ST.len());
                 frame.extend_from_slice(APC_START);
-                frame.push(GRAPHICS_PROTOCOL_ID);
+                frame.push(KITTY_GFX_PROTOCOL_ID);
                 frame.extend_from_slice(payload);
                 frame.extend_from_slice(ST);
                 stdin.write_all(&frame).await

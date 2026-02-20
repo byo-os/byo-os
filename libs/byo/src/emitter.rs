@@ -5,7 +5,7 @@
 
 use std::io;
 
-use crate::protocol::{APC_START, Command, PROTOCOL_ID, Prop, ST};
+use crate::protocol::{APC_START, Command, KITTY_GFX_PROTOCOL_ID, PROTOCOL_ID, Prop, ST};
 
 /// Returns `true` if `value` can be written bare (unquoted).
 pub fn is_bare(value: &str) -> bool {
@@ -150,6 +150,30 @@ impl<W: io::Write> Emitter<W> {
             }
         }
         self.writer.write_all(bytes)
+    }
+
+    // -- Graphics framing ----------------------------------------------------
+
+    /// Writes a complete kitty graphics protocol APC frame (`ESC _ G <payload> ESC \`).
+    ///
+    /// The payload should be pre-formatted kitty control data
+    /// (e.g. `OK` for a query response, or `key=value,...;base64`).
+    ///
+    /// ```
+    /// use byo::emitter::Emitter;
+    ///
+    /// let mut buf = Vec::new();
+    /// let mut em = Emitter::new(&mut buf);
+    /// em.kitty_gfx_frame(b"i=1;OK").unwrap();
+    ///
+    /// assert_eq!(buf, b"\x1b_Gi=1;OK\x1b\\");
+    /// ```
+    pub fn kitty_gfx_frame(&mut self, payload: &[u8]) -> io::Result<()> {
+        self.writer.write_all(APC_START)?;
+        self.writer.write_all(&[KITTY_GFX_PROTOCOL_ID])?;
+        self.writer.write_all(payload)?;
+        self.writer.write_all(ST)?;
+        self.writer.flush()
     }
 
     // -- Batch framing -------------------------------------------------------

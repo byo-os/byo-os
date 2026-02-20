@@ -12,27 +12,30 @@ use std::io::{self, Read, Stdout};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use crate::id_map::IdMap;
+use crate::kitty_gfx::store::KittyGfxImageStore;
+
 /// A batch of parsed BYO commands received from stdin.
 #[derive(Message)]
 pub struct ByoBatch(pub Vec<byo::Command>);
 
-/// Passthrough bytes destined for a named TTY entity.
-#[derive(Message)]
-pub struct TtyInput {
-    pub target: String,
-    pub data: Vec<u8>,
+/// Ordered stdin event — preserves interleaving from the scanner.
+pub enum StdinEvent {
+    /// A batch of parsed BYO protocol commands.
+    Byo(Vec<byo::Command>),
+    /// Passthrough bytes destined for a named TTY entity.
+    Tty { target: String, data: Vec<u8> },
+    /// Raw kitty graphics payload, tagged with the current passthrough target.
+    KittyGfx {
+        payload: Vec<u8>,
+        tty_target: String,
+    },
 }
 
-/// Resource wrapping the receiving end of the stdin command channel.
+/// Resource wrapping the receiving end of the unified stdin event channel.
 #[derive(Resource)]
-pub struct ByoCommandQueue {
-    rx: Mutex<mpsc::Receiver<Vec<byo::Command>>>,
-}
-
-/// Resource wrapping the receiving end of the tty input channel.
-#[derive(Resource)]
-pub struct TtyInputQueue {
-    rx: Mutex<mpsc::Receiver<TtyInput>>,
+pub struct StdinEventQueue {
+    pub rx: Mutex<mpsc::Receiver<StdinEvent>>,
 }
 
 /// Resource wrapping a shared stdout emitter for sending BYO commands.
@@ -53,13 +56,18 @@ impl StdoutEmitter {
         let mut em = self.inner.lock().unwrap();
         em.frame(f).unwrap();
     }
+
+    /// Send a framed kitty graphics response via stdout.
+    pub fn kitty_gfx_frame(&self, payload: &[u8]) {
+        let mut em = self.inner.lock().unwrap();
+        em.kitty_gfx_frame(payload).unwrap();
+    }
 }
 
-/// Scanner handler that parses BYO payloads and sends them through a channel,
-/// then wakes the Bevy event loop for immediate processing.
+/// Scanner handler that parses BYO payloads and sends them through a single
+/// ordered channel, then wakes the Bevy event loop for immediate processing.
 struct StdinHandler {
-    tx: mpsc::Sender<Vec<byo::Command>>,
-    tty_tx: mpsc::Sender<TtyInput>,
+    tx: mpsc::Sender<StdinEvent>,
     event_loop_proxy: EventLoopProxy<WinitUserEvent>,
     /// Current passthrough target. `"/"` = root tty, empty = discard.
     pipe_target: String,
@@ -96,7 +104,7 @@ impl Handler for StdinHandler {
                     }
                 }
 
-                if self.tx.send(commands).is_ok() {
+                if self.tx.send(StdinEvent::Byo(commands)).is_ok() {
                     let _ = self.event_loop_proxy.send_event(WinitUserEvent::WakeUp);
                 }
             }
@@ -107,15 +115,26 @@ impl Handler for StdinHandler {
         }
     }
 
+    fn on_kitty_gfx(&mut self, payload: &[u8]) {
+        trace!("received graphics payload ({} bytes)", payload.len());
+        let event = StdinEvent::KittyGfx {
+            payload: payload.to_vec(),
+            tty_target: self.pipe_target.clone(),
+        };
+        if self.tx.send(event).is_ok() {
+            let _ = self.event_loop_proxy.send_event(WinitUserEvent::WakeUp);
+        }
+    }
+
     fn on_passthrough(&mut self, data: &[u8]) {
         if self.pipe_target.is_empty() {
             return; // discard
         }
-        let input = TtyInput {
+        let event = StdinEvent::Tty {
             target: self.pipe_target.clone(),
             data: data.to_vec(),
         };
-        if self.tty_tx.send(input).is_ok() {
+        if self.tx.send(event).is_ok() {
             let _ = self.event_loop_proxy.send_event(WinitUserEvent::WakeUp);
         }
     }
@@ -125,7 +144,6 @@ impl Handler for StdinHandler {
 /// emitter, and sends the initial observe subscription.
 pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrapper>) {
     let (tx, rx) = mpsc::channel();
-    let (tty_tx, tty_rx) = mpsc::channel();
 
     // Clone the inner winit EventLoopProxy for the stdin thread
     let proxy: EventLoopProxy<WinitUserEvent> = (*event_loop_proxy).clone();
@@ -135,7 +153,6 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
         let mut scanner = Scanner::new();
         let mut handler = StdinHandler {
             tx,
-            tty_tx,
             event_loop_proxy: proxy,
             pipe_target: "/".to_string(),
         };
@@ -169,44 +186,66 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
         )
     });
 
-    commands.insert_resource(ByoCommandQueue { rx: Mutex::new(rx) });
-    commands.insert_resource(TtyInputQueue {
-        rx: Mutex::new(tty_rx),
-    });
+    commands.insert_resource(StdinEventQueue { rx: Mutex::new(rx) });
     commands.insert_resource(emitter);
 }
 
-/// PreUpdate system: drains the command channel into `ByoBatch` messages.
-pub fn drain_commands(
-    queue: Res<ByoCommandQueue>,
-    mut messages: MessageWriter<ByoBatch>,
+/// PreUpdate system: drains the unified stdin event queue, feeding TTY data
+/// and graphics commands in the exact order they arrived from the scanner.
+///
+/// This preserves cursor positioning: passthrough VT100 sequences update the
+/// cursor before graphics placements that reference cursor position.
+#[allow(clippy::too_many_arguments)]
+pub fn process_stdin_events(
+    queue: Res<StdinEventQueue>,
+    mut byo_messages: MessageWriter<ByoBatch>,
+    id_map: Res<IdMap>,
+    mut ttys: Query<&mut crate::tty::TtyState>,
+    mut store: ResMut<KittyGfxImageStore>,
+    mut images: ResMut<Assets<Image>>,
+    emitter: Res<StdoutEmitter>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     let rx = queue.rx.lock().unwrap();
-    let mut got_commands = false;
-    while let Ok(commands) = rx.try_recv() {
-        debug!("received batch of {} commands", commands.len());
-        messages.write(ByoBatch(commands));
-        got_commands = true;
-    }
-    if got_commands {
-        redraw.write(RequestRedraw);
-    }
-}
+    let mut got_events = false;
+    while let Ok(event) = rx.try_recv() {
+        got_events = true;
+        match event {
+            StdinEvent::Byo(commands) => {
+                debug!("received batch of {} commands", commands.len());
+                byo_messages.write(ByoBatch(commands));
+            }
+            StdinEvent::Tty { target, data } => {
+                let entity = id_map.get_entity(&target);
+                if let Some(entity) = entity
+                    && let Ok(mut state) = ttys.get_mut(entity)
+                {
+                    state.feed(&data);
+                }
+            }
+            StdinEvent::KittyGfx {
+                payload,
+                tty_target,
+            } => {
+                // Read cursor position from the target TTY before processing.
+                let cursor_pos = id_map
+                    .get_entity(&tty_target)
+                    .and_then(|e| ttys.get(e).ok())
+                    .map(|state| state.cursor_point())
+                    .unwrap_or((0, 0));
 
-/// PreUpdate system: drains the tty input channel into `TtyInput` messages.
-pub fn drain_tty_input(
-    queue: Res<TtyInputQueue>,
-    mut messages: MessageWriter<TtyInput>,
-    mut redraw: MessageWriter<RequestRedraw>,
-) {
-    let rx = queue.rx.lock().unwrap();
-    let mut got_input = false;
-    while let Ok(input) = rx.try_recv() {
-        messages.write(input);
-        got_input = true;
+                crate::kitty_gfx::systems::process_single(
+                    &payload,
+                    &mut store,
+                    &mut images,
+                    &emitter,
+                    cursor_pos,
+                    &tty_target,
+                );
+            }
+        }
     }
-    if got_input {
+    if got_events {
         redraw.write(RequestRedraw);
     }
 }

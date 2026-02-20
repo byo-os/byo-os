@@ -51,7 +51,7 @@ pub const ST: &[u8] = b"\x1b\\";
 pub const PROTOCOL_ID: u8 = b'B';
 
 /// Graphics protocol identifier (kitty graphics protocol, `G` prefix)
-pub const GRAPHICS_PROTOCOL_ID: u8 = b'G';
+pub const KITTY_GFX_PROTOCOL_ID: u8 = b'G';
 
 /// Anonymous object ID (`_`). Cannot be updated, deleted, or referenced.
 pub const ANON: &str = "_";

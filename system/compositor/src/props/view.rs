@@ -51,6 +51,8 @@ pub struct ViewProps {
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
+    // Background image (e.g. "$img(42)")
+    pub background_image: Option<String>,
     // Input events
     pub events: Option<String>,
     pub pointer_events: Option<ByoPointerEvents>,

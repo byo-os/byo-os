@@ -6,7 +6,8 @@ use bevy::ui::UiSystems;
 use crate::commands;
 use crate::events;
 use crate::id_map::IdMap;
-use crate::io::{self, ByoBatch, TtyInput};
+use crate::io::{self, ByoBatch};
+use crate::kitty_gfx;
 use crate::style;
 use crate::transition;
 use crate::tty;
@@ -22,21 +23,15 @@ impl Plugin for ByoPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<IdMap>()
             .init_resource::<events::observers::PointerEnterState>()
+            .init_resource::<kitty_gfx::store::KittyGfxImageStore>()
             .add_message::<ByoBatch>()
-            .add_message::<TtyInput>()
             .add_systems(
                 Startup,
                 (io::setup_io, setup_engine, tty::setup_root_tty).chain(),
             )
             .add_systems(
                 PreUpdate,
-                (
-                    io::drain_commands,
-                    io::drain_tty_input,
-                    commands::process_commands,
-                    tty::feed_tty_input,
-                )
-                    .chain(),
+                (io::process_stdin_events, commands::process_commands).chain(),
             )
             .add_systems(
                 PostUpdate,
@@ -46,6 +41,7 @@ impl Plugin for ByoPlugin {
                     transition::systems::handle_layer_transitions,
                     transition::systems::handle_tty_transitions,
                     style::reconcile_views,
+                    style::reconcile_view_images,
                     style::reconcile_view_transforms,
                     style::reconcile_text,
                     style::reconcile_tty_style,
@@ -58,6 +54,7 @@ impl Plugin for ByoPlugin {
                     style::reorder_children,
                     tty::resize_tty,
                     tty::reconcile_tty,
+                    kitty_gfx::placement::reconcile_tty_placements,
                     ApplyDeferred,
                 )
                     .chain()

@@ -349,6 +349,7 @@ fn spawn_entity(
                 ByoTty,
                 tp,
                 state,
+                crate::kitty_gfx::placement::TtyPlacements::default(),
                 Node {
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),

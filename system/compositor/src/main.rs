@@ -3,6 +3,7 @@ mod components;
 mod events;
 mod id_map;
 mod io;
+mod kitty_gfx;
 mod plugin;
 mod props;
 mod render;

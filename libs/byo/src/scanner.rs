@@ -4,7 +4,7 @@
 //! terminal emulator, routing BYO/OS protocol messages separately
 //! from VT100 content.
 
-use crate::protocol::{GRAPHICS_PROTOCOL_ID, PROTOCOL_ID};
+use crate::protocol::{KITTY_GFX_PROTOCOL_ID, PROTOCOL_ID};
 
 /// Handler for scanner events. All methods have default no-op
 /// implementations, so you only need to implement the ones you
@@ -14,9 +14,9 @@ pub trait Handler {
     /// the `B` prefix, before ST).
     fn on_byo(&mut self, _payload: &[u8]) {}
 
-    /// Called for each complete graphics protocol APC payload
+    /// Called for each complete kitty graphics protocol APC payload
     /// (bytes after the `G` prefix, before ST).
-    fn on_graphics(&mut self, _payload: &[u8]) {}
+    fn on_kitty_gfx(&mut self, _payload: &[u8]) {}
 
     /// Called for bytes that should be forwarded to a VT100 parser
     /// (everything not inside a recognized APC sequence).
@@ -136,7 +136,7 @@ impl Scanner {
                         // APC complete (ESC \) — dispatch based on prefix
                         match self.buf.first().copied() {
                             Some(PROTOCOL_ID) => handler.on_byo(&self.buf[1..]),
-                            Some(GRAPHICS_PROTOCOL_ID) => handler.on_graphics(&self.buf[1..]),
+                            Some(KITTY_GFX_PROTOCOL_ID) => handler.on_kitty_gfx(&self.buf[1..]),
                             _ => {} // Unknown APC protocol — silently discard
                         }
                         self.buf.clear();
@@ -189,7 +189,7 @@ mod tests {
         fn on_byo(&mut self, payload: &[u8]) {
             self.byo.push(payload.to_vec());
         }
-        fn on_graphics(&mut self, payload: &[u8]) {
+        fn on_kitty_gfx(&mut self, payload: &[u8]) {
             self.graphics.push(payload.to_vec());
         }
         fn on_passthrough(&mut self, data: &[u8]) {

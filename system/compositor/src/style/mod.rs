@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use crate::components::ByoOrder;
 use crate::components::ByoTty;
 use crate::events::config::EventSubscriptions;
+use crate::kitty_gfx::store::KittyGfxImageStore;
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
@@ -81,6 +82,7 @@ pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
         tw_transition_duration,
         tw_transition_easing,
         tw_transition_delay,
+        background_image,
         events,
         pointer_events,
         box_shadow,
@@ -349,6 +351,49 @@ pub fn reconcile_views(
             } else {
                 Visibility::Inherited
             };
+        }
+    }
+}
+
+/// Reconcile `background-image` prop → `ImageNode` component.
+///
+/// Runs over all views with a `background_image` prop (not just Changed),
+/// because images may be uploaded after the view is created. Only does
+/// actual work when the state needs updating.
+pub fn reconcile_view_images(
+    mut commands: Commands,
+    query: Query<(Entity, &ViewProps, Option<&ImageNode>)>,
+    store: Res<KittyGfxImageStore>,
+) {
+    for (entity, props, existing_image) in &query {
+        let resolved = resolve_view_props(props);
+        match resolved.background_image {
+            Some(ref value) => {
+                // Scan for $img(N)
+                let refs = byo::vars::scan(value);
+                let img_ref = refs.iter().find(|r| r.name == "img");
+                if let Some(var) = img_ref
+                    && let Ok(id) = var.args.parse::<u32>()
+                    && let Some(kitty_img) = store.get(id)
+                {
+                    // Check if ImageNode already has the correct handle
+                    let needs_update =
+                        existing_image.is_none_or(|img| img.image != kitty_img.handle);
+                    if needs_update {
+                        commands.entity(entity).insert(ImageNode {
+                            image: kitty_img.handle.clone(),
+                            ..default()
+                        });
+                    }
+                }
+                // If image not found yet, do nothing — will reconcile when uploaded
+            }
+            None => {
+                // Remove ImageNode if present
+                if existing_image.is_some() {
+                    commands.entity(entity).remove::<ImageNode>();
+                }
+            }
         }
     }
 }

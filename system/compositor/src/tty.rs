@@ -15,7 +15,6 @@ use alacritty_terminal::vte::ansi::Color as AnsiColor;
 
 use crate::components::ByoTty;
 use crate::id_map::IdMap;
-use crate::io::TtyInput;
 use crate::props::tty::TtyProps;
 
 /// Terminal dimensions for `alacritty_terminal`.
@@ -134,6 +133,15 @@ impl TtyState {
         self.dirty = true;
     }
 
+    /// Read the current cursor position as (column, row).
+    pub fn cursor_point(&self) -> (usize, usize) {
+        let content = self.term.renderable_content();
+        (
+            content.cursor.point.column.0,
+            content.cursor.point.line.0 as usize,
+        )
+    }
+
     /// Resize the terminal grid.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         if cols != self.cols || rows != self.rows {
@@ -150,32 +158,6 @@ impl TtyState {
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
-
-/// PreUpdate system: reads `TtyInput` messages and feeds data to target TTY entities.
-pub fn feed_tty_input(
-    mut messages: MessageReader<TtyInput>,
-    id_map: Res<IdMap>,
-    mut ttys: Query<&mut TtyState>,
-    mut redraw: MessageWriter<RequestRedraw>,
-) {
-    let mut fed_any = false;
-    for input in messages.read() {
-        let entity = if input.target == "/" {
-            id_map.get_entity("/")
-        } else {
-            id_map.get_entity(&input.target)
-        };
-        if let Some(entity) = entity
-            && let Ok(mut state) = ttys.get_mut(entity)
-        {
-            state.feed(&input.data);
-            fed_any = true;
-        }
-    }
-    if fed_any {
-        redraw.write(RequestRedraw);
-    }
-}
 
 /// PostUpdate system: calculates terminal grid size from layout dimensions.
 ///
@@ -508,6 +490,7 @@ pub fn setup_root_tty(mut commands: Commands, mut id_map: ResMut<IdMap>) {
             ByoTty,
             tty_props,
             state,
+            crate::kitty_gfx::placement::TtyPlacements::default(),
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
@@ -732,6 +715,40 @@ mod tests {
         let rows = grid_text(&state);
         assert_eq!(rows[0], "abcde");
         assert_eq!(rows[1], "fgh");
+    }
+
+    // -----------------------------------------------------------------------
+    // cursor_point() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cursor_point_initial() {
+        let state = make_state(80, 24);
+        assert_eq!(state.cursor_point(), (0, 0));
+    }
+
+    #[test]
+    fn cursor_point_after_text() {
+        let mut state = make_state(80, 24);
+        state.feed(b"hello");
+        assert_eq!(state.cursor_point(), (5, 0));
+    }
+
+    #[test]
+    fn cursor_point_after_newline() {
+        let mut state = make_state(80, 24);
+        state.feed(b"hello\nworld");
+        // After "hello\n" cursor is at col 0, row 1; after "world" it's at col 5, row 1
+        assert_eq!(state.cursor_point(), (5, 1));
+    }
+
+    #[test]
+    fn cursor_point_after_cup() {
+        let mut state = make_state(80, 24);
+        // VT100 CUP: \e[row;colH (1-based)
+        state.feed(b"\x1b[10;20H");
+        // cursor_point returns 0-based
+        assert_eq!(state.cursor_point(), (19, 9));
     }
 
     // -----------------------------------------------------------------------
