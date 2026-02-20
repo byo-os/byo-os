@@ -154,6 +154,11 @@ impl Router {
         if let Some(queue) = self.output_queues.get_mut(&from)
             && queue.is_blocked()
         {
+            tracing::warn!(
+                "handle_byo: output queue blocked for {client} (pid={}), buffering {} commands",
+                from.0,
+                commands.len()
+            );
             queue.push(RouterMsg::Byo { from, commands });
             return;
         }
@@ -245,8 +250,6 @@ impl Router {
 
         // Determine routing: check for daemon-claimed types.
         let mut expand_msgs = Vec::new();
-        let mut reduced_buf = Vec::new();
-
         for cmd in &commands {
             match cmd {
                 Command::Upsert { kind, id, props } if *id != "_" => {
@@ -269,15 +272,10 @@ impl Router {
                     {
                         let qid = QualifiedId::new(&client, id);
 
-                        reduced_buf.clear();
-                        if self.state.write_reduced_command(&qid, &mut reduced_buf) {
-                            let expand_seq = self.next_expand_seq(subscriber);
-                            let mut expand_buf = Vec::new();
-                            let _ = write!(
-                                expand_buf,
-                                "\n?expand {expand_seq} {}",
-                                String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
-                            );
+                        let expand_seq = self.next_expand_seq(subscriber);
+                        let mut expand_buf = Vec::new();
+                        let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
+                        if self.state.write_reduced_expand_props(&qid, &mut expand_buf) {
                             expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
                         }
                     }
@@ -301,8 +299,7 @@ impl Router {
                 } else {
                     batch.add_pending_expand(subscriber, expand_seq, qid, 0);
                 }
-                self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
-                    .await;
+                self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
             }
 
             if let Some(queue) = self.output_queues.get_mut(&from) {
@@ -387,8 +384,7 @@ impl Router {
             let arc = Arc::new(raw);
             for &pid in observers {
                 if pid != from {
-                    self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)))
-                        .await;
+                    self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)));
                 }
             }
         }
@@ -407,8 +403,7 @@ impl Router {
             let arc = Arc::new(raw);
             for &pid in observers {
                 if pid != from {
-                    self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)))
-                        .await;
+                    self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)));
                 }
             }
         }
@@ -468,8 +463,7 @@ impl Router {
             // Notify daemons about their expansion objects being destroyed.
             for (daemon_pid, notification) in daemon_notifications {
                 if daemon_pid != process {
-                    self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification)))
-                        .await;
+                    self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification)));
                 }
             }
         }
@@ -540,19 +534,25 @@ impl Router {
             .map(|o| (o.id.clone(), o.kind.clone()))
             .collect();
 
-        let mut reduced_buf = Vec::new();
-        for (qid, _kind) in &objects {
-            reduced_buf.clear();
-            if self.state.write_reduced_command(qid, &mut reduced_buf) {
+        if !objects.is_empty() {
+            // Create a synthetic replay batch to track the expansion responses.
+            // Empty commands signals this is a replay batch (no original app batch
+            // to rewrite — the expansion results just need to be stored in the
+            // state tree and forwarded to observers).
+            let mut batch = PendingBatch::new(from, client.to_owned(), Vec::new());
+
+            for (qid, _kind) in &objects {
                 let expand_seq = self.next_expand_seq(from);
                 let mut expand_buf = Vec::new();
-                let _ = write!(
-                    expand_buf,
-                    "\n?expand {expand_seq} {}",
-                    String::from_utf8_lossy(&reduced_buf).trim_start_matches('+')
-                );
-                self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)))
-                    .await;
+                let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
+                if self.state.write_reduced_expand_props(qid, &mut expand_buf) {
+                    batch.add_pending_expand(from, expand_seq, qid.clone(), 0);
+                    self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)));
+                }
+            }
+
+            if !batch.is_ready() {
+                self.pending_batches.push(batch);
             }
         }
     }
@@ -614,17 +614,27 @@ impl Router {
         let qualified_id = qualify(client, id);
         let qid = match QualifiedId::parse(&qualified_id) {
             Some(q) => q,
-            None => return, // Can't resolve unqualified target
+            None => {
+                tracing::warn!("handle_event: can't qualify {id} from {client}");
+                return;
+            }
         };
 
         // Look up the owner of this object in the state tree.
         let target_pid = match self.state.get(&qid) {
             Some(obj) => obj.data,
-            None => return, // Object doesn't exist — drop silently
+            None => {
+                tracing::warn!(
+                    "handle_event: {qid} not in state tree (event={} from={client})",
+                    kind.as_str()
+                );
+                return;
+            }
         };
 
         // Don't route events back to the sender.
         if target_pid == from {
+            tracing::warn!("handle_event: dropping {qid} — target_pid == from ({client})");
             return;
         }
 
@@ -638,12 +648,17 @@ impl Router {
         let remapped_seq = self.next_event_seq(target_pid, event_type);
         let dequalified_target = dequalify(&dest_client, &qualified_id);
 
+        tracing::info!(
+            "handle_event: routing {event_type}({seq}) {qid} → pid={} as {event_type}({remapped_seq}) {dequalified_target}",
+            target_pid.0
+        );
+
         // Serialize the event with remapped seq and dequalified target.
         let mut buf = Vec::new();
         let mut em = Emitter::new(&mut buf);
         let _ = em.event(event_type, remapped_seq, dequalified_target, props);
 
-        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf))).await;
+        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf)));
 
         // Store PendingAck for the return trip.
         self.pending_acks.insert(
@@ -665,16 +680,29 @@ impl Router {
         let pending = self.pending_acks.remove(&(from, event_type.clone(), seq));
 
         let Some(pending) = pending else {
-            return; // Stale or unknown ACK — drop silently
+            tracing::warn!(
+                "handle_ack: no pending ACK for {}({seq}) from pid={}",
+                event_type,
+                from.0
+            );
+            return;
         };
+
+        tracing::info!(
+            "handle_ack: routing {}({seq}) from pid={} → pid={} as {}({})",
+            event_type,
+            from.0,
+            pending.sender.0,
+            event_type,
+            pending.sender_seq
+        );
 
         // Serialize the ACK with the original sender's seq.
         let mut buf = Vec::new();
         let mut em = Emitter::new(&mut buf);
         let _ = em.ack(&event_type, pending.sender_seq, props);
 
-        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)))
-            .await;
+        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)));
     }
 
     /// Route a custom request to the owner of the target object.
@@ -719,7 +747,7 @@ impl Router {
         let mut em = Emitter::new(&mut buf);
         let _ = em.request(kind_name, remapped_seq, dequalified_target, props);
 
-        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf))).await;
+        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf)));
 
         self.pending_responses.insert(
             (target_pid, kind_name.to_owned(), remapped_seq),
@@ -760,8 +788,7 @@ impl Router {
             let _ = em.response(kind_name, pending.sender_seq, props);
         }
 
-        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)))
-            .await;
+        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)));
     }
 
     /// Resync an observer by replaying the full projected state tree.
@@ -775,7 +802,7 @@ impl Router {
         };
         let replay = crate::state::project_tree(&self.state, types);
         if !replay.is_empty() {
-            self.send_to(pid, WriteMsg::Byo(Arc::new(replay))).await;
+            self.send_to(pid, WriteMsg::Byo(Arc::new(replay)));
         }
     }
 
@@ -867,8 +894,7 @@ impl Router {
                         qid,
                         current_depth + 1,
                     );
-                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)))
-                        .await;
+                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
                 }
             }
         }
@@ -1100,8 +1126,7 @@ impl Router {
             }
 
             for (daemon_pid, notification_buf) in daemon_notifications {
-                self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification_buf)))
-                    .await;
+                self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification_buf)));
             }
 
             // Destroy the source object — cascades to all children/expansion objects.
@@ -1131,6 +1156,7 @@ impl Router {
 
         if batch.is_ready() {
             let batch = self.pending_batches.remove(idx);
+            let is_replay = batch.commands.is_empty();
 
             // Reconcile re-expansions using the per-expansion flag.
             let mut reconciliation_buf = Vec::new();
@@ -1154,15 +1180,27 @@ impl Router {
             // Append reconciliation output.
             rewritten.extend_from_slice(&reconciliation_buf);
 
-            // Unblock the process output queue and flush.
             let process_id = batch.from;
-            self.forward_to_observers(&rewritten, process_id).await;
 
-            if let Some(queue) = self.output_queues.get_mut(&process_id) {
-                queue.unblock();
-                let queued = queue.drain();
-                for msg in queued {
-                    Box::pin(self.handle(msg)).await;
+            if is_replay {
+                // Replay batch (from #claim): no original commands to rewrite.
+                // The expansion views are now in the state tree — resync all
+                // observers so they receive the expanded content.
+                let observer_pids: Vec<_> = self.observer_types.keys().copied().collect();
+                for pid in observer_pids {
+                    self.resync_observer(pid).await;
+                }
+            } else {
+                // Normal batch: forward rewritten output to observers.
+                self.forward_to_observers(&rewritten, process_id).await;
+
+                // Unblock the process output queue and flush.
+                if let Some(queue) = self.output_queues.get_mut(&process_id) {
+                    queue.unblock();
+                    let queued = queue.drain();
+                    for msg in queued {
+                        Box::pin(self.handle(msg)).await;
+                    }
                 }
             }
         }
@@ -1224,16 +1262,18 @@ impl Router {
                 payload.to_vec()
             };
             if !projected.is_empty() {
-                self.send_to(target, WriteMsg::Byo(Arc::new(projected)))
-                    .await;
+                self.send_to(target, WriteMsg::Byo(Arc::new(projected)));
             }
         }
     }
 
     /// Send a message to a process.
-    async fn send_to(&self, target: ProcessId, msg: WriteMsg) {
+    ///
+    /// Uses an unbounded channel so this never blocks the router loop.
+    /// The writer task provides natural backpressure via pipe writes.
+    fn send_to(&self, target: ProcessId, msg: WriteMsg) {
         if let Some(process) = self.processes.get(&target) {
-            let _ = process.tx.send(msg).await;
+            let _ = process.tx.send(msg);
         }
     }
 

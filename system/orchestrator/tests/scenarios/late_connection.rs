@@ -38,11 +38,9 @@ async fn late_claim_replays() {
     send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 4: Router should replay reduced state as `?expand` to controls.
-    // The replay format from handle_claim is the reduced command with `+`
-    // stripped, embedded after `?expand SEQ`:
-    //   `\n?expand SEQ type qid props...`
+    //   `\n?expand SEQ qid kind=type props...`
     let s = recv_byo_raw(&mut controls_rx);
-    assert_eq!(s, "\n?expand 0 button app:save label=Save");
+    assert_eq!(s, "\n?expand 0 app:save kind=button label=Save");
 
     // No further messages.
     assert_no_message(&mut controls_rx);

@@ -4,16 +4,18 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::input::keyboard::KeyCode;
+use bevy::input::mouse::MouseButton;
 use bevy::picking::pointer::{Location, PointerId};
 use bevy::prelude::*;
-use bevy::window::CursorLeft;
+use bevy::ui::UiGlobalTransform;
+use bevy::window::{CursorLeft, CursorMoved};
 
 use crate::components::{ByoLayer, ByoText, ByoView, ByoWindow};
 use crate::events::config::EventSubscriptions;
 use crate::id_map::IdMap;
 
 use super::engine::{
-    Button, EngineHandle, EngineInput, Modifiers, PointerData, PointerType, SpineNode,
+    Button, CaptureState, EngineHandle, EngineInput, Modifiers, PointerData, PointerType, SpineNode,
 };
 
 use byo::protocol::EventKind;
@@ -59,7 +61,7 @@ fn build_spine(
         )>,
     >,
     node_query: &Query<&ComputedNode>,
-    global_transforms: &Query<&GlobalTransform>,
+    ui_transforms: &Query<&UiGlobalTransform>,
 ) -> Vec<SpineNode> {
     let mut spine = Vec::new();
     let mut current = Some(entity);
@@ -68,13 +70,13 @@ fn build_spine(
         // Only include BYO entities that are in the IdMap
         if byo_entities.get(e).is_ok() {
             if let Some(byo_id) = id_map.get_id(e) {
-                // Compute local coordinates relative to this element
-                let (local_x, local_y) = compute_local_coords(
+                // Compute local coordinates and dimensions relative to this element
+                let (local_x, local_y, w, h) = compute_local_coords(
                     e,
                     pointer.client_x,
                     pointer.client_y,
                     node_query,
-                    global_transforms,
+                    ui_transforms,
                 );
 
                 if let Ok(subs) = subs_query.get(e) {
@@ -86,6 +88,8 @@ fn build_spine(
                             verbose: sub.verbose,
                             local_x,
                             local_y,
+                            width: w,
+                            height: h,
                         });
                     }
                 }
@@ -139,17 +143,17 @@ fn build_spine_node(
     id_map: &IdMap,
     subs_query: &Query<&EventSubscriptions>,
     node_query: &Query<&ComputedNode>,
-    global_transforms: &Query<&GlobalTransform>,
+    ui_transforms: &Query<&UiGlobalTransform>,
 ) -> Option<SpineNode> {
     let byo_id = id_map.get_id(entity)?;
     let subs = subs_query.get(entity).ok()?;
     let sub = subs.get(kind)?;
-    let (local_x, local_y) = compute_local_coords(
+    let (local_x, local_y, w, h) = compute_local_coords(
         entity,
         pointer.client_x,
         pointer.client_y,
         node_query,
-        global_transforms,
+        ui_transforms,
     );
     Some(SpineNode {
         byo_id: byo_id.to_string(),
@@ -158,30 +162,75 @@ fn build_spine_node(
         verbose: sub.verbose,
         local_x,
         local_y,
+        width: w,
+        height: h,
     })
 }
 
-/// Compute coordinates relative to a UI node's top-left corner.
+/// Compute coordinates relative to a UI node's top-left corner and its dimensions.
+/// Returns (local_x, local_y, width, height) in logical pixels.
+///
+/// Uses Bevy's `ComputedNode::normalize_point()` with `UiGlobalTransform` for correct
+/// coordinate mapping. `normalize_point` returns center-based [-0.5, 0.5] coordinates;
+/// we convert to top-left-based [0, size] coordinates in logical pixels.
 fn compute_local_coords(
     entity: Entity,
     client_x: f64,
     client_y: f64,
     node_query: &Query<&ComputedNode>,
-    global_transforms: &Query<&GlobalTransform>,
-) -> (f64, f64) {
+    ui_transforms: &Query<&UiGlobalTransform>,
+) -> (f64, f64, f64, f64) {
     if let Ok(computed) = node_query.get(entity)
-        && let Ok(global) = global_transforms.get(entity)
+        && let Ok(&transform) = ui_transforms.get(entity)
     {
-        let node_pos = global.translation();
-        let size = computed.size();
-        // Node position is center-based in Bevy UI
-        let top_left_x = node_pos.x - size.x / 2.0;
-        let top_left_y = node_pos.y - size.y / 2.0;
-        let local_x = client_x - top_left_x as f64;
-        let local_y = client_y - top_left_y as f64;
-        (local_x, local_y)
+        let isf = computed.inverse_scale_factor as f64;
+        let phys_size = computed.size();
+        let w = phys_size.x as f64 * isf;
+        let h = phys_size.y as f64 * isf;
+
+        // client_x/client_y are logical pixels (from Bevy picking Location.position),
+        // but normalize_point expects physical pixels (ComputedNode is in physical space).
+        let scale_factor = 1.0 / computed.inverse_scale_factor;
+        if let Some(normalized) = computed.normalize_point(
+            transform,
+            Vec2::new(
+                client_x as f32 * scale_factor,
+                client_y as f32 * scale_factor,
+            ),
+        ) {
+            // normalize_point returns center-based: (0,0)=center, ±0.5=edges
+            // Convert to top-left-based local coordinates
+            let local_x = (normalized.x as f64 + 0.5) * w;
+            let local_y = (normalized.y as f64 + 0.5) * h;
+            (local_x, local_y, w, h)
+        } else {
+            (client_x, client_y, w, h)
+        }
     } else {
-        (client_x, client_y)
+        (client_x, client_y, 0.0, 0.0)
+    }
+}
+
+/// Resolve the BYO ID for an entity, walking up the tree if needed.
+fn resolve_target_id(entity: Entity, id_map: &IdMap, parent_query: &Query<&ChildOf>) -> String {
+    let mut current = Some(entity);
+    while let Some(e) = current {
+        if let Some(id) = id_map.get_id(e) {
+            return id.to_string();
+        }
+        current = parent_query.get(e).ok().map(|c| c.parent());
+    }
+    String::new()
+}
+
+/// Compute element dimensions for a given entity in logical pixels.
+fn compute_element_size(entity: Entity, node_query: &Query<&ComputedNode>) -> (f64, f64) {
+    if let Ok(computed) = node_query.get(entity) {
+        let isf = computed.inverse_scale_factor as f64;
+        let size = computed.size();
+        (size.x as f64 * isf, size.y as f64 * isf)
+    } else {
+        (0.0, 0.0)
     }
 }
 
@@ -231,6 +280,9 @@ fn make_pointer_data(
     pressure: f32,
     primary: bool,
     modifiers: Modifiers,
+    target: String,
+    target_width: f64,
+    target_height: f64,
 ) -> PointerData {
     let mut data = PointerData::mouse(
         location.position.x as f64,
@@ -243,6 +295,9 @@ fn make_pointer_data(
     data.buttons = buttons;
     data.pressure = pressure;
     data.modifiers = modifiers;
+    data.target = target;
+    data.target_width = target_width;
+    data.target_height = target_height;
     data
 }
 
@@ -268,10 +323,12 @@ fn on_pointer_down(
         )>,
     >,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
     let btn = bevy_button(event.button);
     let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
@@ -280,6 +337,9 @@ fn on_pointer_down(
         0.5, // mouse default when pressed
         true,
         modifiers,
+        target,
+        tw,
+        th,
     );
 
     let spine = build_spine(
@@ -291,7 +351,7 @@ fn on_pointer_down(
         &subs_query,
         &byo_entities,
         &node_query,
-        &global_transforms,
+        &ui_transforms,
     );
 
     if !spine.is_empty() {
@@ -309,6 +369,7 @@ fn on_pointer_up(
     engine: Res<EngineHandle>,
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
+    capture_state: Res<CaptureState>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
     byo_entities: Query<
@@ -321,10 +382,18 @@ fn on_pointer_up(
         )>,
     >,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
+    // During active capture, handle_captured_pointer synthesizes PointerUp
+    let pid = pointer_id_to_i64(&event.pointer_id);
+    if capture_state.get(pid).is_some() {
+        return;
+    }
+
     let btn = bevy_button(event.button);
     let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
@@ -333,6 +402,9 @@ fn on_pointer_up(
         0.0,
         true,
         modifiers,
+        target,
+        tw,
+        th,
     );
 
     let spine = build_spine(
@@ -344,7 +416,7 @@ fn on_pointer_up(
         &subs_query,
         &byo_entities,
         &node_query,
-        &global_transforms,
+        &ui_transforms,
     );
 
     if !spine.is_empty() {
@@ -362,6 +434,7 @@ fn on_pointer_move(
     engine: Res<EngineHandle>,
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
+    capture_state: Res<CaptureState>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
     byo_entities: Query<
@@ -374,9 +447,17 @@ fn on_pointer_move(
         )>,
     >,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
+    // During active capture, handle_captured_pointer synthesizes PointerMove
+    let pid = pointer_id_to_i64(&event.pointer_id);
+    if capture_state.get(pid).is_some() {
+        return;
+    }
+
     let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
@@ -385,6 +466,9 @@ fn on_pointer_move(
         0.0,
         true,
         modifiers,
+        target,
+        tw,
+        th,
     );
 
     let spine = build_spine(
@@ -396,7 +480,7 @@ fn on_pointer_move(
         &subs_query,
         &byo_entities,
         &node_query,
-        &global_transforms,
+        &ui_transforms,
     );
 
     if !spine.is_empty() {
@@ -427,7 +511,7 @@ fn on_pointer_over(
         )>,
     >,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
     // Stop Bevy's built-in bubbling — we handle propagation ourselves via the
     // engine's spine-based dispatch. Without this, the observer fires once per
@@ -436,6 +520,8 @@ fn on_pointer_over(
     event.propagate(false);
 
     let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
@@ -444,6 +530,9 @@ fn on_pointer_over(
         0.0,
         true,
         modifiers,
+        target,
+        tw,
+        th,
     );
 
     // --- Subtree-aware enter/leave tracking ---
@@ -487,7 +576,7 @@ fn on_pointer_over(
                 &id_map,
                 &subs_query,
                 &node_query,
-                &global_transforms,
+                &ui_transforms,
             )
         })
         .collect();
@@ -509,7 +598,7 @@ fn on_pointer_over(
         &subs_query,
         &byo_entities,
         &node_query,
-        &global_transforms,
+        &ui_transforms,
     );
     if !over_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
@@ -530,7 +619,7 @@ fn on_pointer_over(
                 &id_map,
                 &subs_query,
                 &node_query,
-                &global_transforms,
+                &ui_transforms,
             )
         })
         .collect();
@@ -561,12 +650,14 @@ fn on_pointer_out(
         )>,
     >,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
     // Stop Bevy's built-in bubbling (same reason as on_pointer_over).
     event.propagate(false);
 
     let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
@@ -575,6 +666,9 @@ fn on_pointer_out(
         0.0,
         true,
         modifiers,
+        target,
+        tw,
+        th,
     );
 
     // Fire pointerout (bubbling via our engine's spine dispatch).
@@ -587,7 +681,7 @@ fn on_pointer_out(
         &subs_query,
         &byo_entities,
         &node_query,
-        &global_transforms,
+        &ui_transforms,
     );
     if !out_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
@@ -605,6 +699,123 @@ fn on_pointer_out(
 }
 
 // ---------------------------------------------------------------------------
+// Window-level capture pointer synthesis
+// ---------------------------------------------------------------------------
+
+/// System that synthesizes PointerMove/PointerUp events during active pointer
+/// captures. Bevy's entity-level picking observers only fire when the cursor is
+/// over a pickable entity — during a drag over empty space (or outside the
+/// window), no events reach the propagation thread. This system uses
+/// window-level `CursorMoved` + `ButtonInput<MouseButton>` to fill the gap
+/// with proper element-local coordinates.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_captured_pointer(
+    capture_state: Res<CaptureState>,
+    engine: Res<EngineHandle>,
+    id_map: Res<IdMap>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mut cursor_moved: MessageReader<CursorMoved>,
+    windows: Query<&Window>,
+    node_query: Query<&ComputedNode>,
+    ui_transforms: Query<&UiGlobalTransform>,
+) {
+    if capture_state.is_empty() {
+        // Drain to avoid stale messages building up
+        cursor_moved.read().for_each(drop);
+        return;
+    }
+
+    // Collect last cursor position this frame
+    let last_move_pos = cursor_moved.read().last().map(|e| e.position);
+    let button_released = mouse_buttons.just_released(MouseButton::Left);
+
+    if last_move_pos.is_none() && !button_released {
+        return;
+    }
+
+    // Prefer last CursorMoved position, fall back to window cursor position
+    let position =
+        last_move_pos.or_else(|| windows.iter().next().and_then(|w| w.cursor_position()));
+    let Some(pos) = position else { return };
+
+    let modifiers = read_modifiers(&keys);
+
+    // Compute buttons bitmask from current mouse state
+    let mut buttons: u16 = 0;
+    if mouse_buttons.pressed(MouseButton::Left) {
+        buttons |= 1;
+    }
+    if mouse_buttons.pressed(MouseButton::Right) {
+        buttons |= 2;
+    }
+    if mouse_buttons.pressed(MouseButton::Middle) {
+        buttons |= 4;
+    }
+
+    for (pointer_id, byo_id) in capture_state.snapshot() {
+        let Some(entity) = id_map.get_entity(&byo_id) else {
+            continue;
+        };
+
+        let (local_x, local_y, w, h) = compute_local_coords(
+            entity,
+            pos.x as f64,
+            pos.y as f64,
+            &node_query,
+            &ui_transforms,
+        );
+
+        let spine = vec![SpineNode {
+            byo_id: byo_id.clone(),
+            phase: super::config::Phase::Bubble,
+            passive: false,
+            verbose: false,
+            local_x,
+            local_y,
+            width: w,
+            height: h,
+        }];
+
+        if last_move_pos.is_some() {
+            let mut pointer = PointerData::mouse(pos.x as f64, pos.y as f64, true);
+            pointer.pointer_id = pointer_id;
+            pointer.button = -1;
+            pointer.buttons = buttons;
+            pointer.pressure = if buttons > 0 { 0.5 } else { 0.0 };
+            pointer.modifiers = modifiers;
+            pointer.target = byo_id.clone();
+            pointer.target_width = w;
+            pointer.target_height = h;
+
+            engine.send(EngineInput::NewEvent {
+                kind: EventKind::PointerMove,
+                pointer,
+                spine: spine.clone(),
+            });
+        }
+
+        if button_released {
+            let mut pointer = PointerData::mouse(pos.x as f64, pos.y as f64, true);
+            pointer.pointer_id = pointer_id;
+            pointer.button = Button::Primary.wire_value();
+            pointer.buttons = 0;
+            pointer.pressure = 0.0;
+            pointer.modifiers = modifiers;
+            pointer.target = byo_id.clone();
+            pointer.target_width = w;
+            pointer.target_height = h;
+
+            engine.send(EngineInput::NewEvent {
+                kind: EventKind::PointerUp,
+                pointer,
+                spine,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cursor-left-window cleanup
 // ---------------------------------------------------------------------------
 
@@ -617,7 +828,7 @@ pub fn handle_cursor_left(
     mut enter_state: ResMut<PointerEnterState>,
     subs_query: Query<&EventSubscriptions>,
     node_query: Query<&ComputedNode>,
-    global_transforms: Query<&GlobalTransform>,
+    ui_transforms: Query<&UiGlobalTransform>,
 ) {
     for _event in messages.read() {
         // Clear all pointer chains and fire pointerleave for all entered entities
@@ -638,7 +849,7 @@ pub fn handle_cursor_left(
                         &id_map,
                         &subs_query,
                         &node_query,
-                        &global_transforms,
+                        &ui_transforms,
                     )
                 })
                 .collect();

@@ -10,9 +10,9 @@ use byo_orchestrator::router::Router;
 /// fully complete and all messages consumed.
 async fn setup_initial_expansion() -> (
     Router,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
 ) {
     let mut router = Router::new();
     let (compositor, mut compositor_rx) = mock_process(1, "compositor");
@@ -74,11 +74,10 @@ async fn patch_triggers_re_expansion() {
     send_byo(&mut router, pid(3), "@button save label=\"New\"").await;
 
     // Step 3: Controls should receive a new ?expand with reduced state.
-    // The re-expand format uses the reduced command with `+` stripped:
-    //   `\n?expand SEQ type qid props...`
+    //   `\n?expand SEQ qid kind=type props...`
     // The label was merged from the patch (New replaces Save).
     let expand_msg = recv_byo_raw(&mut controls_rx);
-    assert_eq!(expand_msg, "\n?expand 1 button app:save label=New");
+    assert_eq!(expand_msg, "\n?expand 1 app:save kind=button label=New");
 
     // Step 4: Controls responds with new expansion (only text content changed).
     send_byo(
@@ -289,9 +288,9 @@ async fn re_expansion_removes_node() {
 /// for `settings` fully complete and all messages consumed.
 async fn setup_two_buttons() -> (
     Router,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
 ) {
     let mut router = Router::new();
     let (compositor, mut compositor_rx) = mock_process(1, "compositor");

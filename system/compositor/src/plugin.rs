@@ -68,6 +68,7 @@ impl Plugin for ByoPlugin {
                     transition::systems::tick_layer_transitions,
                     transition::systems::tick_tty_transitions,
                     events::observers::handle_cursor_left,
+                    events::observers::handle_captured_pointer,
                 ),
             );
 
@@ -78,6 +79,8 @@ impl Plugin for ByoPlugin {
 
 /// Startup system: spawn the propagation engine thread.
 fn setup_engine(mut commands: Commands, emitter: Res<io::StdoutEmitter>) {
-    let handle = events::engine::spawn_engine(emitter.clone());
+    let capture_state = events::engine::CaptureState::default();
+    let handle = events::engine::spawn_engine(emitter.clone(), capture_state.clone());
+    commands.insert_resource(capture_state);
     commands.insert_resource(handle);
 }

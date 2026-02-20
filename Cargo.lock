@@ -1727,6 +1727,8 @@ name = "byo-controls"
 version = "0.1.0"
 dependencies = [
  "byo",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

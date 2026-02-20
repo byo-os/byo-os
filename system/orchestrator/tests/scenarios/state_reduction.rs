@@ -352,13 +352,14 @@ async fn daemon_replay_reduced() {
     send_byo(&mut router, pid(2), "#claim button").await;
 
     // Step 4: Controls should receive ?expand with fully reduced state.
-    // The replay format from handle_claim is the reduced command with `+`
-    // stripped, embedded after `?expand SEQ`:
-    //   `\n?expand SEQ type qid props...`
+    //   `\n?expand SEQ qid kind=type props...`
     // Props are in IndexMap insertion order (label first, variant second),
     // with label updated to "New" by the patch.
     let s = recv_byo_raw(&mut controls_rx);
-    assert_eq!(s, "\n?expand 0 button app:save label=New variant=primary");
+    assert_eq!(
+        s,
+        "\n?expand 0 app:save kind=button label=New variant=primary"
+    );
 
     // No further messages.
     assert_no_message(&mut controls_rx);

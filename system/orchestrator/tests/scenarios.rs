@@ -21,8 +21,8 @@ use byo_orchestrator::router::{Router, RouterMsg};
 ///
 /// Returns `(Process, Receiver)` where the receiver gets all `WriteMsg`s
 /// the router sends to this process.
-fn mock_process(id: u32, name: &str) -> (Process, mpsc::Receiver<WriteMsg>) {
-    let (tx, rx) = mpsc::channel::<WriteMsg>(256);
+fn mock_process(id: u32, name: &str) -> (Process, mpsc::UnboundedReceiver<WriteMsg>) {
+    let (tx, rx) = mpsc::unbounded_channel::<WriteMsg>();
     let process = Process {
         id: ProcessId(id),
         name: name.to_string(),
@@ -40,7 +40,7 @@ async fn send_byo(router: &mut Router, from: ProcessId, payload: &str) {
 /// Receive the next BYO message from a mock process's channel as a raw string.
 ///
 /// Panics if no message is available or if the message is not a `WriteMsg::Byo`.
-fn recv_byo_raw(rx: &mut mpsc::Receiver<WriteMsg>) -> String {
+fn recv_byo_raw(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) -> String {
     match rx.try_recv() {
         Ok(WriteMsg::Byo(raw)) => {
             String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8")
@@ -51,7 +51,7 @@ fn recv_byo_raw(rx: &mut mpsc::Receiver<WriteMsg>) -> String {
 }
 
 /// Try to receive a BYO message, returning None if the channel is empty.
-fn try_recv_byo(rx: &mut mpsc::Receiver<WriteMsg>) -> Option<String> {
+fn try_recv_byo(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) -> Option<String> {
     match rx.try_recv() {
         Ok(WriteMsg::Byo(raw)) => {
             Some(String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8"))
@@ -62,7 +62,7 @@ fn try_recv_byo(rx: &mut mpsc::Receiver<WriteMsg>) -> Option<String> {
 }
 
 /// Assert that no messages are pending on the channel.
-fn assert_no_message(rx: &mut mpsc::Receiver<WriteMsg>) {
+fn assert_no_message(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) {
     match rx.try_recv() {
         Err(mpsc::error::TryRecvError::Empty) => {}
         Ok(msg) => panic!("expected no message, got: {msg:?}"),

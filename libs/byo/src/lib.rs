@@ -7,6 +7,7 @@
 pub mod assert;
 pub mod byte_str;
 pub mod emitter;
+pub mod events;
 pub mod kitty_gfx;
 pub mod lexer;
 pub mod parser;

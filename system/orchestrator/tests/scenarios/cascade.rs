@@ -10,9 +10,9 @@ use byo_orchestrator::router::Router;
 /// Returns (router, compositor_rx, controls_rx, _app_rx).
 async fn setup_expansion_env() -> (
     Router,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::Receiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
 ) {
     let mut router = Router::new();
     let (compositor, compositor_rx) = mock_process(1, "compositor");

@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
@@ -89,16 +90,16 @@ pub struct Modifiers {
 pub struct PointerData {
     pub pointer_id: i64,
     pub pointer_type: PointerType,
-    /// Position relative to the compositor viewport (logical px).
+    /// Position relative to the compositor viewport.
     pub client_x: f64,
     pub client_y: f64,
     /// Button that changed state (-1 for move events).
     pub button: i8,
     /// Bitmask of currently pressed buttons.
     pub buttons: u16,
-    /// Contact geometry (logical px, default 1.0).
-    pub width: f64,
-    pub height: f64,
+    /// Contact geometry (default 1.0 for mouse).
+    pub contact_width: f64,
+    pub contact_height: f64,
     /// Pressure (0.0–1.0, mouse default: 0.5 when pressed).
     pub pressure: f32,
     pub tangential_pressure: f32,
@@ -112,6 +113,12 @@ pub struct PointerData {
     /// Is this the primary pointer of its type?
     pub primary: bool,
     pub modifiers: Modifiers,
+    /// BYO qualified ID of the actually-hit element.
+    pub target: String,
+    /// Computed width of the hit element.
+    pub target_width: f64,
+    /// Computed height of the hit element.
+    pub target_height: f64,
 }
 
 impl PointerData {
@@ -124,8 +131,8 @@ impl PointerData {
             client_y,
             button: -1,
             buttons: 0,
-            width: 1.0,
-            height: 1.0,
+            contact_width: 1.0,
+            contact_height: 1.0,
             pressure: 0.0,
             tangential_pressure: 0.0,
             tilt_x: 0,
@@ -135,6 +142,9 @@ impl PointerData {
             azimuth: 0.0,
             primary,
             modifiers: Modifiers::default(),
+            target: String::new(),
+            target_width: 0.0,
+            target_height: 0.0,
         }
     }
 }
@@ -150,9 +160,13 @@ pub struct SpineNode {
     pub passive: bool,
     /// Whether to emit all props (verbose mode).
     pub verbose: bool,
-    /// Position relative to this element's origin (logical px).
+    /// Position relative to this element's origin.
     pub local_x: f64,
     pub local_y: f64,
+    /// Computed width of this element (dispatch element / currentTarget).
+    pub width: f64,
+    /// Computed height of this element (dispatch element / currentTarget).
+    pub height: f64,
 }
 
 /// Messages sent to the propagation engine.
@@ -186,6 +200,34 @@ impl EngineHandle {
     /// Submit a new pointer event for propagation.
     pub fn send(&self, input: EngineInput) {
         let _ = self.tx.send(input);
+    }
+}
+
+/// Shared pointer capture state between propagation engine thread and ECS.
+/// Maps pointer_id → captured BYO ID.
+#[derive(Resource, Clone, Default)]
+pub struct CaptureState(Arc<Mutex<HashMap<i64, String>>>);
+
+impl CaptureState {
+    pub fn get(&self, pointer_id: i64) -> Option<String> {
+        self.0.lock().unwrap().get(&pointer_id).cloned()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().is_empty()
+    }
+    pub fn snapshot(&self) -> Vec<(i64, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    }
+    fn insert(&self, pointer_id: i64, byo_id: String) {
+        self.0.lock().unwrap().insert(pointer_id, byo_id);
+    }
+    fn remove(&self, pointer_id: i64) {
+        self.0.lock().unwrap().remove(&pointer_id);
     }
 }
 
@@ -267,8 +309,10 @@ struct Engine {
     in_flight: HashMap<u64, InFlightPropagation>,
     /// Map from (event_kind_str, wire_seq) to the inflight_id.
     ack_map: HashMap<(String, u64), u64>,
-    /// Pointer capture: pointer_id → target BYO ID.
+    /// Pointer capture: pointer_id → target BYO ID (engine-local).
     captures: HashMap<i64, String>,
+    /// Shared capture state for ECS systems to read.
+    capture_state: CaptureState,
     /// Active press states per pointer ID.
     press_states: HashMap<i64, PressState>,
     /// Recent click states per (pointer_id, target_id) for dblclick derivation.
@@ -278,7 +322,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(emitter: StdoutEmitter) -> Self {
+    fn new(emitter: StdoutEmitter, capture_state: CaptureState) -> Self {
         Self {
             emitter,
             seq: SeqCounters::default(),
@@ -286,6 +330,7 @@ impl Engine {
             in_flight: HashMap::new(),
             ack_map: HashMap::new(),
             captures: HashMap::new(),
+            capture_state,
             press_states: HashMap::new(),
             click_states: HashMap::new(),
             deferred: Vec::new(),
@@ -331,6 +376,8 @@ impl Engine {
                     verbose: false,
                     local_x: pointer.client_x,
                     local_y: pointer.client_y,
+                    width: 0.0,
+                    height: 0.0,
                 }]
             }
         } else {
@@ -450,6 +497,8 @@ impl Engine {
             let spine_idx = prop.dispatch_order[prop.current_step];
             let node = &prop.spine[spine_idx];
             self.captures
+                .insert(prop.pointer.pointer_id, node.byo_id.clone());
+            self.capture_state
                 .insert(prop.pointer.pointer_id, node.byo_id.clone());
 
             // Emit gotpointercapture
@@ -634,6 +683,7 @@ impl Engine {
 
     /// Release pointer capture for a given pointer ID.
     fn release_capture(&mut self, pointer_id: i64) {
+        self.capture_state.remove(pointer_id);
         if let Some(target_id) = self.captures.remove(&pointer_id) {
             let seq = self.seq.next(&EventKind::LostPointerCapture);
             self.emitter.frame(|em| {
@@ -649,79 +699,55 @@ impl Engine {
 }
 
 /// Build wire-format props for a pointer event.
+///
+/// Standard mode (optimized for LLM one-shot app development):
+///   x, y          — currentTarget-relative position
+///   width, height — currentTarget's computed size
+///   target        — hit element's BYO ID
+///   target-width, target-height — hit element's computed size
+///   client-x, client-y — viewport-relative position
+///   button        — only when >= 0 (down/up/click)
+///   buttons       — only when > 0
+///   mod-*         — modifier flags
+///
+/// Verbose mode adds:
+///   pointer-id, pointer-type, primary, pressure,
+///   contact-width, contact-height, tangential-pressure,
+///   tilt-x, tilt-y, twist, altitude, azimuth
 fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> Vec<Prop> {
     let mut props = Vec::with_capacity(16);
 
-    // Always included
-    props.push(Prop::val("pointer-id", pointer.pointer_id.to_string()));
-    props.push(Prop::val("pointer-type", pointer.pointer_type.as_str()));
+    // CurrentTarget-relative position and size
     props.push(Prop::val("x", format!("{:.1}", node.local_x)));
     props.push(Prop::val("y", format!("{:.1}", node.local_y)));
+    props.push(Prop::val("width", format!("{:.1}", node.width)));
+    props.push(Prop::val("height", format!("{:.1}", node.height)));
+
+    // Hit target info
+    if !pointer.target.is_empty() {
+        props.push(Prop::val("target", pointer.target.as_str()));
+        props.push(Prop::val(
+            "target-width",
+            format!("{:.1}", pointer.target_width),
+        ));
+        props.push(Prop::val(
+            "target-height",
+            format!("{:.1}", pointer.target_height),
+        ));
+    }
+
+    // Viewport-relative position
     props.push(Prop::val("client-x", format!("{:.1}", pointer.client_x)));
     props.push(Prop::val("client-y", format!("{:.1}", pointer.client_y)));
 
-    // Button (always for down/up, skip for move if -1 and not verbose)
-    if pointer.button >= 0 || verbose {
+    // Button (only for down/up/click where button >= 0)
+    if pointer.button >= 0 {
         props.push(Prop::val("button", pointer.button.to_string()));
     }
 
-    // Buttons bitmask (skip if 0 and not verbose)
-    if pointer.buttons > 0 || verbose {
+    // Buttons bitmask (skip if 0)
+    if pointer.buttons > 0 {
         props.push(Prop::val("buttons", pointer.buttons.to_string()));
-    }
-
-    // Primary flag
-    if pointer.primary {
-        props.push(Prop::flag("primary"));
-    }
-
-    // Pressure (skip if default and not verbose)
-    if verbose || (pointer.pressure - 0.0).abs() > f32::EPSILON {
-        props.push(Prop::val("pressure", format!("{:.2}", pointer.pressure)));
-    }
-
-    // Verbose: include all spec properties even at defaults
-    if verbose {
-        props.push(Prop::val("width", format!("{:.1}", pointer.width)));
-        props.push(Prop::val("height", format!("{:.1}", pointer.height)));
-        props.push(Prop::val(
-            "tangential-pressure",
-            format!("{:.2}", pointer.tangential_pressure),
-        ));
-        props.push(Prop::val("tilt-x", pointer.tilt_x.to_string()));
-        props.push(Prop::val("tilt-y", pointer.tilt_y.to_string()));
-        props.push(Prop::val("twist", pointer.twist.to_string()));
-        props.push(Prop::val("altitude", format!("{:.4}", pointer.altitude)));
-        props.push(Prop::val("azimuth", format!("{:.4}", pointer.azimuth)));
-    } else {
-        // Non-verbose: only emit non-default values
-        if (pointer.width - 1.0).abs() > f64::EPSILON {
-            props.push(Prop::val("width", format!("{:.1}", pointer.width)));
-        }
-        if (pointer.height - 1.0).abs() > f64::EPSILON {
-            props.push(Prop::val("height", format!("{:.1}", pointer.height)));
-        }
-        if pointer.tangential_pressure.abs() > f32::EPSILON {
-            props.push(Prop::val(
-                "tangential-pressure",
-                format!("{:.2}", pointer.tangential_pressure),
-            ));
-        }
-        if pointer.tilt_x != 0 {
-            props.push(Prop::val("tilt-x", pointer.tilt_x.to_string()));
-        }
-        if pointer.tilt_y != 0 {
-            props.push(Prop::val("tilt-y", pointer.tilt_y.to_string()));
-        }
-        if pointer.twist != 0 {
-            props.push(Prop::val("twist", pointer.twist.to_string()));
-        }
-        if (pointer.altitude - std::f64::consts::FRAC_PI_2).abs() > 0.0001 {
-            props.push(Prop::val("altitude", format!("{:.4}", pointer.altitude)));
-        }
-        if pointer.azimuth.abs() > 0.0001 {
-            props.push(Prop::val("azimuth", format!("{:.4}", pointer.azimuth)));
-        }
     }
 
     // Modifier flags
@@ -738,6 +764,38 @@ fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> 
         props.push(Prop::flag("mod-meta"));
     }
 
+    // Verbose: all pointer spec properties
+    if verbose {
+        props.push(Prop::val("pointer-id", pointer.pointer_id.to_string()));
+        props.push(Prop::val("pointer-type", pointer.pointer_type.as_str()));
+        if pointer.primary {
+            props.push(Prop::flag("primary"));
+        }
+        props.push(Prop::val("pressure", format!("{:.2}", pointer.pressure)));
+        props.push(Prop::val(
+            "contact-width",
+            format!("{:.1}", pointer.contact_width),
+        ));
+        props.push(Prop::val(
+            "contact-height",
+            format!("{:.1}", pointer.contact_height),
+        ));
+        props.push(Prop::val(
+            "tangential-pressure",
+            format!("{:.2}", pointer.tangential_pressure),
+        ));
+        props.push(Prop::val("tilt-x", pointer.tilt_x.to_string()));
+        props.push(Prop::val("tilt-y", pointer.tilt_y.to_string()));
+        props.push(Prop::val("twist", pointer.twist.to_string()));
+        props.push(Prop::val("altitude", format!("{:.4}", pointer.altitude)));
+        props.push(Prop::val("azimuth", format!("{:.4}", pointer.azimuth)));
+    } else {
+        // Non-verbose: only emit pressure if non-default
+        if pointer.pressure.abs() > f32::EPSILON {
+            props.push(Prop::val("pressure", format!("{:.2}", pointer.pressure)));
+        }
+    }
+
     props
 }
 
@@ -745,20 +803,18 @@ fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> 
 // Public API: spawn the engine thread
 // ---------------------------------------------------------------------------
 
-/// Spawn the propagation engine thread and return a handle + ACK sender.
+/// Spawn the propagation engine thread and return a handle.
 ///
 /// - `emitter`: shared stdout emitter for writing events
-///
-/// Returns `(EngineHandle, AckSender)` where `AckSender` is a channel
-/// for the stdin reader to forward ACKs to the engine.
-pub fn spawn_engine(emitter: StdoutEmitter) -> EngineHandle {
+/// - `capture_state`: shared capture state for ECS systems to read
+pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> EngineHandle {
     let (tx, rx) = mpsc::channel::<EngineInput>();
 
     std::thread::Builder::new()
         .name("byo-propagation".into())
         .spawn(move || {
             info!("propagation engine started");
-            let mut engine = Engine::new(emitter);
+            let mut engine = Engine::new(emitter, capture_state);
 
             loop {
                 // Use recv_timeout to periodically check for ACK timeouts
@@ -768,11 +824,14 @@ pub fn spawn_engine(emitter: StdoutEmitter) -> EngineHandle {
                         pointer,
                         spine,
                     }) => {
-                        // Release capture on pointerup/pointercancel
-                        if matches!(kind, EventKind::PointerUp | EventKind::PointerCancel) {
+                        // Dispatch first (pointerup should still route to capture target),
+                        // then release capture afterwards.
+                        let should_release =
+                            matches!(kind, EventKind::PointerUp | EventKind::PointerCancel);
+                        engine.handle_new_event(kind, pointer.clone(), spine);
+                        if should_release {
                             engine.release_capture(pointer.pointer_id);
                         }
-                        engine.handle_new_event(kind, pointer, spine);
                     }
                     Ok(EngineInput::Ack {
                         kind,

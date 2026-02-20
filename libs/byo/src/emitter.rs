@@ -1069,10 +1069,7 @@ mod tests {
                 &[Prop::val("x", "-91.4"), Prop::val("y", "-101.0")],
             )
         });
-        assert_eq!(
-            out,
-            "\x1b_B\n!pointerenter 0 root x=-91.4 y=-101.0\n\x1b\\"
-        );
+        assert_eq!(out, "\x1b_B\n!pointerenter 0 root x=-91.4 y=-101.0\n\x1b\\");
     }
 
     #[test]
@@ -1099,9 +1096,9 @@ mod tests {
                 assert!(props
                     .iter()
                     .any(|p| matches!(p, Prop::Value { key, value } if *key == "translate-x" && *value == "-100")));
-                assert!(props
-                    .iter()
-                    .any(|p| matches!(p, Prop::Value { key, value } if *key == "y" && *value == "-50.5")));
+                assert!(props.iter().any(
+                    |p| matches!(p, Prop::Value { key, value } if *key == "y" && *value == "-50.5")
+                ));
             }
             _ => panic!("expected Upsert"),
         }

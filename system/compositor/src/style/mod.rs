@@ -141,197 +141,200 @@ pub fn reconcile_views(
     {
         let resolved = resolve_view_props(props);
         let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
+        let defaults = Node::default();
 
         // Sizing
-        if let Some(ref v) = resolved.width
-            && !has(AnimatableProp::Width)
-        {
-            node.width = v.0;
+        if !has(AnimatableProp::Width) {
+            node.width = resolved.width.as_ref().map_or(defaults.width, |v| v.0);
         }
-        if let Some(ref v) = resolved.height
-            && !has(AnimatableProp::Height)
-        {
-            node.height = v.0;
+        if !has(AnimatableProp::Height) {
+            node.height = resolved.height.as_ref().map_or(defaults.height, |v| v.0);
         }
-        if let Some(ref v) = resolved.min_width
-            && !has(AnimatableProp::MinWidth)
-        {
-            node.min_width = v.0;
+        if !has(AnimatableProp::MinWidth) {
+            node.min_width = resolved
+                .min_width
+                .as_ref()
+                .map_or(defaults.min_width, |v| v.0);
         }
-        if let Some(ref v) = resolved.max_width
-            && !has(AnimatableProp::MaxWidth)
-        {
-            node.max_width = v.0;
+        if !has(AnimatableProp::MaxWidth) {
+            node.max_width = resolved
+                .max_width
+                .as_ref()
+                .map_or(defaults.max_width, |v| v.0);
         }
-        if let Some(ref v) = resolved.min_height
-            && !has(AnimatableProp::MinHeight)
-        {
-            node.min_height = v.0;
+        if !has(AnimatableProp::MinHeight) {
+            node.min_height = resolved
+                .min_height
+                .as_ref()
+                .map_or(defaults.min_height, |v| v.0);
         }
-        if let Some(ref v) = resolved.max_height
-            && !has(AnimatableProp::MaxHeight)
-        {
-            node.max_height = v.0;
+        if !has(AnimatableProp::MaxHeight) {
+            node.max_height = resolved
+                .max_height
+                .as_ref()
+                .map_or(defaults.max_height, |v| v.0);
         }
 
         // Colors
-        if let Some(ref c) = resolved.background_color
-            && !has(AnimatableProp::BackgroundColor)
-        {
-            *bg = BackgroundColor(c.0);
+        if !has(AnimatableProp::BackgroundColor) {
+            *bg = resolved
+                .background_color
+                .as_ref()
+                .map_or(BackgroundColor::default(), |c| BackgroundColor(c.0));
         }
-        if let Some(ref c) = resolved.border_color
-            && !has(AnimatableProp::BorderColor)
-        {
-            *border_color = BorderColor::all(c.0);
+        if !has(AnimatableProp::BorderColor) {
+            *border_color = resolved
+                .border_color
+                .as_ref()
+                .map_or(BorderColor::default(), |c| BorderColor::all(c.0));
         }
 
         // Border
-        if let Some(ref r) = resolved.border_width {
+        {
+            let border = resolved.border_width.as_ref().map(|r| &r.0);
             if !has(AnimatableProp::BorderWidthTop) {
-                node.border.top = r.0.top;
+                node.border.top = border.map_or(defaults.border.top, |r| r.top);
             }
             if !has(AnimatableProp::BorderWidthRight) {
-                node.border.right = r.0.right;
+                node.border.right = border.map_or(defaults.border.right, |r| r.right);
             }
             if !has(AnimatableProp::BorderWidthBottom) {
-                node.border.bottom = r.0.bottom;
+                node.border.bottom = border.map_or(defaults.border.bottom, |r| r.bottom);
             }
             if !has(AnimatableProp::BorderWidthLeft) {
-                node.border.left = r.0.left;
+                node.border.left = border.map_or(defaults.border.left, |r| r.left);
             }
         }
-        if let Some(ref r) = resolved.border_radius {
+        {
+            let radius = resolved.border_radius.as_ref().map(|r| &r.0);
             if !has(AnimatableProp::BorderRadiusTopLeft) {
-                node.border_radius.top_left = r.0.top_left;
+                node.border_radius.top_left =
+                    radius.map_or(defaults.border_radius.top_left, |r| r.top_left);
             }
             if !has(AnimatableProp::BorderRadiusTopRight) {
-                node.border_radius.top_right = r.0.top_right;
+                node.border_radius.top_right =
+                    radius.map_or(defaults.border_radius.top_right, |r| r.top_right);
             }
             if !has(AnimatableProp::BorderRadiusBottomRight) {
-                node.border_radius.bottom_right = r.0.bottom_right;
+                node.border_radius.bottom_right =
+                    radius.map_or(defaults.border_radius.bottom_right, |r| r.bottom_right);
             }
             if !has(AnimatableProp::BorderRadiusBottomLeft) {
-                node.border_radius.bottom_left = r.0.bottom_left;
+                node.border_radius.bottom_left =
+                    radius.map_or(defaults.border_radius.bottom_left, |r| r.bottom_left);
             }
         }
 
         // Spacing
-        if let Some(ref r) = resolved.padding {
+        {
+            let padding = resolved.padding.as_ref().map(|r| &r.0);
             if !has(AnimatableProp::PaddingTop) {
-                node.padding.top = r.0.top;
+                node.padding.top = padding.map_or(defaults.padding.top, |r| r.top);
             }
             if !has(AnimatableProp::PaddingRight) {
-                node.padding.right = r.0.right;
+                node.padding.right = padding.map_or(defaults.padding.right, |r| r.right);
             }
             if !has(AnimatableProp::PaddingBottom) {
-                node.padding.bottom = r.0.bottom;
+                node.padding.bottom = padding.map_or(defaults.padding.bottom, |r| r.bottom);
             }
             if !has(AnimatableProp::PaddingLeft) {
-                node.padding.left = r.0.left;
+                node.padding.left = padding.map_or(defaults.padding.left, |r| r.left);
             }
         }
-        if let Some(ref r) = resolved.margin {
+        {
+            let margin = resolved.margin.as_ref().map(|r| &r.0);
             if !has(AnimatableProp::MarginTop) {
-                node.margin.top = r.0.top;
+                node.margin.top = margin.map_or(defaults.margin.top, |r| r.top);
             }
             if !has(AnimatableProp::MarginRight) {
-                node.margin.right = r.0.right;
+                node.margin.right = margin.map_or(defaults.margin.right, |r| r.right);
             }
             if !has(AnimatableProp::MarginBottom) {
-                node.margin.bottom = r.0.bottom;
+                node.margin.bottom = margin.map_or(defaults.margin.bottom, |r| r.bottom);
             }
             if !has(AnimatableProp::MarginLeft) {
-                node.margin.left = r.0.left;
+                node.margin.left = margin.map_or(defaults.margin.left, |r| r.left);
             }
         }
 
         // Gap
-        if let Some(ref v) = resolved.gap {
-            if !has(AnimatableProp::ColumnGap) {
-                node.column_gap = v.0;
-            }
-            if !has(AnimatableProp::RowGap) {
-                node.row_gap = v.0;
-            }
+        if !has(AnimatableProp::ColumnGap) {
+            node.column_gap = resolved
+                .column_gap
+                .as_ref()
+                .or(resolved.gap.as_ref())
+                .map_or(defaults.column_gap, |v| v.0);
         }
-        if let Some(ref v) = resolved.column_gap
-            && !has(AnimatableProp::ColumnGap)
-        {
-            node.column_gap = v.0;
-        }
-        if let Some(ref v) = resolved.row_gap
-            && !has(AnimatableProp::RowGap)
-        {
-            node.row_gap = v.0;
+        if !has(AnimatableProp::RowGap) {
+            node.row_gap = resolved
+                .row_gap
+                .as_ref()
+                .or(resolved.gap.as_ref())
+                .map_or(defaults.row_gap, |v| v.0);
         }
 
         // Layout (not animatable — always write immediately)
-        if let Some(ref d) = resolved.display {
-            node.display = d.to_bevy();
-        }
-        if let Some(ref d) = resolved.flex_direction {
-            node.flex_direction = d.to_bevy();
-        }
-        if let Some(ref a) = resolved.align_items {
-            node.align_items = a.to_bevy();
-        }
-        if let Some(ref a) = resolved.align_self {
-            node.align_self = a.to_bevy();
-        }
-        if let Some(ref j) = resolved.justify_content {
-            node.justify_content = j.to_bevy();
-        }
-        if let Some(ref w) = resolved.flex_wrap {
-            node.flex_wrap = w.to_bevy();
-        }
-        if let Some(ref p) = resolved.position {
-            node.position_type = p.to_bevy();
-        }
+        node.display = resolved
+            .display
+            .as_ref()
+            .map_or(defaults.display, |d| d.to_bevy());
+        node.flex_direction = resolved
+            .flex_direction
+            .as_ref()
+            .map_or(defaults.flex_direction, |d| d.to_bevy());
+        node.align_items = resolved
+            .align_items
+            .as_ref()
+            .map_or(defaults.align_items, |a| a.to_bevy());
+        node.align_self = resolved
+            .align_self
+            .as_ref()
+            .map_or(defaults.align_self, |a| a.to_bevy());
+        node.justify_content = resolved
+            .justify_content
+            .as_ref()
+            .map_or(defaults.justify_content, |j| j.to_bevy());
+        node.flex_wrap = resolved
+            .flex_wrap
+            .as_ref()
+            .map_or(defaults.flex_wrap, |w| w.to_bevy());
+        node.position_type = resolved
+            .position
+            .as_ref()
+            .map_or(defaults.position_type, |p| p.to_bevy());
 
         // Overflow
-        if let Some(ref o) = resolved.overflow {
+        node.overflow = resolved.overflow.as_ref().map_or(defaults.overflow, |o| {
             let axis = o.to_bevy();
-            node.overflow = Overflow { x: axis, y: axis };
-        }
+            Overflow { x: axis, y: axis }
+        });
 
         // Position
-        if let Some(ref v) = resolved.left
-            && !has(AnimatableProp::Left)
-        {
-            node.left = v.0;
+        if !has(AnimatableProp::Left) {
+            node.left = resolved.left.as_ref().map_or(defaults.left, |v| v.0);
         }
-        if let Some(ref v) = resolved.right
-            && !has(AnimatableProp::Right)
-        {
-            node.right = v.0;
+        if !has(AnimatableProp::Right) {
+            node.right = resolved.right.as_ref().map_or(defaults.right, |v| v.0);
         }
-        if let Some(ref v) = resolved.top
-            && !has(AnimatableProp::Top)
-        {
-            node.top = v.0;
+        if !has(AnimatableProp::Top) {
+            node.top = resolved.top.as_ref().map_or(defaults.top, |v| v.0);
         }
-        if let Some(ref v) = resolved.bottom
-            && !has(AnimatableProp::Bottom)
-        {
-            node.bottom = v.0;
+        if !has(AnimatableProp::Bottom) {
+            node.bottom = resolved.bottom.as_ref().map_or(defaults.bottom, |v| v.0);
         }
 
         // Flex
-        if let Some(v) = resolved.flex_grow
-            && !has(AnimatableProp::FlexGrow)
-        {
-            node.flex_grow = v;
+        if !has(AnimatableProp::FlexGrow) {
+            node.flex_grow = resolved.flex_grow.unwrap_or(defaults.flex_grow);
         }
-        if let Some(v) = resolved.flex_shrink
-            && !has(AnimatableProp::FlexShrink)
-        {
-            node.flex_shrink = v;
+        if !has(AnimatableProp::FlexShrink) {
+            node.flex_shrink = resolved.flex_shrink.unwrap_or(defaults.flex_shrink);
         }
-        if let Some(ref v) = resolved.flex_basis
-            && !has(AnimatableProp::FlexBasis)
-        {
-            node.flex_basis = v.0;
+        if !has(AnimatableProp::FlexBasis) {
+            node.flex_basis = resolved
+                .flex_basis
+                .as_ref()
+                .map_or(defaults.flex_basis, |v| v.0);
         }
 
         // Box Shadow
@@ -496,6 +499,7 @@ pub fn reconcile_tty_style(
 ) {
     for (props, mut node, mut bg, mut border_color, mut box_shadow, active) in &mut query {
         let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
+        let defaults = Node::default();
 
         // Parse TW classes into a temporary ViewProps
         let mut resolved = ViewProps::default();
@@ -511,122 +515,115 @@ pub fn reconcile_tty_style(
         }
         // TW-derived shadow fields are already on `resolved` from apply_classes
 
-        // Only apply non-shadow styling if we have a class
-        if props.class.is_some() {
-            // Sizing
-            if let Some(ref v) = resolved.width {
-                node.width = v.0;
-            }
-            if let Some(ref v) = resolved.height {
-                node.height = v.0;
-            }
-            if let Some(ref v) = resolved.min_width {
-                node.min_width = v.0;
-            }
-            if let Some(ref v) = resolved.max_width {
-                node.max_width = v.0;
-            }
-            if let Some(ref v) = resolved.min_height {
-                node.min_height = v.0;
-            }
-            if let Some(ref v) = resolved.max_height {
-                node.max_height = v.0;
-            }
+        // Sizing
+        node.width = resolved.width.as_ref().map_or(defaults.width, |v| v.0);
+        node.height = resolved.height.as_ref().map_or(defaults.height, |v| v.0);
+        node.min_width = resolved
+            .min_width
+            .as_ref()
+            .map_or(defaults.min_width, |v| v.0);
+        node.max_width = resolved
+            .max_width
+            .as_ref()
+            .map_or(defaults.max_width, |v| v.0);
+        node.min_height = resolved
+            .min_height
+            .as_ref()
+            .map_or(defaults.min_height, |v| v.0);
+        node.max_height = resolved
+            .max_height
+            .as_ref()
+            .map_or(defaults.max_height, |v| v.0);
 
-            // Colors
-            if let Some(ref c) = resolved.background_color
-                && !has(AnimatableProp::BackgroundColor)
-            {
-                *bg = BackgroundColor(c.0);
-            }
-            if let Some(ref c) = resolved.border_color
-                && !has(AnimatableProp::BorderColor)
-            {
-                *border_color = BorderColor::all(c.0);
-            }
-
-            // Border
-            if let Some(ref r) = resolved.border_width {
-                node.border = r.0;
-            }
-            if let Some(ref r) = resolved.border_radius {
-                node.border_radius = r.0;
-            }
-
-            // Spacing
-            if let Some(ref r) = resolved.padding {
-                node.padding = r.0;
-            }
-            if let Some(ref r) = resolved.margin {
-                node.margin = r.0;
-            }
-
-            // Gap
-            if let Some(ref v) = resolved.gap {
-                node.column_gap = v.0;
-                node.row_gap = v.0;
-            }
-            if let Some(ref v) = resolved.column_gap {
-                node.column_gap = v.0;
-            }
-            if let Some(ref v) = resolved.row_gap {
-                node.row_gap = v.0;
-            }
-
-            // Layout
-            if let Some(ref d) = resolved.display {
-                node.display = d.to_bevy();
-            }
-            if let Some(ref d) = resolved.flex_direction {
-                node.flex_direction = d.to_bevy();
-            }
-            if let Some(ref a) = resolved.align_items {
-                node.align_items = a.to_bevy();
-            }
-            if let Some(ref a) = resolved.align_self {
-                node.align_self = a.to_bevy();
-            }
-            if let Some(ref j) = resolved.justify_content {
-                node.justify_content = j.to_bevy();
-            }
-            if let Some(ref w) = resolved.flex_wrap {
-                node.flex_wrap = w.to_bevy();
-            }
-            if let Some(ref p) = resolved.position {
-                node.position_type = p.to_bevy();
-            }
-
-            // Overflow
-            if let Some(ref o) = resolved.overflow {
-                let axis = o.to_bevy();
-                node.overflow = Overflow { x: axis, y: axis };
-            }
-
-            // Position
-            if let Some(ref v) = resolved.left {
-                node.left = v.0;
-            }
-            if let Some(ref v) = resolved.right {
-                node.right = v.0;
-            }
-            if let Some(ref v) = resolved.top {
-                node.top = v.0;
-            }
-            if let Some(ref v) = resolved.bottom {
-                node.bottom = v.0;
-            }
-
-            // Flex
-            if let Some(v) = resolved.flex_grow {
-                node.flex_grow = v;
-            }
-            if let Some(v) = resolved.flex_shrink {
-                node.flex_shrink = v;
-            }
-            if let Some(ref v) = resolved.flex_basis {
-                node.flex_basis = v.0;
-            }
+        // Colors
+        if !has(AnimatableProp::BackgroundColor) {
+            *bg = resolved
+                .background_color
+                .as_ref()
+                .map_or(BackgroundColor::default(), |c| BackgroundColor(c.0));
         }
+        if !has(AnimatableProp::BorderColor) {
+            *border_color = resolved
+                .border_color
+                .as_ref()
+                .map_or(BorderColor::default(), |c| BorderColor::all(c.0));
+        }
+
+        // Border
+        node.border = resolved
+            .border_width
+            .as_ref()
+            .map_or(defaults.border, |r| r.0);
+        node.border_radius = resolved
+            .border_radius
+            .as_ref()
+            .map_or(defaults.border_radius, |r| r.0);
+
+        // Spacing
+        node.padding = resolved.padding.as_ref().map_or(defaults.padding, |r| r.0);
+        node.margin = resolved.margin.as_ref().map_or(defaults.margin, |r| r.0);
+
+        // Gap
+        node.column_gap = resolved
+            .column_gap
+            .as_ref()
+            .or(resolved.gap.as_ref())
+            .map_or(defaults.column_gap, |v| v.0);
+        node.row_gap = resolved
+            .row_gap
+            .as_ref()
+            .or(resolved.gap.as_ref())
+            .map_or(defaults.row_gap, |v| v.0);
+
+        // Layout
+        node.display = resolved
+            .display
+            .as_ref()
+            .map_or(defaults.display, |d| d.to_bevy());
+        node.flex_direction = resolved
+            .flex_direction
+            .as_ref()
+            .map_or(defaults.flex_direction, |d| d.to_bevy());
+        node.align_items = resolved
+            .align_items
+            .as_ref()
+            .map_or(defaults.align_items, |a| a.to_bevy());
+        node.align_self = resolved
+            .align_self
+            .as_ref()
+            .map_or(defaults.align_self, |a| a.to_bevy());
+        node.justify_content = resolved
+            .justify_content
+            .as_ref()
+            .map_or(defaults.justify_content, |j| j.to_bevy());
+        node.flex_wrap = resolved
+            .flex_wrap
+            .as_ref()
+            .map_or(defaults.flex_wrap, |w| w.to_bevy());
+        node.position_type = resolved
+            .position
+            .as_ref()
+            .map_or(defaults.position_type, |p| p.to_bevy());
+
+        // Overflow
+        node.overflow = resolved.overflow.as_ref().map_or(defaults.overflow, |o| {
+            let axis = o.to_bevy();
+            Overflow { x: axis, y: axis }
+        });
+
+        // Position
+        node.left = resolved.left.as_ref().map_or(defaults.left, |v| v.0);
+        node.right = resolved.right.as_ref().map_or(defaults.right, |v| v.0);
+        node.top = resolved.top.as_ref().map_or(defaults.top, |v| v.0);
+        node.bottom = resolved.bottom.as_ref().map_or(defaults.bottom, |v| v.0);
+
+        // Flex
+        node.flex_grow = resolved.flex_grow.unwrap_or(defaults.flex_grow);
+        node.flex_shrink = resolved.flex_shrink.unwrap_or(defaults.flex_shrink);
+        node.flex_basis = resolved
+            .flex_basis
+            .as_ref()
+            .map_or(defaults.flex_basis, |v| v.0);
 
         // Box Shadow (resolved from TW classes + wire prop, same as views)
         if !has(AnimatableProp::BoxShadow) {

@@ -2,26 +2,13 @@
 # Interactive pointer events demo — click buttons, see coordinates, hover effects
 #
 # Usage:
-#   ./examples/31-pointer-events.sh
-#
-# Uses a named pipe (FIFO) for bidirectional communication with the
-# compositor: the script writes BYO commands via fd 3, and reads events
-# back from the compositor's stdout via `byo parse`.
+#   cargo run -p byo-orchestrator -- examples/31-pointer-events.sh
 
 set -euo pipefail
 
-# Create a named pipe for sending commands to the compositor
-FIFO_DIR=$(mktemp -d)
-PIPE="$FIFO_DIR/byo"
-mkfifo "$PIPE"
-trap 'rm -rf "$FIFO_DIR"' EXIT
-
-# Open pipe for read+write (prevents blocking on FIFO open)
-exec 3<>"$PIPE"
-
-# Helper: send BYO commands to compositor
+# Helper: send BYO commands to orchestrator (stdout)
 send() {
-  printf '\e_B %s \e\\' "$1" >&3
+  printf '\e_B %s \e\\' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -90,14 +77,14 @@ update_b() { update_btn btn-b "$HOVER_B" "$PRESS_B" bg-emerald-500 bg-emerald-40
 update_c() { update_btn btn-c "$HOVER_C" "$PRESS_C" bg-rose-500 bg-rose-400 bg-rose-700; }
 
 # ---------------------------------------------------------------------------
-# Event loop: read events via byo parse, ACK them, update UI
+# Event loop: read events from stdin via byo parse, ACK them, update UI
 # ---------------------------------------------------------------------------
 
 LOG_COUNT=0
 MAX_LOG=8
 
-# Start compositor reading from the pipe, parse its event output as TSV.
-# Process substitution keeps the while loop in the main shell (variables persist).
+# The orchestrator sends APC-framed events on stdin.
+# `byo parse` converts them to TSV records for easy shell processing.
 while IFS=$'\t' read -r OP KIND SEQ ID PROPS BODY; do
 
   # Only process events (! prefix)
@@ -179,4 +166,4 @@ while IFS=$'\t' read -r OP KIND SEQ ID PROPS BODY; do
       ;;
   esac
 
-done < <(cargo run -p byo-compositor < "$PIPE" | byo parse)
+done < <(byo parse)

@@ -190,7 +190,26 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
             return false;
         };
         write!(buf, "+{} {}", obj.kind, obj.id).unwrap();
-        for (key, value) in &obj.props {
+        Self::write_props_to(buf, &obj.props);
+        true
+    }
+
+    /// Append `kind={kind} props...` for the object to `buf`.
+    ///
+    /// Writes the type and all props as key=value pairs, suitable for
+    /// appending after a `?expand {seq} {qid}` prefix. Returns `true`
+    /// if the object was found and written.
+    pub fn write_reduced_expand_props(&self, id: &K, buf: &mut Vec<u8>) -> bool {
+        let Some(obj) = self.objects.get(id) else {
+            return false;
+        };
+        write!(buf, " kind={}", obj.kind).unwrap();
+        Self::write_props_to(buf, &obj.props);
+        true
+    }
+
+    fn write_props_to(buf: &mut Vec<u8>, props: &IndexMap<String, PropValue>) {
+        for (key, value) in props {
             match value {
                 PropValue::Str(s) => {
                     write!(buf, " {key}=").unwrap();
@@ -201,7 +220,6 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
                 }
             }
         }
-        true
     }
 
     /// Collect info about all descendants (depth-first).

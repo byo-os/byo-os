@@ -195,34 +195,34 @@ fn parse_fraction(s: &str) -> Option<f32> {
 /// - `[#hex]` or `[rgb(...)]`
 /// - `{color}-{shade}` or `{color}-{shade}/{opacity}`
 fn parse_color_class(value: &str) -> Option<Color> {
-    // Special keywords
-    match value {
-        "transparent" => return Some(Color::NONE),
-        "black" => return Some(Color::srgba_u8(0, 0, 0, 255)),
-        "white" => return Some(Color::srgba_u8(255, 255, 255, 255)),
-        "inherit" | "current" => return None,
-        _ => {}
-    }
-
-    // Arbitrary: [#hex] or [rgb(...)]
-    if let Some(inner) = value.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return parse_color(inner);
-    }
-
-    // Check for opacity modifier: color-shade/opacity
-    let (color_shade, opacity) = if let Some((cs, op)) = value.rsplit_once('/') {
+    // Check for opacity modifier first: value/opacity
+    let (base, opacity) = if let Some((b, op)) = value.rsplit_once('/') {
         let alpha: f32 = op.parse().ok()?;
-        (cs, Some(alpha / 100.0))
+        (b, Some(alpha / 100.0))
     } else {
         (value, None)
     };
 
-    // Split into color name and shade
-    let (color_name, shade_str) = color_shade.rsplit_once('-')?;
-    let shade: u16 = shade_str.parse().ok()?;
+    // Resolve the base color
+    let mut color = match base {
+        "transparent" => Color::NONE,
+        "black" => Color::srgba_u8(0, 0, 0, 255),
+        "white" => Color::srgba_u8(255, 255, 255, 255),
+        "inherit" | "current" => return None,
+        _ => {
+            // Arbitrary: [#hex] or [rgb(...)]
+            if let Some(inner) = base.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                parse_color(inner)?
+            } else {
+                // Split into color name and shade
+                let (color_name, shade_str) = base.rsplit_once('-')?;
+                let shade: u16 = shade_str.parse().ok()?;
+                tailwind_color(color_name, shade)?
+            }
+        }
+    };
 
-    let mut color = tailwind_color(color_name, shade)?;
-
+    // Apply opacity modifier
     if let Some(alpha) = opacity {
         let srgba = color.to_srgba();
         color = Color::srgba(srgba.red, srgba.green, srgba.blue, alpha.clamp(0.0, 1.0));

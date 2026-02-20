@@ -760,10 +760,10 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                         // Contiguous — zero-copy sub-slice covers `-91.4`
                         let combined_end = word_span.end;
                         self.advance();
-                        Ok(ByteStr::from_utf8(
-                            self.source.slice(minus_span.start..combined_end),
+                        Ok(
+                            ByteStr::from_utf8(self.source.slice(minus_span.start..combined_end))
+                                .unwrap(),
                         )
-                        .unwrap())
                     }
                     _ => {
                         // Bare `-` as a value
@@ -1521,7 +1521,9 @@ mod tests {
         let cmds = parse("+view root class=test -view root").unwrap();
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0], Command::Upsert { .. }));
-        assert!(matches!(&cmds[1], Command::Destroy { kind, id } if kind == "view" && id == "root"));
+        assert!(
+            matches!(&cmds[1], Command::Destroy { kind, id } if kind == "view" && id == "root")
+        );
     }
 
     #[test]

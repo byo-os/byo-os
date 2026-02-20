@@ -238,6 +238,11 @@ pub enum EventKind {
     // Window/surface events
     Resize,
 
+    // Semantic control events (synthesized by daemons)
+    Press,
+    Change,
+    Input,
+
     /// Unknown or third-party event (e.g. `com.example.spell-check`)
     Other(ByteStr),
 }
@@ -265,6 +270,9 @@ impl EventKind {
             EventKind::Focus => "focus",
             EventKind::Blur => "blur",
             EventKind::Resize => "resize",
+            EventKind::Press => "press",
+            EventKind::Change => "change",
+            EventKind::Input => "input",
             EventKind::Other(s) => s,
         }
     }
@@ -295,6 +303,9 @@ impl EventKind {
             "focus" => EventKind::Focus,
             "blur" => EventKind::Blur,
             "resize" => EventKind::Resize,
+            "press" => EventKind::Press,
+            "change" => EventKind::Change,
+            "input" => EventKind::Input,
             _ => EventKind::Other(s),
         }
     }

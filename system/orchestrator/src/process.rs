@@ -40,7 +40,7 @@ pub enum WriteMsg {
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
-    pub tx: mpsc::Sender<WriteMsg>,
+    pub tx: mpsc::UnboundedSender<WriteMsg>,
 }
 
 /// Scanner handler that collects complete payloads and sends them to the
@@ -55,7 +55,14 @@ impl Handler for CollectHandler {
         let bytes = Bytes::copy_from_slice(payload);
         let commands = match byo::parser::parse_bytes(bytes) {
             Ok(cmds) => cmds,
-            Err(_) => return, // skip malformed payloads
+            Err(e) => {
+                tracing::warn!(
+                    "parse error from pid={}: {e} (payload: {:?})",
+                    self.process_id.0,
+                    String::from_utf8_lossy(payload)
+                );
+                return;
+            }
         };
         let msg = RouterMsg::Byo {
             from: self.process_id,
@@ -96,7 +103,12 @@ pub fn spawn_process(
     args: &[String],
     router_tx: mpsc::Sender<RouterMsg>,
 ) -> std::io::Result<Process> {
-    let mut child = TokioCommand::new(command)
+    // Split the command string on whitespace so that commands like
+    // "cargo run -p byo-compositor" work without requiring separate args.
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (program, inline_args) = parts.split_first().unwrap_or((&command, &[]));
+    let mut child = TokioCommand::new(program)
+        .args(inline_args)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -106,7 +118,7 @@ pub fn spawn_process(
     let stdout = child.stdout.take().expect("child stdout piped");
     let stdin = child.stdin.take().expect("child stdin piped");
 
-    let (write_tx, write_rx) = mpsc::channel::<WriteMsg>(256);
+    let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteMsg>();
 
     // Reader task: child stdout → Scanner → RouterMsg.
     let reader_router_tx = router_tx.clone();
@@ -168,7 +180,10 @@ async fn reader_task(
         .await;
 }
 
-async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<WriteMsg>) {
+async fn writer_task(
+    mut stdin: tokio::process::ChildStdin,
+    mut rx: mpsc::UnboundedReceiver<WriteMsg>,
+) {
     let mut frame = Vec::new();
     while let Some(msg) = rx.recv().await {
         let result = match &msg {
