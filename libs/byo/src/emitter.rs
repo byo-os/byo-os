@@ -1058,4 +1058,52 @@ mod tests {
         let out = emit(|em| em.upsert("view", "x", &[Prop::val("data", "a,b")]));
         assert_eq!(out, "\x1b_B\n+view x data=\"a,b\"\n\x1b\\");
     }
+
+    #[test]
+    fn negative_value_bare() {
+        let out = emit(|em| {
+            em.event(
+                "pointerenter",
+                0,
+                "root",
+                &[Prop::val("x", "-91.4"), Prop::val("y", "-101.0")],
+            )
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n!pointerenter 0 root x=-91.4 y=-101.0\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn negative_value_round_trips() {
+        use crate::parser::parse;
+        let out = emit(|em| {
+            em.upsert(
+                "view",
+                "x",
+                &[Prop::val("translate-x", "-100"), Prop::val("y", "-50.5")],
+            )
+        });
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Upsert { props, .. } => {
+                assert!(props
+                    .iter()
+                    .any(|p| matches!(p, Prop::Value { key, value } if *key == "translate-x" && *value == "-100")));
+                assert!(props
+                    .iter()
+                    .any(|p| matches!(p, Prop::Value { key, value } if *key == "y" && *value == "-50.5")));
+            }
+            _ => panic!("expected Upsert"),
+        }
+    }
 }

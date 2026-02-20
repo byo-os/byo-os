@@ -245,7 +245,22 @@ impl Parser {
     /// Parse a prop value (after `=`).
     /// Can be a bare ident, string literal, numeric literal, or `{expr}`.
     /// Glues `-`, `:`, `.`, `/` for compound values (e.g. `bg-zinc-700/50`).
+    /// A leading `-` is consumed as part of the value (e.g. `-100`, `-50.5`).
     fn parse_value(&mut self) -> Result<IrValue, String> {
+        // Leading `-` forms a negative value (e.g. `x=-100`)
+        if self.peek_punct('-')
+            && let Some(next) = self.tokens.get(self.pos + 1)
+            && spans_adjacent(&self.tokens[self.pos], next)
+            && matches!(next, TokenTree::Literal(_) | TokenTree::Ident(_))
+        {
+            self.pos += 1; // consume -
+            let inner = self.parse_value()?;
+            return match inner {
+                IrValue::Literal(s) => Ok(IrValue::Literal(format!("-{s}"))),
+                other => Ok(other),
+            };
+        }
+
         match self.peek() {
             Some(TokenTree::Ident(id)) => {
                 let s = id.to_string();
@@ -1285,5 +1300,49 @@ mod tests {
             }
             _ => panic!("expected Upsert"),
         }
+    }
+
+    #[test]
+    fn parse_negative_numeric_value() {
+        // `-100` is tokenized as Punct('-') + Literal(100) by proc_macro
+        let input = quote! { +view x offset=-100 };
+        let cmds = parse(input, false).unwrap();
+        match &cmds[0] {
+            IrCommand::Upsert { props, .. } => {
+                assert_eq!(props.len(), 1);
+                assert!(
+                    matches!(&props[0], IrProp::Value { key, value: IrValue::Literal(v) } if key == "offset" && v == "-100")
+                );
+            }
+            _ => panic!("expected Upsert"),
+        }
+    }
+
+    #[test]
+    fn parse_negative_float_value() {
+        let input = quote! { !pointerenter 0 root x=-91.4 y=-101.0 };
+        let cmds = parse(input, false).unwrap();
+        match &cmds[0] {
+            IrCommand::Event { props, .. } => {
+                assert_eq!(props.len(), 2);
+                assert!(
+                    matches!(&props[0], IrProp::Value { key, value: IrValue::Literal(v) } if key == "x" && v == "-91.4")
+                );
+                assert!(
+                    matches!(&props[1], IrProp::Value { key, value: IrValue::Literal(v) } if key == "y" && v == "-101.0")
+                );
+            }
+            _ => panic!("expected Event"),
+        }
+    }
+
+    #[test]
+    fn negative_value_does_not_affect_destroy() {
+        // `-view id` must still parse as a destroy command, not a negative value
+        let input = quote! { +view root class=test -view root };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(&cmds[0], IrCommand::Upsert { .. }));
+        assert!(matches!(&cmds[1], IrCommand::Destroy { .. }));
     }
 }

@@ -714,7 +714,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         })
     }
 
-    /// Expect a value: Word or Str token. Returns a ByteStr.
+    /// Expect a value: Word, Str, or `-Word` (negative number). Returns a ByteStr.
     fn expect_value(&mut self) -> Result<ByteStr, ParseError> {
         let tok = self.peek().ok_or_else(|| {
             self.error(ParseErrorKind::Expected {
@@ -745,6 +745,29 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                         let bs = ByteStr::from(s.clone());
                         self.advance();
                         Ok(bs)
+                    }
+                }
+            }
+            Token::Minus => {
+                let minus_span = tok.span;
+                self.advance(); // consume -
+                // `-` followed by a Word forms a negative value (e.g. `-91.4`)
+                match self.peek() {
+                    Some(Spanned {
+                        token: Token::Word(_),
+                        span: word_span,
+                    }) if minus_span.end == word_span.start => {
+                        // Contiguous — zero-copy sub-slice covers `-91.4`
+                        let combined_end = word_span.end;
+                        self.advance();
+                        Ok(ByteStr::from_utf8(
+                            self.source.slice(minus_span.start..combined_end),
+                        )
+                        .unwrap())
+                    }
+                    _ => {
+                        // Bare `-` as a value
+                        Ok(self.byte_str_at(minus_span))
                     }
                 }
             }
@@ -1466,6 +1489,39 @@ mod tests {
             Command::Upsert { id, .. } => assert_eq!(id, "_"),
             _ => panic!("expected Upsert"),
         }
+    }
+
+    #[test]
+    fn negative_value_bare() {
+        let cmds = parse("!pointerenter 0 root x=-91.4 y=-101.0").unwrap();
+        match &cmds[0] {
+            Command::Event { props, .. } => {
+                assert_eq!(props[0], Prop::val("x", "-91.4"));
+                assert_eq!(props[1], Prop::val("y", "-101.0"));
+            }
+            _ => panic!("expected Event"),
+        }
+    }
+
+    #[test]
+    fn negative_value_in_upsert() {
+        let cmds = parse("+view x translate-x=-100 translate-y=-50.5").unwrap();
+        match &cmds[0] {
+            Command::Upsert { props, .. } => {
+                assert_eq!(props[0], Prop::val("translate-x", "-100"));
+                assert_eq!(props[1], Prop::val("translate-y", "-50.5"));
+            }
+            _ => panic!("expected Upsert"),
+        }
+    }
+
+    #[test]
+    fn negative_value_does_not_affect_destroy() {
+        // `-view id` must still parse as a destroy command, not a negative value
+        let cmds = parse("+view root class=test -view root").unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(&cmds[0], Command::Upsert { .. }));
+        assert!(matches!(&cmds[1], Command::Destroy { kind, id } if kind == "view" && id == "root"));
     }
 
     #[test]

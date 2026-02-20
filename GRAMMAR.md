@@ -54,7 +54,8 @@ other_res  = type seqnum prop* children?
 # -- Properties --
 
 prop       = '~' name | name '=' value | name
-value      = dqstring | sqstring | bare
+value      = dqstring | sqstring | negbare | bare
+negbare    = '-' bare
 
 # -- Strings --
 
@@ -115,11 +116,17 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
 - **Qualified IDs.** The `id` rule includes `client:id` form for
   cross-client references used by daemons and the orchestrator.
 
-- **Bare values and operators.** Operator characters (`+`, `-`, `@`,
-  `!`, `?`, `.`, `#`) cannot start a bare value — they are always parsed
-  as command operators at a token boundary. They are valid mid-value
+- **Bare values and operators.** Operator characters (`+`, `@`, `!`,
+  `?`, `.`, `#`) cannot start a bare value — they are always parsed as
+  command operators at a token boundary. They are valid mid-value
   (e.g. `notes-app`, `w-64`, `a+b`, `com.example.foo`). To use a
   value that starts with an operator character, quote it: `value="+5"`.
+
+- **Negative values.** `-` is special-cased in value position: after
+  `=`, a `-` immediately followed by a bare word is parsed as a single
+  negative value (e.g. `x=-91.4`, `translate-x=-100`). At the top
+  level, `-` still starts a destroy command (`-view id`). Quoting
+  also works: `x="-91.4"`.
 
 - **Event dispatch.** The `event` rule tries `ack` as a keyword first,
   then falls back to `other_event` for all other event types (both

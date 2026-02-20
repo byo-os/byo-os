@@ -331,6 +331,10 @@ Unquoted prop values match `[^\s{}="'~\\]+`. Single and double quotes
 are interchangeable. Quoted strings support backslash escape sequences
 (see [`GRAMMAR.md`](GRAMMAR.md)). Bare values do not support escaping.
 
+Negative values work bare after `=`: `x=-91.4`, `translate-x=-100`.
+The `-` must be immediately followed by a word (no space). At the top
+level, `-` still starts a destroy command (`-view id`).
+
 Unqualified type names (no dots) are reserved for BYO/OS built-in
 types — those shipped with the compositor and first-party daemons
 (e.g. `view`, `layer`, `text`, `button`, `slider`). Third-party
