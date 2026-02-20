@@ -4,9 +4,11 @@ mod scenarios {
     pub mod disconnect;
     pub mod event_routing;
     pub mod expansion;
+    pub mod graphics;
     pub mod late_connection;
     pub mod multi_app;
     pub mod nested_expansion;
+    pub mod passthrough;
     pub mod projection;
     pub mod re_expansion;
     pub mod state_reduction;
@@ -73,4 +75,48 @@ fn assert_no_message(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) {
 /// Shorthand for creating a ProcessId.
 fn pid(n: u32) -> ProcessId {
     ProcessId(n)
+}
+
+/// Send a kitty graphics payload to the router from a given process.
+async fn send_graphics(router: &mut Router, from: ProcessId, payload: &[u8]) {
+    router
+        .handle(RouterMsg::Graphics {
+            from,
+            raw: payload.to_vec(),
+        })
+        .await;
+}
+
+/// Send passthrough bytes to the router from a given process.
+async fn send_passthrough(router: &mut Router, from: ProcessId, data: &[u8]) {
+    router
+        .handle(RouterMsg::Passthrough {
+            from,
+            raw: data.to_vec(),
+        })
+        .await;
+}
+
+/// Receive the next Graphics message from a mock process's channel.
+fn recv_graphics_raw(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) -> Vec<u8> {
+    match rx.try_recv() {
+        Ok(WriteMsg::Graphics(raw)) => (*raw).clone(),
+        Ok(other) => panic!("expected WriteMsg::Graphics, got: {other:?}"),
+        Err(_) => panic!("no message available"),
+    }
+}
+
+/// Receive the next Passthrough message from a mock process's channel.
+fn recv_passthrough_raw(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) -> Vec<u8> {
+    match rx.try_recv() {
+        Ok(WriteMsg::Passthrough(raw)) => (*raw).clone(),
+        Ok(other) => panic!("expected WriteMsg::Passthrough, got: {other:?}"),
+        Err(_) => panic!("no message available"),
+    }
+}
+
+/// Receive the next message (any type) from a mock process's channel.
+#[allow(dead_code)]
+fn recv_any(rx: &mut mpsc::UnboundedReceiver<WriteMsg>) -> WriteMsg {
+    rx.try_recv().expect("no message available")
 }

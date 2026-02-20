@@ -220,6 +220,13 @@ impl PendingBatch {
                         write_patch(buf, kind, &qid_buf, props);
                     }
                 }
+                byo::Command::Pragma {
+                    kind: byo::PragmaKind::Redirect | byo::PragmaKind::Unredirect,
+                    ..
+                } => {
+                    // Redirect/unredirect are consumed by the orchestrator —
+                    // it injects its own redirect frames before passthrough.
+                }
                 byo::Command::Event { .. }
                 | byo::Command::Ack { .. }
                 | byo::Command::Request { .. }
@@ -286,6 +293,12 @@ pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8>
             byo::Command::Patch { kind, id, props } => {
                 qualify_into(&mut qid_buf, client, id);
                 write_patch(&mut buf, kind, &qid_buf, props);
+            }
+            byo::Command::Pragma {
+                kind: byo::PragmaKind::Redirect | byo::PragmaKind::Unredirect,
+                ..
+            } => {
+                // Consumed by the orchestrator — not forwarded.
             }
             byo::Command::Event { .. }
             | byo::Command::Ack { .. }

@@ -59,6 +59,15 @@ struct PendingResponse {
     forwarded_at: Instant,
 }
 
+/// Per-client kitty graphics ID translation table.
+#[derive(Default)]
+struct GraphicsIdMap {
+    /// Local image ID → global image ID.
+    id_map: HashMap<u32, u32>,
+    /// Local image number → global image number.
+    number_map: HashMap<u32, u32>,
+}
+
 /// The central router that dispatches messages between processes.
 pub struct Router {
     /// All managed processes, keyed by ID.
@@ -87,6 +96,22 @@ pub struct Router {
     request_seqs: HashMap<(ProcessId, String), u64>,
     /// Per (destination, request_kind, forwarded_seq): pending response info.
     pending_responses: HashMap<(ProcessId, String, u64), PendingResponse>,
+    /// Per-client current passthrough target. Default: "/" (root tty).
+    passthrough_targets: HashMap<ProcessId, String>,
+    /// The last passthrough target sent to the compositor (for dedup).
+    last_forwarded_target: String,
+    /// Per-client kitty graphics ID remapping tables.
+    graphics_maps: HashMap<ProcessId, GraphicsIdMap>,
+    /// Next global image ID to allocate.
+    next_global_image_id: u32,
+    /// Next global image number to allocate.
+    next_global_image_number: u32,
+    /// Buffered graphics payloads awaiting a `G` observer.
+    /// Cleared once the first `G` observer subscribes.
+    pending_graphics: Vec<(ProcessId, Vec<u8>)>,
+    /// Buffered passthrough payloads awaiting a `tty` observer.
+    /// Cleared once the first `tty` observer subscribes.
+    pending_passthrough: Vec<(ProcessId, Vec<u8>)>,
 }
 
 impl Default for Router {
@@ -105,6 +130,13 @@ impl Default for Router {
             pending_acks: HashMap::new(),
             request_seqs: HashMap::new(),
             pending_responses: HashMap::new(),
+            passthrough_targets: HashMap::new(),
+            last_forwarded_target: "/".to_owned(),
+            graphics_maps: HashMap::new(),
+            next_global_image_id: 1,
+            next_global_image_number: 1,
+            pending_graphics: Vec::new(),
+            pending_passthrough: Vec::new(),
         }
     }
 }
@@ -144,7 +176,7 @@ impl Router {
     }
 
     /// Handle pre-parsed BYO commands from a process.
-    async fn handle_byo(&mut self, from: ProcessId, commands: Vec<Command>) {
+    async fn handle_byo(&mut self, from: ProcessId, mut commands: Vec<Command>) {
         let client = match self.client_name(from) {
             Some(n) => n.to_owned(),
             None => return,
@@ -162,6 +194,9 @@ impl Router {
             queue.push(RouterMsg::Byo { from, commands });
             return;
         }
+
+        // Remap $img(N) references in prop values to global IDs.
+        self.remap_img_vars(from, &mut commands);
 
         // Process requests/ack/responses.
         let mut resync_pids: Vec<ProcessId> = Vec::new();
@@ -200,6 +235,29 @@ impl Router {
                         self.handle_unobserve(from, &client, target);
                     }
                     resync_pids.push(from);
+                }
+                Command::Pragma {
+                    kind: PragmaKind::Redirect,
+                    targets,
+                } => {
+                    if let Some(target) = targets.first() {
+                        if target.as_ref() == "_" {
+                            self.passthrough_targets.insert(from, String::new());
+                        } else {
+                            self.passthrough_targets.insert(from, target.to_string());
+                        }
+                        tracing::debug!(
+                            "{client} redirect passthrough to {:?}",
+                            self.passthrough_targets[&from]
+                        );
+                    }
+                }
+                Command::Pragma {
+                    kind: PragmaKind::Unredirect,
+                    ..
+                } => {
+                    self.passthrough_targets.insert(from, "/".to_owned());
+                    tracing::debug!("{client} unredirect passthrough to root tty");
                 }
                 Command::Response {
                     kind: ResponseKind::Expand,
@@ -313,6 +371,10 @@ impl Router {
         for pid in resync_set {
             self.resync_observer(pid).await;
         }
+
+        // Flush pending graphics/passthrough if observers just appeared.
+        self.flush_pending_graphics();
+        self.flush_pending_passthrough();
     }
 
     /// Update the state tree from parsed commands.
@@ -369,8 +431,7 @@ impl Router {
         }
     }
 
-    /// Handle a graphics payload — forward to all subscribers of graphics-related types.
-    /// In practice, graphics commands go to the compositor.
+    /// Handle a graphics payload — remap image IDs and forward to `G` observers.
     async fn handle_graphics(&mut self, from: ProcessId, raw: Vec<u8>) {
         if let Some(queue) = self.output_queues.get_mut(&from)
             && queue.is_blocked()
@@ -379,18 +440,92 @@ impl Router {
             return;
         }
 
-        // Forward graphics to all observers of "view" (typically the compositor).
-        if let Some(observers) = self.observers.get("view") {
-            let arc = Arc::new(raw);
+        // Remap i=/I= values to globally unique IDs.
+        let remapped = self.remap_graphics_ids(from, &raw);
+        let payload = remapped.unwrap_or(raw);
+
+        if let Some(observers) = self.observers.get("G") {
+            let arc = Arc::new(payload);
             for &pid in observers {
                 if pid != from {
                     self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)));
                 }
             }
+        } else {
+            // No G observer yet — buffer for replay when one subscribes.
+            self.pending_graphics.push((from, payload));
         }
     }
 
-    /// Handle passthrough bytes — forward to view observers (compositor).
+    /// Remap `i=` and `I=` in a kitty graphics payload using per-client tables.
+    fn remap_graphics_ids(&mut self, from: ProcessId, raw: &[u8]) -> Option<Vec<u8>> {
+        let next_id = &mut self.next_global_image_id;
+        let next_num = &mut self.next_global_image_number;
+        let map = self.graphics_maps.entry(from).or_default();
+
+        byo::kitty_gfx::rewrite_ids(
+            raw,
+            |local_id| {
+                *map.id_map.entry(local_id).or_insert_with(|| {
+                    let global = *next_id;
+                    *next_id = next_id.wrapping_add(1);
+                    if *next_id == 0 {
+                        *next_id = 1; // skip 0
+                    }
+                    global
+                })
+            },
+            |local_num| {
+                *map.number_map.entry(local_num).or_insert_with(|| {
+                    let global = *next_num;
+                    *next_num = next_num.wrapping_add(1);
+                    if *next_num == 0 {
+                        *next_num = 1;
+                    }
+                    global
+                })
+            },
+        )
+    }
+
+    /// Remap `$img(N)` variable references in all prop values of commands
+    /// from a client, using the client's graphics ID translation table.
+    fn remap_img_vars(&self, from: ProcessId, commands: &mut [Command]) {
+        let Some(gfx_map) = self.graphics_maps.get(&from) else {
+            return; // No images uploaded by this client — nothing to remap.
+        };
+
+        for cmd in commands.iter_mut() {
+            let props = match cmd {
+                Command::Upsert { props, .. }
+                | Command::Patch { props, .. }
+                | Command::Event { props, .. }
+                | Command::Ack { props, .. } => props,
+                _ => continue,
+            };
+
+            for prop in props.iter_mut() {
+                if let Prop::Value { value, .. } = prop {
+                    let replaced = byo::vars::replace(value, |var| {
+                        if var.name == "img" {
+                            if let Ok(local_id) = var.args.parse::<u32>() {
+                                if let Some(&global_id) = gfx_map.id_map.get(&local_id) {
+                                    return Some(format!("$img({global_id})"));
+                                }
+                            }
+                        }
+                        None
+                    });
+                    if let std::borrow::Cow::Owned(new_val) = replaced {
+                        *value = byo::ByteStr::from(new_val);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle passthrough bytes — forward to view observers (compositor),
+    /// injecting `#redirect` frames when the target changes between clients.
     async fn handle_passthrough(&mut self, from: ProcessId, raw: Vec<u8>) {
         if let Some(queue) = self.output_queues.get_mut(&from)
             && queue.is_blocked()
@@ -399,13 +534,47 @@ impl Router {
             return;
         }
 
-        if let Some(observers) = self.observers.get("view") {
+        let target = self
+            .passthrough_targets
+            .get(&from)
+            .map(|s| s.as_str())
+            .unwrap_or("/");
+
+        // Discard if client set redirect to `_`.
+        if target.is_empty() {
+            return;
+        }
+
+        // Inject a redirect frame if the compositor's target needs switching.
+        if target != self.last_forwarded_target {
+            let mut redirect_buf = Vec::new();
+            if target == "/" {
+                let _ = write!(redirect_buf, "\n#unredirect");
+            } else {
+                let _ = write!(redirect_buf, "\n#redirect {target}");
+            }
+            self.last_forwarded_target = target.to_owned();
+
+            let redirect_arc = Arc::new(redirect_buf);
+            if let Some(observers) = self.observers.get("tty") {
+                for &pid in observers {
+                    if pid != from {
+                        self.send_to(pid, WriteMsg::Byo(Arc::clone(&redirect_arc)));
+                    }
+                }
+            }
+        }
+
+        if let Some(observers) = self.observers.get("tty") {
             let arc = Arc::new(raw);
             for &pid in observers {
                 if pid != from {
                     self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)));
                 }
             }
+        } else {
+            // No tty observer yet — buffer for replay when one subscribes.
+            self.pending_passthrough.push((from, raw));
         }
     }
 
@@ -516,6 +685,25 @@ impl Router {
         // Remove pending batches from this process.
         self.pending_batches.retain(|b| b.from != process);
 
+        // Remove passthrough target.
+        self.passthrough_targets.remove(&process);
+
+        // Clean up kitty graphics — delete all images owned by this process.
+        if let Some(gfx_map) = self.graphics_maps.remove(&process) {
+            // Send delete commands to _gfx observers for each global image ID.
+            for &global_id in gfx_map.id_map.values() {
+                let delete_payload = format!("a=d,d=i,i={global_id},q=2");
+                if let Some(observers) = self.observers.get("G") {
+                    let arc = Arc::new(delete_payload.into_bytes());
+                    for &pid in observers {
+                        if pid != process {
+                            self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)));
+                        }
+                    }
+                }
+            }
+        }
+
         // Remove from name_to_id.
         self.name_to_id.retain(|_, &mut pid| pid != process);
         self.processes.remove(&process);
@@ -576,6 +764,70 @@ impl Router {
             .entry(from)
             .or_default()
             .insert(target_type.to_owned());
+    }
+
+    /// Flush buffered graphics payloads to newly-registered `G` observers.
+    fn flush_pending_graphics(&mut self) {
+        if self.pending_graphics.is_empty() {
+            return;
+        }
+        let Some(observers) = self.observers.get("G") else {
+            return;
+        };
+        let observers: Vec<ProcessId> = observers.clone();
+        let pending = std::mem::take(&mut self.pending_graphics);
+        for (from, payload) in pending {
+            let arc = Arc::new(payload);
+            for &pid in &observers {
+                if pid != from {
+                    self.send_to(pid, WriteMsg::Graphics(Arc::clone(&arc)));
+                }
+            }
+        }
+    }
+
+    /// Flush buffered passthrough payloads to newly-registered `tty` observers.
+    fn flush_pending_passthrough(&mut self) {
+        if self.pending_passthrough.is_empty() {
+            return;
+        }
+        let Some(observers) = self.observers.get("tty") else {
+            return;
+        };
+        let observers: Vec<ProcessId> = observers.clone();
+        let pending = std::mem::take(&mut self.pending_passthrough);
+        for (from, raw) in pending {
+            // Inject redirect frames as needed (same logic as handle_passthrough).
+            let target = self
+                .passthrough_targets
+                .get(&from)
+                .map(|s| s.as_str())
+                .unwrap_or("/");
+            if target.is_empty() {
+                continue; // discard
+            }
+            if target != self.last_forwarded_target {
+                let mut redirect_buf = Vec::new();
+                if target == "/" {
+                    let _ = write!(redirect_buf, "\n#unredirect");
+                } else {
+                    let _ = write!(redirect_buf, "\n#redirect {target}");
+                }
+                self.last_forwarded_target = target.to_owned();
+                let redirect_arc = Arc::new(redirect_buf);
+                for &pid in &observers {
+                    if pid != from {
+                        self.send_to(pid, WriteMsg::Byo(Arc::clone(&redirect_arc)));
+                    }
+                }
+            }
+            let arc = Arc::new(raw);
+            for &pid in &observers {
+                if pid != from {
+                    self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)));
+                }
+            }
+        }
     }
 
     /// Handle a `#unobserve` pragma — stop observing a type (fire-and-forget).

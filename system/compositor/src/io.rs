@@ -179,10 +179,10 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
 
     let emitter = StdoutEmitter::new();
 
-    // Send observe subscription for compositor types (including tty)
+    // Send observe subscription for compositor types (including tty and graphics)
     emitter.frame(|em| {
         byo::byo_write!(em,
-            #observe view,text,layer,window,tty
+            #observe view,text,layer,window,tty,G
         )
     });
 

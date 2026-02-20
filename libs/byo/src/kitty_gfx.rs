@@ -367,6 +367,76 @@ fn parse_delete(value: &str, cmd: &KittyGfxCommand) -> Result<DeleteTarget, Pars
     }
 }
 
+/// Rewrite `i=` and `I=` values in a raw kitty graphics payload.
+///
+/// Scans the comma-separated control portion (before `;`) for `i=N` and
+/// `I=N` keys and substitutes their values using the provided closures.
+/// The payload after `;` is copied unchanged.
+///
+/// Returns `None` if the payload is not valid UTF-8. Keys that are not
+/// `i` or `I`, or whose values are not valid `u32`, are passed through
+/// unchanged.
+///
+/// ```
+/// use byo::kitty_gfx::rewrite_ids;
+///
+/// let input = b"a=t,f=32,i=1,I=5;iVBORw0KGgo=";
+/// let out = rewrite_ids(input, |id| id + 100, |num| num + 200).unwrap();
+/// assert_eq!(out, b"a=t,f=32,i=101,I=205;iVBORw0KGgo=");
+/// ```
+pub fn rewrite_ids(
+    data: &[u8],
+    mut map_id: impl FnMut(u32) -> u32,
+    mut map_number: impl FnMut(u32) -> u32,
+) -> Option<Vec<u8>> {
+    let data_str = std::str::from_utf8(data).ok()?;
+
+    let (control, payload) = match data_str.find(';') {
+        Some(pos) => (&data_str[..pos], Some(&data_str[pos..])), // includes `;`
+        None => (data_str, None),
+    };
+
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let mut first = true;
+
+    for pair in control.split(',') {
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+
+        if let Some((key, value)) = pair.split_once('=') {
+            match key {
+                "i" => {
+                    if let Ok(id) = value.parse::<u32>() {
+                        let mapped = map_id(id);
+                        out.extend_from_slice(b"i=");
+                        out.extend_from_slice(mapped.to_string().as_bytes());
+                        continue;
+                    }
+                }
+                "I" => {
+                    if let Ok(num) = value.parse::<u32>() {
+                        let mapped = map_number(num);
+                        out.extend_from_slice(b"I=");
+                        out.extend_from_slice(mapped.to_string().as_bytes());
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Pass through unchanged
+        out.extend_from_slice(pair.as_bytes());
+    }
+
+    if let Some(payload) = payload {
+        out.extend_from_slice(payload.as_bytes());
+    }
+
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +636,43 @@ mod tests {
     #[test]
     fn error_invalid_control_pair() {
         assert!(parse(b"noequals").is_err());
+    }
+
+    // -- rewrite_ids tests ---------------------------------------------------
+
+    #[test]
+    fn rewrite_ids_both() {
+        let out = rewrite_ids(b"a=t,f=32,i=1,I=5;data", |id| id + 100, |n| n + 200).unwrap();
+        assert_eq!(out, b"a=t,f=32,i=101,I=205;data");
+    }
+
+    #[test]
+    fn rewrite_ids_only_image_id() {
+        let out = rewrite_ids(b"a=p,i=42,c=10", |id| id * 2, |n| n).unwrap();
+        assert_eq!(out, b"a=p,i=84,c=10");
+    }
+
+    #[test]
+    fn rewrite_ids_no_ids() {
+        let out = rewrite_ids(b"a=d,d=a", |id| id + 1, |n| n + 1).unwrap();
+        assert_eq!(out, b"a=d,d=a");
+    }
+
+    #[test]
+    fn rewrite_ids_no_payload() {
+        let out = rewrite_ids(b"a=q,i=7", |id| id + 10, |n| n).unwrap();
+        assert_eq!(out, b"a=q,i=17");
+    }
+
+    #[test]
+    fn rewrite_ids_empty_payload() {
+        let out = rewrite_ids(b"i=1;", |id| id + 99, |n| n).unwrap();
+        assert_eq!(out, b"i=100;");
+    }
+
+    #[test]
+    fn rewrite_ids_preserves_payload() {
+        let out = rewrite_ids(b"a=t,i=1;iVBORw0KGgo=", |id| id + 100, |n| n).unwrap();
+        assert_eq!(out, b"a=t,i=101;iVBORw0KGgo=");
     }
 }
