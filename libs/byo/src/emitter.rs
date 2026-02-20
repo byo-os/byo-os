@@ -8,8 +8,15 @@ use std::io;
 use crate::protocol::{APC_START, Command, KITTY_GFX_PROTOCOL_ID, PROTOCOL_ID, Prop, ST};
 
 /// Returns `true` if `value` can be written bare (unquoted).
+///
+/// A value must not start with a lexer operator character (except `-`, which
+/// the parser handles for negative numbers). Mid-word, most operators are
+/// fine (e.g. hyphens in `bg-zinc-700`, dots in `com.example.foo`), but
+/// certain characters (`#`, `,`, `~`, etc.) terminate bare words in the
+/// lexer and must be excluded everywhere.
 pub fn is_bare(value: &str) -> bool {
     !value.is_empty()
+        && !matches!(value.as_bytes()[0], b'+' | b'@' | b'!' | b'?' | b'.' | b'#')
         && value.bytes().all(|b| {
             !b.is_ascii_whitespace()
                 && b != b'{'
@@ -20,6 +27,7 @@ pub fn is_bare(value: &str) -> bool {
                 && b != b'~'
                 && b != b'\\'
                 && b != b','
+                && b != b'#'
         })
 }
 
@@ -1057,6 +1065,35 @@ mod tests {
     fn value_with_comma_quoted() {
         let out = emit(|em| em.upsert("view", "x", &[Prop::val("data", "a,b")]));
         assert_eq!(out, "\x1b_B\n+view x data=\"a,b\"\n\x1b\\");
+    }
+
+    #[test]
+    fn hash_value_quoted() {
+        let out = emit(|em| em.upsert("view", "x", &[Prop::val("background-color", "#ff0000")]));
+        assert_eq!(out, "\x1b_B\n+view x background-color=\"#ff0000\"\n\x1b\\");
+    }
+
+    #[test]
+    fn hash_value_round_trips() {
+        use crate::parser::parse;
+        let out = emit(|em| em.upsert("view", "x", &[Prop::val("background-color", "#ff0000")]));
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Upsert { props, .. } => {
+                assert!(props.iter().any(
+                    |p| matches!(p, Prop::Value { key, value } if *key == "background-color" && *value == "#ff0000")
+                ));
+            }
+            _ => panic!("expected Upsert"),
+        }
     }
 
     #[test]
