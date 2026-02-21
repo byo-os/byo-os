@@ -692,6 +692,119 @@ fn color_approx_eq(a: Color, b: Color) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// ByoFontWeight — wraps u16 font weight (100-1000)
+// ---------------------------------------------------------------------------
+
+/// Parses CSS font-weight keywords and numeric values (100-1000).
+#[derive(Debug, Clone)]
+pub struct ByoFontWeight(pub u16);
+
+impl Default for ByoFontWeight {
+    fn default() -> Self {
+        Self(400)
+    }
+}
+
+impl ReadProp for ByoFontWeight {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Value { value, .. } => {
+                if let Some(w) = crate::font::parse_font_weight(value.as_ref()) {
+                    self.0 = w;
+                }
+            }
+            Prop::Remove { .. } => self.0 = 400,
+            _ => {}
+        }
+    }
+}
+
+impl WriteProp for ByoFontWeight {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        out.push(Prop::val(key, self.0.to_string()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByoFontStyle — wraps FontStyleRequest
+// ---------------------------------------------------------------------------
+
+/// Parses CSS font-style: `normal`, `italic`, `oblique`, `oblique Xdeg`.
+#[derive(Debug, Clone)]
+pub struct ByoFontStyle(pub crate::font::FontStyleRequest);
+
+impl Default for ByoFontStyle {
+    fn default() -> Self {
+        Self(crate::font::FontStyleRequest::Normal)
+    }
+}
+
+impl ReadProp for ByoFontStyle {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Value { value, .. } => {
+                if let Some(s) = crate::font::parse_font_style(value.as_ref()) {
+                    self.0 = s;
+                }
+            }
+            Prop::Remove { .. } => self.0 = crate::font::FontStyleRequest::Normal,
+            _ => {}
+        }
+    }
+}
+
+impl WriteProp for ByoFontStyle {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        let val = match self.0 {
+            crate::font::FontStyleRequest::Normal => "normal".to_string(),
+            crate::font::FontStyleRequest::Italic => "italic".to_string(),
+            crate::font::FontStyleRequest::Oblique(deg) => {
+                if (deg - 14.0).abs() < 0.01 {
+                    "oblique".to_string()
+                } else {
+                    format!("oblique {deg}deg")
+                }
+            }
+        };
+        out.push(Prop::val(key, val));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByoFontStretch — wraps f32 percentage (50-200)
+// ---------------------------------------------------------------------------
+
+/// Parses CSS font-stretch keywords and percentage values.
+#[derive(Debug, Clone)]
+pub struct ByoFontStretch(pub f32);
+
+impl Default for ByoFontStretch {
+    fn default() -> Self {
+        Self(100.0)
+    }
+}
+
+impl ReadProp for ByoFontStretch {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Value { value, .. } => {
+                if let Some(s) = crate::font::parse_font_stretch(value.as_ref()) {
+                    self.0 = s;
+                }
+            }
+            Prop::Remove { .. } => self.0 = 100.0,
+            _ => {}
+        }
+    }
+}
+
+impl WriteProp for ByoFontStretch {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        out.push(Prop::val(key, format!("{}%", self.0)));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

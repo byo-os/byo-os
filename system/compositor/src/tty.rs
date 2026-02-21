@@ -204,6 +204,8 @@ pub fn reconcile_tty(
     mut text_colors: Query<&mut TextColor, Without<ByoTty>>,
     mut bg_colors: Query<&mut BackgroundColor, Without<ByoTty>>,
     mut redraw: MessageWriter<RequestRedraw>,
+    mut font_store: ResMut<crate::font::FontStore>,
+    asset_server: Res<AssetServer>,
 ) {
     let default_bg = AnsiColor::Named(alacritty_terminal::vte::ansi::NamedColor::Background);
 
@@ -216,6 +218,22 @@ pub fn reconcile_tty(
         let resolved = crate::style::resolve_tty_props(props);
         let font_size = resolved.font_size;
         let line_h = font_size * 1.2;
+
+        // Resolve tty font (default: ui-monospace / Fira Mono)
+        let family_spec = resolved.font_family.as_deref().and_then(|spec| {
+            font_store
+                .resolve_tailwind_class(spec)
+                .or_else(|| font_store.resolve_font_family_list(spec))
+        });
+        let default = font_store.default_tty_family.clone();
+        let font_handle = font_store.resolve_font(
+            family_spec.as_deref(),
+            400,
+            crate::font::FontStyleRequest::Normal,
+            100.0,
+            &default,
+            &asset_server,
+        );
 
         // Check if a full rebuild is needed (resize or font-size change).
         let need_rebuild = state.force_rebuild || (line_h - state.rendered_line_h).abs() > 0.01;
@@ -312,14 +330,27 @@ pub fn reconcile_tty(
                 for old_run in &state.rendered[i].runs {
                     commands.entity(old_run.cell_entity).despawn();
                 }
-                state.rendered[i].runs =
-                    spawn_runs(&mut commands, row_entity, new_runs, font_size, line_h);
+                state.rendered[i].runs = spawn_runs(
+                    &mut commands,
+                    row_entity,
+                    new_runs,
+                    font_size,
+                    line_h,
+                    font_handle.as_ref(),
+                );
             }
         }
 
         // Spawn new rows beyond old count.
         for new_runs in new_rows.iter().skip(old_count) {
-            let cached = spawn_full_row(&mut commands, entity, new_runs, font_size, line_h);
+            let cached = spawn_full_row(
+                &mut commands,
+                entity,
+                new_runs,
+                font_size,
+                line_h,
+                font_handle.as_ref(),
+            );
             state.rendered.push(cached);
         }
 
@@ -407,6 +438,7 @@ fn spawn_full_row(
     runs: &[NewRun],
     font_size: f32,
     line_h: f32,
+    font: Option<&Handle<Font>>,
 ) -> CachedRow {
     let row_entity = commands
         .spawn((
@@ -423,7 +455,7 @@ fn spawn_full_row(
         ))
         .id();
 
-    let cached_runs = spawn_runs(commands, row_entity, runs, font_size, line_h);
+    let cached_runs = spawn_runs(commands, row_entity, runs, font_size, line_h, font);
     CachedRow {
         entity: row_entity,
         runs: cached_runs,
@@ -437,6 +469,7 @@ fn spawn_runs(
     runs: &[NewRun],
     font_size: f32,
     line_h: f32,
+    font: Option<&Handle<Font>>,
 ) -> Vec<CachedRun> {
     runs.iter()
         .map(|run| {
@@ -452,13 +485,18 @@ fn spawn_runs(
                 ))
                 .id();
 
+            let mut text_font = TextFont {
+                font_size,
+                ..default()
+            };
+            if let Some(f) = font {
+                text_font.font = f.clone();
+            }
+
             let text_entity = commands
                 .spawn((
                     Text::new(&run.text),
-                    TextFont {
-                        font_size,
-                        ..default()
-                    },
+                    text_font,
                     TextColor(run.fg_color),
                     ChildOf(cell_entity),
                 ))

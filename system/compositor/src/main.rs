@@ -1,6 +1,7 @@
 mod commands;
 mod components;
 mod events;
+mod font;
 mod id_map;
 mod io;
 mod kitty_gfx;
@@ -13,6 +14,7 @@ mod tty;
 
 use std::f32::consts::FRAC_PI_6;
 
+use bevy::asset::AssetPlugin;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::GlobalAmbientLight;
 use bevy::post_process::bloom::Bloom;
@@ -34,14 +36,21 @@ const LOGICAL_PPI: f32 = 96.0;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "BYO/OS".into(),
-                resolution: (1280, 720).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "BYO/OS".into(),
+                        resolution: (1280, 720).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    file_path: "../../assets".to_string(),
+                    ..default()
+                }),
+        )
         .insert_resource(WinitSettings::desktop_app())
         .insert_resource(plugin::WorldScale(1.0 / (LOGICAL_PPI * 39.3701)))
         .add_plugins(plugin::ByoPlugin)

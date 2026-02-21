@@ -20,6 +20,8 @@ pub struct TtyProps {
     pub class: Option<String>,
     pub box_shadow: Option<String>,
     pub transition: Option<String>,
+    /// CSS font-family list (e.g. `"Fira Code", monospace`).
+    pub font_family: Option<String>,
 }
 
 /// Defaults applied at resolution time.

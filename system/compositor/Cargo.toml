@@ -8,5 +8,7 @@ byo.workspace = true
 bevy.workspace = true
 bytes.workspace = true
 alacritty_terminal = { version = "0.25", default-features = false }
+serde.workspace = true
+toml.workspace = true
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }

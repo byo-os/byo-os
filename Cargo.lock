@@ -1720,6 +1720,8 @@ dependencies = [
  "byo",
  "bytes",
  "image",
+ "serde",
+ "toml",
 ]
 
 [[package]]

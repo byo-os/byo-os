@@ -1,0 +1,258 @@
+[defaults]
+text = "system-ui"
+tty = "ui-monospace"
+
+[presets]
+serif = "Liberation Serif"
+sans-serif = "Liberation Sans"
+monospace = "Liberation Mono"
+cursive = "Felipa"
+fantasy = "Tangerine"
+system-ui = "Vend Sans"
+ui-serif = "DM Serif Text"
+ui-sans-serif = "Vend Sans"
+ui-monospace = "Fira Mono"
+ui-rounded = "Comfortaa"
+code = "Fira Code"
+
+[tailwind]
+font-sans = "sans-serif"
+font-serif = "serif"
+font-mono = "monospace"
+font-cursive = "cursive"
+font-fantasy = "fantasy"
+font-system = "system-ui"
+font-ui-serif = "ui-serif"
+font-ui-sans = "ui-sans-serif"
+font-ui-mono = "ui-monospace"
+font-ui-rounded = "ui-rounded"
+font-code = "code"
+
+# --- Families ---
+
+[[family]]
+name = "Comfortaa"
+
+[[family.variant]]
+file = "fonts/Comfortaa-Light.ttf"
+weight = 300
+
+[[family.variant]]
+file = "fonts/Comfortaa-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/Comfortaa-Medium.ttf"
+weight = 500
+
+[[family.variant]]
+file = "fonts/Comfortaa-SemiBold.ttf"
+weight = 600
+
+[[family.variant]]
+file = "fonts/Comfortaa-Bold.ttf"
+weight = 700
+
+# ---
+
+[[family]]
+name = "DM Serif Text"
+aliases = ["DMSerifText"]
+
+[[family.variant]]
+file = "fonts/DMSerifText-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/DMSerifText-Italic.ttf"
+weight = 400
+italic = true
+
+# ---
+
+[[family]]
+name = "Felipa"
+
+[[family.variant]]
+file = "fonts/Felipa-Regular.ttf"
+weight = 400
+
+# ---
+
+[[family]]
+name = "Fira Code"
+aliases = ["FiraCode"]
+
+[[family.variant]]
+file = "fonts/FiraCode-Light.ttf"
+weight = 300
+
+[[family.variant]]
+file = "fonts/FiraCode-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/FiraCode-Medium.ttf"
+weight = 500
+
+[[family.variant]]
+file = "fonts/FiraCode-SemiBold.ttf"
+weight = 600
+
+[[family.variant]]
+file = "fonts/FiraCode-Bold.ttf"
+weight = 700
+
+# ---
+
+[[family]]
+name = "Fira Mono"
+aliases = ["FiraMono"]
+
+[[family.variant]]
+file = "fonts/FiraMono-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/FiraMono-Medium.ttf"
+weight = 500
+
+[[family.variant]]
+file = "fonts/FiraMono-Bold.ttf"
+weight = 700
+
+# ---
+
+[[family]]
+name = "Liberation Mono"
+aliases = ["LiberationMono"]
+
+[[family.variant]]
+file = "fonts/LiberationMono-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/LiberationMono-Italic.ttf"
+weight = 400
+italic = true
+
+[[family.variant]]
+file = "fonts/LiberationMono-Bold.ttf"
+weight = 700
+
+[[family.variant]]
+file = "fonts/LiberationMono-BoldItalic.ttf"
+weight = 700
+italic = true
+
+# ---
+
+[[family]]
+name = "Liberation Sans"
+aliases = ["LiberationSans"]
+
+[[family.variant]]
+file = "fonts/LiberationSans-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/LiberationSans-Italic.ttf"
+weight = 400
+italic = true
+
+[[family.variant]]
+file = "fonts/LiberationSans-Bold.ttf"
+weight = 700
+
+[[family.variant]]
+file = "fonts/LiberationSans-BoldItalic.ttf"
+weight = 700
+italic = true
+
+# ---
+
+[[family]]
+name = "Liberation Serif"
+aliases = ["LiberationSerif"]
+
+[[family.variant]]
+file = "fonts/LiberationSerif-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/LiberationSerif-Italic.ttf"
+weight = 400
+italic = true
+
+[[family.variant]]
+file = "fonts/LiberationSerif-Bold.ttf"
+weight = 700
+
+[[family.variant]]
+file = "fonts/LiberationSerif-BoldItalic.ttf"
+weight = 700
+italic = true
+
+# ---
+
+[[family]]
+name = "Tangerine"
+
+[[family.variant]]
+file = "fonts/Tangerine-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/Tangerine-Bold.ttf"
+weight = 700
+
+# ---
+
+[[family]]
+name = "Vend Sans"
+aliases = ["VendSans"]
+
+[[family.variant]]
+file = "fonts/VendSans-Light.ttf"
+weight = 300
+
+[[family.variant]]
+file = "fonts/VendSans-LightItalic.ttf"
+weight = 300
+italic = true
+
+[[family.variant]]
+file = "fonts/VendSans-Regular.ttf"
+weight = 400
+
+[[family.variant]]
+file = "fonts/VendSans-Italic.ttf"
+weight = 400
+italic = true
+
+[[family.variant]]
+file = "fonts/VendSans-Medium.ttf"
+weight = 500
+
+[[family.variant]]
+file = "fonts/VendSans-MediumItalic.ttf"
+weight = 500
+italic = true
+
+[[family.variant]]
+file = "fonts/VendSans-SemiBold.ttf"
+weight = 600
+
+[[family.variant]]
+file = "fonts/VendSans-SemiBoldItalic.ttf"
+weight = 600
+italic = true
+
+[[family.variant]]
+file = "fonts/VendSans-Bold.ttf"
+weight = 700
+
+[[family.variant]]
+file = "fonts/VendSans-BoldItalic.ttf"
+weight = 700
+italic = true

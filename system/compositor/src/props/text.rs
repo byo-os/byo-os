@@ -14,6 +14,14 @@ pub struct TextProps {
     pub font_size: Option<f32>,
     pub text_align: Option<ByoTextAlign>,
     pub line_height: Option<f32>,
+    /// CSS font-family list (e.g. `"Fira Code", monospace`).
+    pub font_family: Option<String>,
+    /// CSS font-weight (keyword or 100-1000).
+    pub font_weight: Option<ByoFontWeight>,
+    /// CSS font-style: `normal`, `italic`, `oblique`, `oblique Xdeg`.
+    pub font_style: Option<ByoFontStyle>,
+    /// CSS font-stretch keyword or percentage.
+    pub font_stretch: Option<ByoFontStretch>,
     /// CSS-like event subscription string (e.g. `"click, pointerdown verbose"`).
     pub events: Option<String>,
     /// CSS pointer-events behavior (`auto` or `none`).

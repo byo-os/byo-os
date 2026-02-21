@@ -51,7 +51,29 @@ fn apply_text_class(props: &mut TextProps, class: &str) {
             props.text_align = Some(ByoTextAlign::Justified);
             return;
         }
+        // Font style classes
+        "italic" => {
+            props.font_style = Some(ByoFontStyle(crate::font::FontStyleRequest::Italic));
+            return;
+        }
+        "not-italic" => {
+            props.font_style = Some(ByoFontStyle(crate::font::FontStyleRequest::Normal));
+            return;
+        }
         _ => {}
+    }
+
+    // Font weight classes: font-thin(100) through font-black(900)
+    if let Some(weight) = tw_font_weight(class) {
+        props.font_weight = Some(ByoFontWeight(weight));
+        return;
+    }
+
+    // Font family classes: font-sans, font-serif, font-mono, etc.
+    // These store the tailwind class name so FontStore can resolve at reconcile time.
+    if tw_font_family(class) {
+        props.font_family = Some(class.to_string());
+        return;
     }
 
     // Text size: text-{size}
@@ -86,6 +108,40 @@ fn text_size(name: &str) -> Option<f32> {
         "9xl" => 128.0,
         _ => return None,
     })
+}
+
+/// Map Tailwind font-weight class to numeric weight.
+fn tw_font_weight(class: &str) -> Option<u16> {
+    Some(match class {
+        "font-thin" => 100,
+        "font-extralight" => 200,
+        "font-light" => 300,
+        "font-normal" => 400,
+        "font-medium" => 500,
+        "font-semibold" => 600,
+        "font-bold" => 700,
+        "font-extrabold" => 800,
+        "font-black" => 900,
+        _ => return None,
+    })
+}
+
+/// Check whether a class is a Tailwind font-family class.
+fn tw_font_family(class: &str) -> bool {
+    matches!(
+        class,
+        "font-sans"
+            | "font-serif"
+            | "font-mono"
+            | "font-cursive"
+            | "font-fantasy"
+            | "font-system"
+            | "font-ui-serif"
+            | "font-ui-sans"
+            | "font-ui-mono"
+            | "font-ui-rounded"
+            | "font-code"
+    )
 }
 
 /// Convert a Tailwind spacing token to a [`Val`].
@@ -1613,6 +1669,7 @@ pub struct TtyClassProps {
     pub cols: Option<u32>,
     pub rows: Option<u32>,
     pub scrollback: Option<u32>,
+    pub font_family: Option<String>,
 }
 
 /// Parse tty-specific classes from a class string.
@@ -1644,6 +1701,8 @@ pub fn apply_tty_classes(class_str: &str) -> TtyClassProps {
             if let Ok(n) = rest.parse::<u32>() {
                 props.scrollback = Some(n);
             }
+        } else if tw_font_family(class) {
+            props.font_family = Some(class.to_string());
         }
     }
     props
