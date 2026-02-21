@@ -12,7 +12,7 @@ use byo::props::{ReadProp, WriteProp};
 // ---------------------------------------------------------------------------
 
 /// Parses `"256"` -> `Px(256.0)`, `"50%"` -> `Percent(50.0)`, `"auto"` -> `Auto`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByoVal(pub Val);
 
 impl ReadProp for ByoVal {

@@ -18,8 +18,8 @@ pub struct WindowProps {
     pub order_mode: Option<ByoOrderMode>,
     pub order_scale: Option<f32>,
     // 2D transforms (shared with views)
-    pub translate_x: Option<f32>,
-    pub translate_y: Option<f32>,
+    pub translate_x: Option<ByoVal>,
+    pub translate_y: Option<ByoVal>,
     pub rotate: Option<f32>,
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,

@@ -205,6 +205,22 @@ pub fn spacing_scale(s: &str) -> Option<Val> {
     None
 }
 
+/// Negate a `Val`'s inner value by a sign multiplier.
+fn negate_val(val: Val, sign: f32) -> Val {
+    if sign >= 0.0 {
+        return val;
+    }
+    match val {
+        Val::Px(v) => Val::Px(v * sign),
+        Val::Percent(v) => Val::Percent(v * sign),
+        Val::Vw(v) => Val::Vw(v * sign),
+        Val::Vh(v) => Val::Vh(v * sign),
+        Val::VMin(v) => Val::VMin(v * sign),
+        Val::VMax(v) => Val::VMax(v * sign),
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sizing scale — extends spacing with named values
 // ---------------------------------------------------------------------------
@@ -1005,8 +1021,8 @@ fn apply_class(props: &mut ViewProps, class: &str) {
 /// Used by both view `apply_classes()` and `apply_transform_classes()`.
 fn apply_2d_transform_class(
     class: &str,
-    translate_x: &mut Option<f32>,
-    translate_y: &mut Option<f32>,
+    translate_x: &mut Option<ByoVal>,
+    translate_y: &mut Option<ByoVal>,
     rotate: &mut Option<f32>,
     scale: &mut Option<f32>,
     scale_x: &mut Option<f32>,
@@ -1022,14 +1038,14 @@ fn apply_2d_transform_class(
 
     // translate-x-{n}, translate-y-{n}
     if let Some(rest) = class.strip_prefix("translate-x-") {
-        if let Some(Val::Px(px)) = spacing_scale(rest) {
-            *translate_x = Some(px * sign);
+        if let Some(val) = spacing_scale(rest) {
+            *translate_x = Some(ByoVal(negate_val(val, sign)));
         }
         return;
     }
     if let Some(rest) = class.strip_prefix("translate-y-") {
-        if let Some(Val::Px(px)) = spacing_scale(rest) {
-            *translate_y = Some(px * sign);
+        if let Some(val) = spacing_scale(rest) {
+            *translate_y = Some(ByoVal(negate_val(val, sign)));
         }
         return;
     }
@@ -1101,8 +1117,8 @@ pub struct TransformStyle {
     pub tw_transition_easing: Option<EaseFn>,
     pub tw_transition_delay: Option<f32>,
     // Transforms
-    pub translate_x: Option<f32>,
-    pub translate_y: Option<f32>,
+    pub translate_x: Option<ByoVal>,
+    pub translate_y: Option<ByoVal>,
     pub translate_z: Option<f32>,
     pub rotate: Option<f32>,
     pub rotate_x: Option<f32>,
@@ -1307,14 +1323,14 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
         return;
     }
     if let Some(rest) = class.strip_prefix("translate-x-") {
-        if let Some(Val::Px(px)) = spacing_scale(rest) {
-            style.translate_x = Some(px * sign);
+        if let Some(val) = spacing_scale(rest) {
+            style.translate_x = Some(ByoVal(negate_val(val, sign)));
         }
         return;
     }
     if let Some(rest) = class.strip_prefix("translate-y-") {
-        if let Some(Val::Px(px)) = spacing_scale(rest) {
-            style.translate_y = Some(px * sign);
+        if let Some(val) = spacing_scale(rest) {
+            style.translate_y = Some(ByoVal(negate_val(val, sign)));
         }
         return;
     }
@@ -2246,25 +2262,43 @@ mod tests {
     #[test]
     fn translate_x_4() {
         let p = props_from("translate-x-4");
-        assert_eq!(p.translate_x, Some(16.0));
+        assert_eq!(p.translate_x, Some(ByoVal(Val::Px(16.0))));
     }
 
     #[test]
     fn translate_y_8() {
         let p = props_from("translate-y-8");
-        assert_eq!(p.translate_y, Some(32.0));
+        assert_eq!(p.translate_y, Some(ByoVal(Val::Px(32.0))));
     }
 
     #[test]
     fn neg_translate_x() {
         let p = props_from("-translate-x-4");
-        assert_eq!(p.translate_x, Some(-16.0));
+        assert_eq!(p.translate_x, Some(ByoVal(Val::Px(-16.0))));
     }
 
     #[test]
     fn translate_x_arbitrary() {
         let p = props_from("translate-x-[100]");
-        assert_eq!(p.translate_x, Some(100.0));
+        assert_eq!(p.translate_x, Some(ByoVal(Val::Px(100.0))));
+    }
+
+    #[test]
+    fn translate_x_percent() {
+        let p = props_from("translate-x-1/2");
+        assert_eq!(p.translate_x, Some(ByoVal(Val::Percent(50.0))));
+    }
+
+    #[test]
+    fn translate_y_arbitrary_percent() {
+        let p = props_from("translate-y-[75%]");
+        assert_eq!(p.translate_y, Some(ByoVal(Val::Percent(75.0))));
+    }
+
+    #[test]
+    fn neg_translate_x_percent() {
+        let p = props_from("-translate-x-1/2");
+        assert_eq!(p.translate_x, Some(ByoVal(Val::Percent(-50.0))));
     }
 
     #[test]
@@ -2380,7 +2414,7 @@ mod tests {
     #[test]
     fn combined_3d_transforms() {
         let s = transform_from("translate-x-4 rotate-y-90 scale-150 metallic-50 roughness-75");
-        assert_eq!(s.translate_x, Some(16.0));
+        assert_eq!(s.translate_x, Some(ByoVal(Val::Px(16.0))));
         assert_eq!(s.rotate_y, Some(90.0));
         assert_eq!(s.scale, Some(1.5));
         assert_eq!(s.metallic, Some(0.5));

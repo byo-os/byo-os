@@ -7,7 +7,7 @@ use crate::components::{ByoLayer, ByoTty, ByoView, ByoWindow};
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::tty::TtyProps;
-use crate::props::types::{ByoOrderMode, ByoShadow, shadow_list_approx_eq};
+use crate::props::types::{ByoOrderMode, ByoShadow, ByoVal, shadow_list_approx_eq};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::LayerRender;
@@ -412,27 +412,19 @@ pub fn handle_view_transitions(
         );
 
         // --- 2D transforms ---
-        let current_tx = match ui_transform.translation.x {
-            Val::Px(v) => v,
-            _ => 0.0,
-        };
-        let current_ty = match ui_transform.translation.y {
-            Val::Px(v) => v,
-            _ => 0.0,
-        };
-        check_f32(
+        check_val(
             &mut transitions,
             &config,
             AnimatableProp::TranslateX,
-            current_tx,
-            resolved.translate_x,
+            ui_transform.translation.x,
+            resolved.translate_x.map(|v| v.0),
         );
-        check_f32(
+        check_val(
             &mut transitions,
             &config,
             AnimatableProp::TranslateY,
-            current_ty,
-            resolved.translate_y,
+            ui_transform.translation.y,
+            resolved.translate_y.map(|v| v.0),
         );
         check_f32(
             &mut transitions,
@@ -546,13 +538,30 @@ pub fn handle_window_transitions(
         }
 
         let ws = world_scale.0;
+        // Resolve own size for self-relative translate %
+        let own_w = props
+            .width
+            .as_ref()
+            .or(ts.width.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+        let own_h = props
+            .height
+            .as_ref()
+            .or(ts.height.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
         start_3d_transform_transitions(
             &mut transitions,
             &config,
             transform,
             &ts,
-            props.translate_x,
-            props.translate_y,
+            props.translate_x.as_ref(),
+            props.translate_y.as_ref(),
             props.translate_z,
             props.rotate,
             props.rotate_x,
@@ -562,6 +571,7 @@ pub fn handle_window_transitions(
             props.scale_x,
             props.scale_y,
             props.scale_z,
+            (own_w, own_h),
             ws,
         );
 
@@ -631,8 +641,8 @@ pub fn handle_layer_transitions(
                 &config,
                 plane_transform,
                 &ts,
-                props.translate_x,
-                props.translate_y,
+                props.translate_x.as_ref(),
+                props.translate_y.as_ref(),
                 props.translate_z,
                 props.rotate,
                 props.rotate_x,
@@ -642,6 +652,7 @@ pub fn handle_layer_transitions(
                 props.scale_x,
                 props.scale_y,
                 props.scale_z,
+                (render.width as f32, render.height as f32),
                 world_scale.0,
             );
         }
@@ -839,10 +850,29 @@ pub fn tick_window_transitions(
         };
 
         let ws = world_scale.0;
-        let tx = get_override_f32(&active, AnimatableProp::TranslateX)
-            .unwrap_or_else(|| props.translate_x.or(ts.translate_x).unwrap_or(0.0));
-        let ty = get_override_f32(&active, AnimatableProp::TranslateY)
-            .unwrap_or_else(|| props.translate_y.or(ts.translate_y).unwrap_or(0.0));
+        // Resolve own size for self-relative translate %
+        let own_w = props
+            .width
+            .as_ref()
+            .or(ts.width.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+        let own_h = props
+            .height
+            .as_ref()
+            .or(ts.height.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+        let tx = get_override_f32(&active, AnimatableProp::TranslateX).unwrap_or_else(|| {
+            style::resolve_translate_val(props.translate_x.as_ref(), ts.translate_x.as_ref(), own_w)
+        });
+        let ty = get_override_f32(&active, AnimatableProp::TranslateY).unwrap_or_else(|| {
+            style::resolve_translate_val(props.translate_y.as_ref(), ts.translate_y.as_ref(), own_h)
+        });
         let tz = get_override_f32(&active, AnimatableProp::TranslateZ)
             .unwrap_or_else(|| props.translate_z.or(ts.translate_z).unwrap_or(0.0));
         let rot = get_override_f32(&active, AnimatableProp::Rotate)
@@ -925,10 +955,22 @@ pub fn tick_layer_transitions(
             };
 
             let ws = world_scale.0;
-            let tx = get_override_f32(&active, AnimatableProp::TranslateX)
-                .unwrap_or_else(|| props.translate_x.or(ts.translate_x).unwrap_or(0.0));
-            let ty = get_override_f32(&active, AnimatableProp::TranslateY)
-                .unwrap_or_else(|| props.translate_y.or(ts.translate_y).unwrap_or(0.0));
+            let own_w = render.width as f32;
+            let own_h = render.height as f32;
+            let tx = get_override_f32(&active, AnimatableProp::TranslateX).unwrap_or_else(|| {
+                style::resolve_translate_val(
+                    props.translate_x.as_ref(),
+                    ts.translate_x.as_ref(),
+                    own_w,
+                )
+            });
+            let ty = get_override_f32(&active, AnimatableProp::TranslateY).unwrap_or_else(|| {
+                style::resolve_translate_val(
+                    props.translate_y.as_ref(),
+                    ts.translate_y.as_ref(),
+                    own_h,
+                )
+            });
             let tz = get_override_f32(&active, AnimatableProp::TranslateZ)
                 .unwrap_or_else(|| props.translate_z.or(ts.translate_z).unwrap_or(0.0));
             let rot = get_override_f32(&active, AnimatableProp::Rotate)
@@ -1060,22 +1102,33 @@ fn check_val(
         && !val_approx_eq(current, target)
         && let Some(rule) = config.find_rule(prop)
     {
-        // Physics springs only support f32; Val properties use eased transitions only
-        if let TransitionType::Eased {
-            duration_secs,
-            delay_secs,
-            easing,
-        } = &rule.transition_type
-        {
-            upsert_transition(
-                transitions,
-                prop,
-                AnimatableValue::Val(current),
-                AnimatableValue::Val(target),
-                *duration_secs,
-                *delay_secs,
-                *easing,
-            );
+        match &rule.transition_type {
+            TransitionType::Eased {
+                duration_secs,
+                delay_secs,
+                easing,
+            } => {
+                upsert_transition(
+                    transitions,
+                    prop,
+                    AnimatableValue::Val(current),
+                    AnimatableValue::Val(target),
+                    *duration_secs,
+                    *delay_secs,
+                    *easing,
+                );
+            }
+            TransitionType::PhysicsSpring { stiffness, damping } => {
+                // Physics springs store/emit raw f32 and the tick writes it back
+                // as Val::Px — so only Px↔Px is correct. Supporting other variants
+                // would require storing the Val variant in PhysicsSpring state.
+                if let (Val::Px(cur), Val::Px(tgt)) = (current, target) {
+                    let has_active = transitions.iter().any(|t| t.prop == prop);
+                    if has_active || (cur - tgt).abs() > 0.001 {
+                        upsert_physics_spring(transitions, prop, cur, tgt, *stiffness, *damping);
+                    }
+                }
+            }
         }
     }
 }
@@ -1272,8 +1325,8 @@ fn start_3d_transform_transitions(
     config: &TransitionConfig,
     current: &Transform,
     ts: &tailwind::TransformStyle,
-    prop_tx: Option<f32>,
-    prop_ty: Option<f32>,
+    prop_tx: Option<&ByoVal>,
+    prop_ty: Option<&ByoVal>,
     prop_tz: Option<f32>,
     prop_rotate: Option<f32>,
     prop_rx: Option<f32>,
@@ -1283,6 +1336,7 @@ fn start_3d_transform_transitions(
     prop_sx: Option<f32>,
     prop_sy: Option<f32>,
     prop_sz: Option<f32>,
+    own_size: (f32, f32),
     world_scale: f32,
 ) {
     // Decompose current transform to individual values
@@ -1299,8 +1353,8 @@ fn start_3d_transform_transitions(
     let current_sz = current.scale.z;
 
     // Target values (class as fallback, prop overrides)
-    let target_tx = prop_tx.or(ts.translate_x).unwrap_or(0.0);
-    let target_ty = prop_ty.or(ts.translate_y).unwrap_or(0.0);
+    let target_tx = style::resolve_translate_val(prop_tx, ts.translate_x.as_ref(), own_size.0);
+    let target_ty = style::resolve_translate_val(prop_ty, ts.translate_y.as_ref(), own_size.1);
     let target_tz = prop_tz.or(ts.translate_z).unwrap_or(0.0);
     let target_rot = prop_rotate.or(ts.rotate).unwrap_or(0.0);
     let target_rx = prop_rx.or(ts.rotate_x).unwrap_or(0.0);
@@ -1610,12 +1664,16 @@ fn write_view_value(
 
         // 2D transforms → UiTransform
         AnimatableProp::TranslateX => {
-            if let Some(v) = value.as_f32() {
+            if let Some(v) = value.as_val() {
+                ui_transform.translation.x = v;
+            } else if let Some(v) = value.as_f32() {
                 ui_transform.translation.x = Val::Px(v);
             }
         }
         AnimatableProp::TranslateY => {
-            if let Some(v) = value.as_f32() {
+            if let Some(v) = value.as_val() {
+                ui_transform.translation.y = v;
+            } else if let Some(v) = value.as_f32() {
                 ui_transform.translation.y = Val::Px(v);
             }
         }

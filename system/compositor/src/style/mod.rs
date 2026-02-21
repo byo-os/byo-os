@@ -16,6 +16,7 @@ use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
 use crate::props::tty::TtyProps;
+use crate::props::types::ByoVal;
 use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents, ByoShadow};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
@@ -966,15 +967,15 @@ pub fn reconcile_view_transforms(
         }
 
         let resolved = resolve_view_props(props);
-        let tx = resolved.translate_x.unwrap_or(0.0);
-        let ty = resolved.translate_y.unwrap_or(0.0);
+        let tx = resolved.translate_x.map_or(Val::Px(0.0), |v| v.0);
+        let ty = resolved.translate_y.map_or(Val::Px(0.0), |v| v.0);
         let uniform_scale = resolved.scale.unwrap_or(1.0);
         let sx = resolved.scale_x.unwrap_or(uniform_scale);
         let sy = resolved.scale_y.unwrap_or(uniform_scale);
         let rot_deg = resolved.rotate.unwrap_or(0.0);
 
         *ui_transform = UiTransform {
-            translation: Val2::px(tx, ty),
+            translation: Val2::new(tx, ty),
             scale: Vec2::new(sx, sy),
             rotation: Rot2::radians(rot_deg.to_radians()),
         };
@@ -1003,10 +1004,27 @@ pub fn reconcile_windows(
             ByoOrderMode::TranslateZ => order * scale,
             _ => 0.0,
         };
+        // Resolve own size for self-relative translate %
+        let own_w = props
+            .width
+            .as_ref()
+            .or(ts.width.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+        let own_h = props
+            .height
+            .as_ref()
+            .or(ts.height.as_ref())
+            .map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
         *transform = resolve_3d_transform(
             &ts,
-            props.translate_x,
-            props.translate_y,
+            props.translate_x.as_ref(),
+            props.translate_y.as_ref(),
             props.translate_z,
             props.rotate,
             props.rotate_x,
@@ -1016,6 +1034,7 @@ pub fn reconcile_windows(
             props.scale_x,
             props.scale_y,
             props.scale_z,
+            (own_w, own_h),
             order_z,
             world_scale.0,
         );
@@ -1081,8 +1100,8 @@ pub fn reconcile_layers(
             };
             let t = resolve_3d_transform(
                 &cs,
-                props.translate_x,
-                props.translate_y,
+                props.translate_x.as_ref(),
+                props.translate_y.as_ref(),
                 props.translate_z,
                 props.rotate,
                 props.rotate_x,
@@ -1092,6 +1111,7 @@ pub fn reconcile_layers(
                 props.scale_x,
                 props.scale_y,
                 props.scale_z,
+                (render.width as f32, render.height as f32),
                 order_z,
                 world_scale.0,
             );
@@ -1125,15 +1145,34 @@ fn resolve_transform_style(class: Option<&str>) -> tailwind::TransformStyle {
     ts
 }
 
+/// Resolve a `ByoVal` to pixels given the element's own size along that axis.
+/// Percent is self-relative (like CSS translate), viewport units use that axis.
+pub(crate) fn resolve_translate_val(
+    val: Option<&ByoVal>,
+    fallback: Option<&ByoVal>,
+    own_size_px: f32,
+) -> f32 {
+    let v = val.or(fallback).map_or(Val::Px(0.0), |bv| bv.0);
+    match v {
+        Val::Px(px) => px,
+        Val::Percent(pct) => own_size_px * pct / 100.0,
+        // Viewport units are not meaningful in 3D space — treat as raw pixels
+        Val::Vw(v) | Val::Vh(v) | Val::VMin(v) | Val::VMax(v) => v,
+        Val::Auto => 0.0,
+    }
+}
+
 /// Shared 3D transform builder — uses pre-parsed TransformStyle for class values.
 /// Individual wire props always override class-derived values.
+/// `own_size` is the element's own (width, height) in protocol pixels — used for
+/// resolving `Val::Percent` (CSS translate % is self-relative).
 /// `order_z` is the z contribution from order (pre-computed by caller based on order-mode).
 /// `world_scale` converts pixel translations to meters (= 1.0 / pixels_per_meter).
 #[allow(clippy::too_many_arguments)]
 fn resolve_3d_transform(
     ts: &tailwind::TransformStyle,
-    prop_tx: Option<f32>,
-    prop_ty: Option<f32>,
+    prop_tx: Option<&ByoVal>,
+    prop_ty: Option<&ByoVal>,
     prop_tz: Option<f32>,
     prop_rotate: Option<f32>,
     prop_rx: Option<f32>,
@@ -1143,13 +1182,14 @@ fn resolve_3d_transform(
     prop_sx: Option<f32>,
     prop_sy: Option<f32>,
     prop_sz: Option<f32>,
+    own_size: (f32, f32),
     order_z: f32,
     world_scale: f32,
 ) -> Transform {
     // Individual props override class-derived values.
     // Translations are in protocol pixels — convert to world meters.
-    let tx = prop_tx.or(ts.translate_x).unwrap_or(0.0) * world_scale;
-    let ty = prop_ty.or(ts.translate_y).unwrap_or(0.0) * world_scale;
+    let tx = resolve_translate_val(prop_tx, ts.translate_x.as_ref(), own_size.0) * world_scale;
+    let ty = resolve_translate_val(prop_ty, ts.translate_y.as_ref(), own_size.1) * world_scale;
     let tz = prop_tz.or(ts.translate_z).unwrap_or(0.0) * world_scale + order_z;
     let rot = prop_rotate.or(ts.rotate).unwrap_or(0.0);
     let rx = prop_rx.or(ts.rotate_x).unwrap_or(0.0);

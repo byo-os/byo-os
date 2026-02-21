@@ -14,7 +14,7 @@ printf "${APC} #redirect _ ${ST}"
 
 printf "${APC}
   +view root class=\"w-full h-full bg-zinc-900 overflow-clip\" {
-    +view scroll-inner class=\"absolute w-full flex flex-col gap-6 p-8\" translate-y=0 transition=\"translate-y 20000ms linear\" {
+    +view scroll-inner class=\"absolute w-full flex flex-col gap-6 p-8\" translate-y=0%% transition=\"translate-y 20000ms linear\" {
 
       +text title content=\"Font Book\" class=\"text-4xl text-white font-bold\"
       +text subtitle content=\"10 bundled families  /  49 variants\" class=\"text-base text-zinc-500\"
@@ -151,11 +151,11 @@ printf "${APC} #redirect _ ${ST}"
 # Auto-scroll the specimen sheet
 sleep 3
 while true; do
-    # Scroll down
-    printf "${APC} @view scroll-inner translate-y=-1200 ${ST}"
+    # Scroll down (translate by own height → shows bottom of content)
+    printf "${APC} @view scroll-inner translate-y=-100%% ${ST}"
     sleep 24
 
     # Scroll back to top
-    printf "${APC} @view scroll-inner translate-y=0 ${ST}"
+    printf "${APC} @view scroll-inner translate-y=0%% ${ST}"
     sleep 24
 done
