@@ -47,7 +47,7 @@ pub struct ViewProps {
     // 2D transforms
     pub translate_x: Option<ByoVal>,
     pub translate_y: Option<ByoVal>,
-    pub rotate: Option<f32>,
+    pub rotate: Option<ByoAngle>,
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,

@@ -16,7 +16,7 @@ use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
 use crate::props::tty::TtyProps;
-use crate::props::types::ByoVal;
+use crate::props::types::{ByoAngle, ByoVal};
 use crate::props::types::{ByoColor, ByoOrderMode, ByoPointerEvents, ByoShadow};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
@@ -972,12 +972,12 @@ pub fn reconcile_view_transforms(
         let uniform_scale = resolved.scale.unwrap_or(1.0);
         let sx = resolved.scale_x.unwrap_or(uniform_scale);
         let sy = resolved.scale_y.unwrap_or(uniform_scale);
-        let rot_deg = resolved.rotate.unwrap_or(0.0);
+        let rot_rad = resolved.rotate.as_ref().map_or(0.0, |a| a.0);
 
         *ui_transform = UiTransform {
             translation: Val2::new(tx, ty),
             scale: Vec2::new(sx, sy),
-            rotation: Rot2::radians(rot_deg.to_radians()),
+            rotation: Rot2::radians(rot_rad),
         };
     }
 }
@@ -1026,10 +1026,10 @@ pub fn reconcile_windows(
             props.translate_x.as_ref(),
             props.translate_y.as_ref(),
             props.translate_z,
-            props.rotate,
-            props.rotate_x,
-            props.rotate_y,
-            props.rotate_z,
+            props.rotate.as_ref(),
+            props.rotate_x.as_ref(),
+            props.rotate_y.as_ref(),
+            props.rotate_z.as_ref(),
             props.scale,
             props.scale_x,
             props.scale_y,
@@ -1103,10 +1103,10 @@ pub fn reconcile_layers(
                 props.translate_x.as_ref(),
                 props.translate_y.as_ref(),
                 props.translate_z,
-                props.rotate,
-                props.rotate_x,
-                props.rotate_y,
-                props.rotate_z,
+                props.rotate.as_ref(),
+                props.rotate_x.as_ref(),
+                props.rotate_y.as_ref(),
+                props.rotate_z.as_ref(),
                 props.scale,
                 props.scale_x,
                 props.scale_y,
@@ -1174,10 +1174,10 @@ fn resolve_3d_transform(
     prop_tx: Option<&ByoVal>,
     prop_ty: Option<&ByoVal>,
     prop_tz: Option<f32>,
-    prop_rotate: Option<f32>,
-    prop_rx: Option<f32>,
-    prop_ry: Option<f32>,
-    prop_rz: Option<f32>,
+    prop_rotate: Option<&ByoAngle>,
+    prop_rx: Option<&ByoAngle>,
+    prop_ry: Option<&ByoAngle>,
+    prop_rz: Option<&ByoAngle>,
     prop_scale: Option<f32>,
     prop_sx: Option<f32>,
     prop_sy: Option<f32>,
@@ -1191,22 +1191,17 @@ fn resolve_3d_transform(
     let tx = resolve_translate_val(prop_tx, ts.translate_x.as_ref(), own_size.0) * world_scale;
     let ty = resolve_translate_val(prop_ty, ts.translate_y.as_ref(), own_size.1) * world_scale;
     let tz = prop_tz.or(ts.translate_z).unwrap_or(0.0) * world_scale + order_z;
-    let rot = prop_rotate.or(ts.rotate).unwrap_or(0.0);
-    let rx = prop_rx.or(ts.rotate_x).unwrap_or(0.0);
-    let ry = prop_ry.or(ts.rotate_y).unwrap_or(0.0);
+    let rot = prop_rotate.or(ts.rotate.as_ref()).map_or(0.0, |a| a.0);
+    let rx = prop_rx.or(ts.rotate_x.as_ref()).map_or(0.0, |a| a.0);
+    let ry = prop_ry.or(ts.rotate_y.as_ref()).map_or(0.0, |a| a.0);
     // rotate-z overrides rotate shorthand
-    let rz = prop_rz.or(ts.rotate_z).unwrap_or(rot);
+    let rz = prop_rz.or(ts.rotate_z.as_ref()).map_or(rot, |a| a.0);
     let uniform = prop_scale.or(ts.scale).unwrap_or(1.0);
     let sx = prop_sx.or(ts.scale_x).unwrap_or(uniform);
     let sy = prop_sy.or(ts.scale_y).unwrap_or(uniform);
     let sz = prop_sz.or(ts.scale_z).unwrap_or(uniform);
 
-    let rotation = Quat::from_euler(
-        EulerRot::XYZ,
-        rx.to_radians(),
-        ry.to_radians(),
-        rz.to_radians(),
-    );
+    let rotation = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
 
     Transform {
         translation: Vec3::new(tx, ty, tz),

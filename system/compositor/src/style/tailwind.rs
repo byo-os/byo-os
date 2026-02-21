@@ -1023,7 +1023,7 @@ fn apply_2d_transform_class(
     class: &str,
     translate_x: &mut Option<ByoVal>,
     translate_y: &mut Option<ByoVal>,
-    rotate: &mut Option<f32>,
+    rotate: &mut Option<ByoAngle>,
     scale: &mut Option<f32>,
     scale_x: &mut Option<f32>,
     scale_y: &mut Option<f32>,
@@ -1074,7 +1074,7 @@ fn apply_2d_transform_class(
     if let Some(rest) = class.strip_prefix("rotate-")
         && let Some(v) = parse_rotation_value(rest)
     {
-        *rotate = Some(v * sign);
+        *rotate = Some(ByoAngle(v * sign));
     }
 }
 
@@ -1086,12 +1086,14 @@ fn parse_scale_value(s: &str) -> Option<f32> {
     s.parse::<u32>().ok().map(|n| n as f32 / 100.0)
 }
 
-/// Parse a rotation class value: integer (degrees) or arbitrary `[value]`.
+/// Parse a rotation class value, returning radians.
+/// Integer → degrees→radians, arbitrary `[value]` → `parse_angle()`.
 fn parse_rotation_value(s: &str) -> Option<f32> {
     if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return inner.parse::<f32>().ok();
+        return crate::props::types::parse_angle(inner);
     }
-    s.parse::<f32>().ok()
+    // Bare integer → degrees
+    s.parse::<f32>().ok().map(|v| v.to_radians())
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,10 +1122,10 @@ pub struct TransformStyle {
     pub translate_x: Option<ByoVal>,
     pub translate_y: Option<ByoVal>,
     pub translate_z: Option<f32>,
-    pub rotate: Option<f32>,
-    pub rotate_x: Option<f32>,
-    pub rotate_y: Option<f32>,
-    pub rotate_z: Option<f32>,
+    pub rotate: Option<ByoAngle>,
+    pub rotate_x: Option<ByoAngle>,
+    pub rotate_y: Option<ByoAngle>,
+    pub rotate_z: Option<ByoAngle>,
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
@@ -1338,26 +1340,26 @@ fn apply_transform_class(style: &mut TransformStyle, class: &str) {
     // ── Rotations ────────────────────────────────────────────────────
     if let Some(rest) = class.strip_prefix("rotate-x-") {
         if let Some(v) = parse_rotation_value(rest) {
-            style.rotate_x = Some(v * sign);
+            style.rotate_x = Some(ByoAngle(v * sign));
         }
         return;
     }
     if let Some(rest) = class.strip_prefix("rotate-y-") {
         if let Some(v) = parse_rotation_value(rest) {
-            style.rotate_y = Some(v * sign);
+            style.rotate_y = Some(ByoAngle(v * sign));
         }
         return;
     }
     if let Some(rest) = class.strip_prefix("rotate-z-") {
         if let Some(v) = parse_rotation_value(rest) {
-            style.rotate_z = Some(v * sign);
+            style.rotate_z = Some(ByoAngle(v * sign));
         }
         return;
     }
     if let Some(rest) = class.strip_prefix("rotate-")
         && let Some(v) = parse_rotation_value(rest)
     {
-        style.rotate = Some(v * sign);
+        style.rotate = Some(ByoAngle(v * sign));
         return;
     }
 
@@ -2304,19 +2306,41 @@ mod tests {
     #[test]
     fn rotate_45() {
         let p = props_from("rotate-45");
-        assert_eq!(p.rotate, Some(45.0));
+        assert_eq!(p.rotate, Some(ByoAngle(45.0_f32.to_radians())));
     }
 
     #[test]
     fn neg_rotate_45() {
         let p = props_from("-rotate-45");
-        assert_eq!(p.rotate, Some(-45.0));
+        assert_eq!(p.rotate, Some(ByoAngle(-45.0_f32.to_radians())));
     }
 
     #[test]
     fn rotate_arbitrary() {
+        // Bare number in [] → degrees → radians
         let p = props_from("rotate-[30]");
-        assert_eq!(p.rotate, Some(30.0));
+        assert_eq!(p.rotate, Some(ByoAngle(30.0_f32.to_radians())));
+    }
+
+    #[test]
+    fn rotate_arbitrary_rad() {
+        let p = props_from("rotate-[1.5708rad]");
+        let got = p.rotate.unwrap().0;
+        assert!((got - 1.5708).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rotate_arbitrary_turn() {
+        let p = props_from("rotate-[0.25turn]");
+        let got = p.rotate.unwrap().0;
+        assert!((got - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rotate_arbitrary_pi() {
+        let p = props_from("rotate-[0.5pi]");
+        let got = p.rotate.unwrap().0;
+        assert!((got - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
     }
 
     #[test]
@@ -2366,19 +2390,19 @@ mod tests {
     #[test]
     fn transform_rotate_x() {
         let s = transform_from("rotate-x-45");
-        assert_eq!(s.rotate_x, Some(45.0));
+        assert_eq!(s.rotate_x, Some(ByoAngle(45.0_f32.to_radians())));
     }
 
     #[test]
     fn transform_rotate_y() {
         let s = transform_from("rotate-y-90");
-        assert_eq!(s.rotate_y, Some(90.0));
+        assert_eq!(s.rotate_y, Some(ByoAngle(90.0_f32.to_radians())));
     }
 
     #[test]
     fn transform_rotate_z() {
         let s = transform_from("rotate-z-180");
-        assert_eq!(s.rotate_z, Some(180.0));
+        assert_eq!(s.rotate_z, Some(ByoAngle(180.0_f32.to_radians())));
     }
 
     #[test]
@@ -2415,7 +2439,7 @@ mod tests {
     fn combined_3d_transforms() {
         let s = transform_from("translate-x-4 rotate-y-90 scale-150 metallic-50 roughness-75");
         assert_eq!(s.translate_x, Some(ByoVal(Val::Px(16.0))));
-        assert_eq!(s.rotate_y, Some(90.0));
+        assert_eq!(s.rotate_y, Some(ByoAngle(90.0_f32.to_radians())));
         assert_eq!(s.scale, Some(1.5));
         assert_eq!(s.metallic, Some(0.5));
         assert_eq!(s.perceptual_roughness, Some(0.75));

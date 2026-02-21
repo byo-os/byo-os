@@ -73,6 +73,65 @@ pub fn parse_val(s: &str) -> Option<Val> {
 }
 
 // ---------------------------------------------------------------------------
+// ByoAngle — stores rotation as radians, parses deg/rad/turn/pi/tau
+// ---------------------------------------------------------------------------
+
+/// Stores a rotation in radians. Parses unit suffixes; bare numbers default to degrees.
+///
+/// Supported units: `deg`, `rad`, `grad`, `turn`, `pi`, `tau` (= `turn`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ByoAngle(pub f32);
+
+impl ReadProp for ByoAngle {
+    fn apply(&mut self, prop: &Prop) {
+        match prop {
+            Prop::Value { value, .. } => {
+                if let Some(radians) = parse_angle(value.as_ref()) {
+                    self.0 = radians;
+                }
+            }
+            Prop::Remove { .. } => self.0 = 0.0,
+            _ => {}
+        }
+    }
+}
+
+impl WriteProp for ByoAngle {
+    fn encode(&self, key: &str, out: &mut Vec<Prop>) {
+        // Encode as degrees for wire readability
+        let deg = self.0.to_degrees();
+        out.push(Prop::val(key, format!("{deg}")));
+    }
+}
+
+/// Parse an angle string, returning radians. Bare numbers default to degrees.
+pub fn parse_angle(s: &str) -> Option<f32> {
+    if let Some(rest) = s.strip_suffix("tau") {
+        return rest.parse::<f32>().ok().map(|v| v * std::f32::consts::TAU);
+    }
+    if let Some(rest) = s.strip_suffix("turn") {
+        return rest.parse::<f32>().ok().map(|v| v * std::f32::consts::TAU);
+    }
+    if let Some(rest) = s.strip_suffix("grad") {
+        return rest
+            .parse::<f32>()
+            .ok()
+            .map(|v| v * std::f32::consts::TAU / 400.0);
+    }
+    if let Some(rest) = s.strip_suffix("rad") {
+        return rest.parse::<f32>().ok();
+    }
+    if let Some(rest) = s.strip_suffix("pi") {
+        return rest.parse::<f32>().ok().map(|v| v * std::f32::consts::PI);
+    }
+    if let Some(rest) = s.strip_suffix("deg") {
+        return rest.parse::<f32>().ok().map(|v| v.to_radians());
+    }
+    // Bare number → degrees (Tailwind/CSS convention)
+    s.parse::<f32>().ok().map(|v| v.to_radians())
+}
+
+// ---------------------------------------------------------------------------
 // ByoColor — wraps bevy::Color
 // ---------------------------------------------------------------------------
 
@@ -957,5 +1016,56 @@ mod tests {
     #[test]
     fn double_val_auto_unchanged() {
         assert_eq!(double_val(Val::Auto), Val::Auto);
+    }
+
+    // ── ByoAngle / parse_angle ──────────────────────────────────────
+
+    #[test]
+    fn parse_angle_bare_degrees() {
+        let r = parse_angle("45").unwrap();
+        assert!((r - 45.0_f32.to_radians()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_angle_deg_suffix() {
+        let r = parse_angle("90deg").unwrap();
+        assert!((r - 90.0_f32.to_radians()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_angle_rad_suffix() {
+        let r = parse_angle("1.5708rad").unwrap();
+        assert!((r - 1.5708).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parse_angle_turn_suffix() {
+        let r = parse_angle("0.25turn").unwrap();
+        assert!((r - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parse_angle_tau_suffix() {
+        let r = parse_angle("0.5tau").unwrap();
+        assert!((r - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parse_angle_pi_suffix() {
+        let r = parse_angle("1pi").unwrap();
+        assert!((r - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parse_angle_grad_suffix() {
+        // 100grad = 90deg = π/2
+        let r = parse_angle("100grad").unwrap();
+        assert!((r - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parse_angle_negative() {
+        let r = parse_angle("-45").unwrap();
+        assert!((r - (-45.0_f32).to_radians()).abs() < 1e-6);
     }
 }

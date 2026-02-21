@@ -7,7 +7,7 @@ use crate::components::{ByoLayer, ByoTty, ByoView, ByoWindow};
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::tty::TtyProps;
-use crate::props::types::{ByoOrderMode, ByoShadow, ByoVal, shadow_list_approx_eq};
+use crate::props::types::{ByoAngle, ByoOrderMode, ByoShadow, ByoVal, shadow_list_approx_eq};
 use crate::props::view::ViewProps;
 use crate::props::window::WindowProps;
 use crate::render::layer::LayerRender;
@@ -430,8 +430,8 @@ pub fn handle_view_transitions(
             &mut transitions,
             &config,
             AnimatableProp::Rotate,
-            ui_transform.rotation.as_radians().to_degrees(),
-            resolved.rotate,
+            ui_transform.rotation.as_radians(),
+            resolved.rotate.as_ref().map(|a| a.0),
         );
 
         let uniform = resolved.scale.unwrap_or(1.0);
@@ -563,10 +563,10 @@ pub fn handle_window_transitions(
             props.translate_x.as_ref(),
             props.translate_y.as_ref(),
             props.translate_z,
-            props.rotate,
-            props.rotate_x,
-            props.rotate_y,
-            props.rotate_z,
+            props.rotate.as_ref(),
+            props.rotate_x.as_ref(),
+            props.rotate_y.as_ref(),
+            props.rotate_z.as_ref(),
             props.scale,
             props.scale_x,
             props.scale_y,
@@ -644,10 +644,10 @@ pub fn handle_layer_transitions(
                 props.translate_x.as_ref(),
                 props.translate_y.as_ref(),
                 props.translate_z,
-                props.rotate,
-                props.rotate_x,
-                props.rotate_y,
-                props.rotate_z,
+                props.rotate.as_ref(),
+                props.rotate_x.as_ref(),
+                props.rotate_y.as_ref(),
+                props.rotate_z.as_ref(),
                 props.scale,
                 props.scale_x,
                 props.scale_y,
@@ -875,14 +875,34 @@ pub fn tick_window_transitions(
         });
         let tz = get_override_f32(&active, AnimatableProp::TranslateZ)
             .unwrap_or_else(|| props.translate_z.or(ts.translate_z).unwrap_or(0.0));
-        let rot = get_override_f32(&active, AnimatableProp::Rotate)
-            .unwrap_or_else(|| props.rotate.or(ts.rotate).unwrap_or(0.0));
-        let rx = get_override_f32(&active, AnimatableProp::RotateX)
-            .unwrap_or_else(|| props.rotate_x.or(ts.rotate_x).unwrap_or(0.0));
-        let ry = get_override_f32(&active, AnimatableProp::RotateY)
-            .unwrap_or_else(|| props.rotate_y.or(ts.rotate_y).unwrap_or(0.0));
-        let rz = get_override_f32(&active, AnimatableProp::RotateZ)
-            .unwrap_or_else(|| props.rotate_z.or(ts.rotate_z).unwrap_or(rot));
+        let rot = get_override_f32(&active, AnimatableProp::Rotate).unwrap_or_else(|| {
+            props
+                .rotate
+                .as_ref()
+                .or(ts.rotate.as_ref())
+                .map_or(0.0, |a| a.0)
+        });
+        let rx = get_override_f32(&active, AnimatableProp::RotateX).unwrap_or_else(|| {
+            props
+                .rotate_x
+                .as_ref()
+                .or(ts.rotate_x.as_ref())
+                .map_or(0.0, |a| a.0)
+        });
+        let ry = get_override_f32(&active, AnimatableProp::RotateY).unwrap_or_else(|| {
+            props
+                .rotate_y
+                .as_ref()
+                .or(ts.rotate_y.as_ref())
+                .map_or(0.0, |a| a.0)
+        });
+        let rz = get_override_f32(&active, AnimatableProp::RotateZ).unwrap_or_else(|| {
+            props
+                .rotate_z
+                .as_ref()
+                .or(ts.rotate_z.as_ref())
+                .map_or(rot, |a| a.0)
+        });
         let uniform = get_override_f32(&active, AnimatableProp::Scale)
             .unwrap_or_else(|| props.scale.or(ts.scale).unwrap_or(1.0));
         let sx = get_override_f32(&active, AnimatableProp::ScaleX)
@@ -973,14 +993,34 @@ pub fn tick_layer_transitions(
             });
             let tz = get_override_f32(&active, AnimatableProp::TranslateZ)
                 .unwrap_or_else(|| props.translate_z.or(ts.translate_z).unwrap_or(0.0));
-            let rot = get_override_f32(&active, AnimatableProp::Rotate)
-                .unwrap_or_else(|| props.rotate.or(ts.rotate).unwrap_or(0.0));
-            let rx = get_override_f32(&active, AnimatableProp::RotateX)
-                .unwrap_or_else(|| props.rotate_x.or(ts.rotate_x).unwrap_or(0.0));
-            let ry = get_override_f32(&active, AnimatableProp::RotateY)
-                .unwrap_or_else(|| props.rotate_y.or(ts.rotate_y).unwrap_or(0.0));
-            let rz = get_override_f32(&active, AnimatableProp::RotateZ)
-                .unwrap_or_else(|| props.rotate_z.or(ts.rotate_z).unwrap_or(rot));
+            let rot = get_override_f32(&active, AnimatableProp::Rotate).unwrap_or_else(|| {
+                props
+                    .rotate
+                    .as_ref()
+                    .or(ts.rotate.as_ref())
+                    .map_or(0.0, |a| a.0)
+            });
+            let rx = get_override_f32(&active, AnimatableProp::RotateX).unwrap_or_else(|| {
+                props
+                    .rotate_x
+                    .as_ref()
+                    .or(ts.rotate_x.as_ref())
+                    .map_or(0.0, |a| a.0)
+            });
+            let ry = get_override_f32(&active, AnimatableProp::RotateY).unwrap_or_else(|| {
+                props
+                    .rotate_y
+                    .as_ref()
+                    .or(ts.rotate_y.as_ref())
+                    .map_or(0.0, |a| a.0)
+            });
+            let rz = get_override_f32(&active, AnimatableProp::RotateZ).unwrap_or_else(|| {
+                props
+                    .rotate_z
+                    .as_ref()
+                    .or(ts.rotate_z.as_ref())
+                    .map_or(rot, |a| a.0)
+            });
             let uniform = get_override_f32(&active, AnimatableProp::Scale)
                 .unwrap_or_else(|| props.scale.or(ts.scale).unwrap_or(1.0));
             let sx = get_override_f32(&active, AnimatableProp::ScaleX)
@@ -1328,10 +1368,10 @@ fn start_3d_transform_transitions(
     prop_tx: Option<&ByoVal>,
     prop_ty: Option<&ByoVal>,
     prop_tz: Option<f32>,
-    prop_rotate: Option<f32>,
-    prop_rx: Option<f32>,
-    prop_ry: Option<f32>,
-    prop_rz: Option<f32>,
+    prop_rotate: Option<&ByoAngle>,
+    prop_rx: Option<&ByoAngle>,
+    prop_ry: Option<&ByoAngle>,
+    prop_rz: Option<&ByoAngle>,
     prop_scale: Option<f32>,
     prop_sx: Option<f32>,
     prop_sy: Option<f32>,
@@ -1345,9 +1385,9 @@ fn start_3d_transform_transitions(
     // Note: tz includes order_z contribution, but we compare against target which also includes it
     let current_tz = current.translation.z / world_scale;
     let (crx, cry, crz) = current.rotation.to_euler(EulerRot::XYZ);
-    let current_rx = crx.to_degrees();
-    let current_ry = cry.to_degrees();
-    let current_rz = crz.to_degrees();
+    let current_rx = crx;
+    let current_ry = cry;
+    let current_rz = crz;
     let current_sx = current.scale.x;
     let current_sy = current.scale.y;
     let current_sz = current.scale.z;
@@ -1356,10 +1396,10 @@ fn start_3d_transform_transitions(
     let target_tx = style::resolve_translate_val(prop_tx, ts.translate_x.as_ref(), own_size.0);
     let target_ty = style::resolve_translate_val(prop_ty, ts.translate_y.as_ref(), own_size.1);
     let target_tz = prop_tz.or(ts.translate_z).unwrap_or(0.0);
-    let target_rot = prop_rotate.or(ts.rotate).unwrap_or(0.0);
-    let target_rx = prop_rx.or(ts.rotate_x).unwrap_or(0.0);
-    let target_ry = prop_ry.or(ts.rotate_y).unwrap_or(0.0);
-    let target_rz = prop_rz.or(ts.rotate_z).unwrap_or(target_rot);
+    let target_rot = prop_rotate.or(ts.rotate.as_ref()).map_or(0.0, |a| a.0);
+    let target_rx = prop_rx.or(ts.rotate_x.as_ref()).map_or(0.0, |a| a.0);
+    let target_ry = prop_ry.or(ts.rotate_y.as_ref()).map_or(0.0, |a| a.0);
+    let target_rz = prop_rz.or(ts.rotate_z.as_ref()).map_or(target_rot, |a| a.0);
     let uniform = prop_scale.or(ts.scale).unwrap_or(1.0);
     let target_sx = prop_sx.or(ts.scale_x).unwrap_or(uniform);
     let target_sy = prop_sy.or(ts.scale_y).unwrap_or(uniform);
@@ -1463,12 +1503,7 @@ fn compose_3d_transform(
     order_z: f32,
     world_scale: f32,
 ) -> Transform {
-    let rotation = Quat::from_euler(
-        EulerRot::XYZ,
-        rx.to_radians(),
-        ry.to_radians(),
-        rz.to_radians(),
-    );
+    let rotation = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
     Transform {
         translation: Vec3::new(
             tx * world_scale,
@@ -1679,7 +1714,7 @@ fn write_view_value(
         }
         AnimatableProp::Rotate => {
             if let Some(v) = value.as_f32() {
-                ui_transform.rotation = Rot2::radians(v.to_radians());
+                ui_transform.rotation = Rot2::radians(v);
             }
         }
         AnimatableProp::ScaleX => {

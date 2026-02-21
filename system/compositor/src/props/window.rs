@@ -20,15 +20,15 @@ pub struct WindowProps {
     // 2D transforms (shared with views)
     pub translate_x: Option<ByoVal>,
     pub translate_y: Option<ByoVal>,
-    pub rotate: Option<f32>,
+    pub rotate: Option<ByoAngle>,
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
     // 3D-only transforms
     pub translate_z: Option<f32>,
-    pub rotate_x: Option<f32>,
-    pub rotate_y: Option<f32>,
-    pub rotate_z: Option<f32>,
+    pub rotate_x: Option<ByoAngle>,
+    pub rotate_y: Option<ByoAngle>,
+    pub rotate_z: Option<ByoAngle>,
     pub scale_z: Option<f32>,
     // Input events
     pub events: Option<String>,
