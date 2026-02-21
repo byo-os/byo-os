@@ -38,6 +38,14 @@ pub struct StdinEventQueue {
     pub rx: Mutex<mpsc::Receiver<StdinEvent>>,
 }
 
+/// Buffered TTY/KittyGfx events from `process_stdin_events` that need entity
+/// lookups. Processed after `process_commands` creates new entities.
+#[derive(Resource, Default)]
+pub struct DeferredTtyEvents {
+    pub tty: Vec<(String, Vec<u8>)>,
+    pub kitty_gfx: Vec<(Vec<u8>, String)>,
+}
+
 /// Resource wrapping a shared stdout emitter for sending BYO commands.
 #[derive(Resource, Clone)]
 pub struct StdoutEmitter {
@@ -190,20 +198,17 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
     commands.insert_resource(emitter);
 }
 
-/// PreUpdate system: drains the unified stdin event queue, feeding TTY data
-/// and graphics commands in the exact order they arrived from the scanner.
+/// PreUpdate system: drains the unified stdin event queue.
 ///
-/// This preserves cursor positioning: passthrough VT100 sequences update the
-/// cursor before graphics placements that reference cursor position.
-#[allow(clippy::too_many_arguments)]
+/// BYO commands are written as [`ByoBatch`] messages for `process_commands`.
+/// TTY passthrough and KittyGfx events are buffered in [`DeferredTtyEvents`]
+/// so they can be processed AFTER `process_commands` creates new entities —
+/// this prevents a race where passthrough arrives in the same frame as the
+/// `+tty` command that creates the target entity.
 pub fn process_stdin_events(
     queue: Res<StdinEventQueue>,
     mut byo_messages: MessageWriter<ByoBatch>,
-    id_map: Res<IdMap>,
-    mut ttys: Query<&mut crate::tty::TtyState>,
-    mut store: ResMut<KittyGfxImageStore>,
-    mut images: ResMut<Assets<Image>>,
-    emitter: Res<StdoutEmitter>,
+    mut deferred: ResMut<DeferredTtyEvents>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     let rx = queue.rx.lock().unwrap();
@@ -216,36 +221,61 @@ pub fn process_stdin_events(
                 byo_messages.write(ByoBatch(commands));
             }
             StdinEvent::Tty { target, data } => {
-                let entity = id_map.get_entity(&target);
-                if let Some(entity) = entity
-                    && let Ok(mut state) = ttys.get_mut(entity)
-                {
-                    state.feed(&data);
-                }
+                deferred.tty.push((target, data));
             }
             StdinEvent::KittyGfx {
                 payload,
                 tty_target,
             } => {
-                // Read cursor position from the target TTY before processing.
-                let cursor_pos = id_map
-                    .get_entity(&tty_target)
-                    .and_then(|e| ttys.get(e).ok())
-                    .map(|state| state.cursor_point())
-                    .unwrap_or((0, 0));
-
-                crate::kitty_gfx::systems::process_single(
-                    &payload,
-                    &mut store,
-                    &mut images,
-                    &emitter,
-                    cursor_pos,
-                    &tty_target,
-                );
+                deferred.kitty_gfx.push((payload, tty_target));
             }
         }
     }
     if got_events {
         redraw.write(RequestRedraw);
+    }
+}
+
+/// PreUpdate system (runs after `process_commands`): processes buffered TTY
+/// passthrough and KittyGfx events now that entities have been created.
+///
+/// Preserves cursor positioning: passthrough VT100 sequences update the
+/// cursor before graphics placements that reference cursor position.
+#[allow(clippy::too_many_arguments)]
+pub fn process_deferred_tty(
+    mut deferred: ResMut<DeferredTtyEvents>,
+    id_map: Res<IdMap>,
+    mut ttys: Query<&mut crate::tty::TtyState>,
+    mut store: ResMut<KittyGfxImageStore>,
+    mut images: ResMut<Assets<Image>>,
+    emitter: Res<StdoutEmitter>,
+) {
+    for (target, data) in deferred.tty.drain(..) {
+        if let Some(entity) = id_map.get_entity(&target)
+            && let Ok(mut state) = ttys.get_mut(entity)
+        {
+            state.feed(&data);
+        } else {
+            warn!(
+                "TTY data for unknown target {target:?}, dropped {} bytes",
+                data.len()
+            );
+        }
+    }
+    for (payload, tty_target) in deferred.kitty_gfx.drain(..) {
+        let cursor_pos = id_map
+            .get_entity(&tty_target)
+            .and_then(|e| ttys.get(e).ok())
+            .map(|state| state.cursor_point())
+            .unwrap_or((0, 0));
+
+        crate::kitty_gfx::systems::process_single(
+            &payload,
+            &mut store,
+            &mut images,
+            &emitter,
+            cursor_pos,
+            &tty_target,
+        );
     }
 }

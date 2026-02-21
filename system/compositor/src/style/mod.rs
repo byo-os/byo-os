@@ -423,12 +423,26 @@ fn resolve_text_props(props: &TextProps) -> TextProps {
     if props.line_height.is_some() {
         r.line_height = props.line_height;
     }
+    if props.font_family.is_some() {
+        r.font_family = props.font_family.clone();
+    }
+    if props.font_weight.is_some() {
+        r.font_weight = props.font_weight.clone();
+    }
+    if props.font_style.is_some() {
+        r.font_style = props.font_style.clone();
+    }
+    if props.font_stretch.is_some() {
+        r.font_stretch = props.font_stretch.clone();
+    }
     r
 }
 
 /// Reconcile `TextProps` changes onto Bevy `Text` + `TextFont` + `TextColor`.
 pub fn reconcile_text(
     mut query: Query<(&TextProps, &mut Text, &mut TextFont, &mut TextColor), Changed<TextProps>>,
+    mut font_store: ResMut<crate::font::FontStore>,
+    asset_server: Res<AssetServer>,
 ) {
     for (props, mut text, mut font, mut color) in &mut query {
         let resolved = resolve_text_props(props);
@@ -442,6 +456,35 @@ pub fn reconcile_text(
         if let Some(ref c) = resolved.color {
             *color = TextColor(c.0);
         }
+
+        // Resolve font family + weight + style + stretch
+        let weight = resolved.font_weight.as_ref().map_or(400, |w| w.0);
+        let style = resolved
+            .font_style
+            .as_ref()
+            .map_or(crate::font::FontStyleRequest::Normal, |s| s.0);
+        let stretch = resolved.font_stretch.as_ref().map_or(100.0, |s| s.0);
+
+        // Resolve the font-family specifier. Tailwind class names (e.g. "font-mono")
+        // are resolved through the FontStore's tailwind map first.
+        let family_spec = resolved.font_family.as_deref().and_then(|spec| {
+            font_store
+                .resolve_tailwind_class(spec)
+                .or_else(|| font_store.resolve_font_family_list(spec))
+        });
+
+        let default = font_store.default_text_family.clone();
+        if let Some(handle) = font_store.resolve_font(
+            family_spec.as_deref(),
+            weight,
+            style,
+            stretch,
+            &default,
+            &asset_server,
+        ) {
+            font.font = handle;
+        }
+        font.weight = bevy::text::FontWeight(weight);
     }
 }
 
@@ -451,6 +494,7 @@ pub struct ResolvedTtyProps {
     pub scrollback: u32,
     pub cols: Option<u32>,
     pub rows: Option<u32>,
+    pub font_family: Option<String>,
 }
 
 /// Resolve tty-specific props: class values are the base, wire props override, defaults fill gaps.
@@ -474,6 +518,7 @@ pub fn resolve_tty_props(props: &TtyProps) -> ResolvedTtyProps {
             .unwrap_or(DEFAULT_SCROLLBACK),
         cols: props.cols.or(class_props.cols),
         rows: props.rows.or(class_props.rows),
+        font_family: props.font_family.clone().or(class_props.font_family),
     }
 }
 
@@ -575,7 +620,8 @@ pub fn reconcile_tty_style(
             .or(resolved.gap.as_ref())
             .map_or(defaults.row_gap, |v| v.0);
 
-        // Layout
+        // Layout — TTY defaults differ from Node::default(): rows must stack
+        // vertically (Column), left-align (Start), and clip overflow.
         node.display = resolved
             .display
             .as_ref()
@@ -583,11 +629,11 @@ pub fn reconcile_tty_style(
         node.flex_direction = resolved
             .flex_direction
             .as_ref()
-            .map_or(defaults.flex_direction, |d| d.to_bevy());
+            .map_or(FlexDirection::Column, |d| d.to_bevy());
         node.align_items = resolved
             .align_items
             .as_ref()
-            .map_or(defaults.align_items, |a| a.to_bevy());
+            .map_or(AlignItems::Start, |a| a.to_bevy());
         node.align_self = resolved
             .align_self
             .as_ref()
@@ -605,8 +651,8 @@ pub fn reconcile_tty_style(
             .as_ref()
             .map_or(defaults.position_type, |p| p.to_bevy());
 
-        // Overflow
-        node.overflow = resolved.overflow.as_ref().map_or(defaults.overflow, |o| {
+        // Overflow — TTY default is clip (terminal content shouldn't overflow).
+        node.overflow = resolved.overflow.as_ref().map_or(Overflow::clip(), |o| {
             let axis = o.to_bevy();
             Overflow { x: axis, y: axis }
         });

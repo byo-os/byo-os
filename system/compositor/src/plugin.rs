@@ -5,6 +5,7 @@ use bevy::ui::UiSystems;
 
 use crate::commands;
 use crate::events;
+use crate::font;
 use crate::id_map::IdMap;
 use crate::io::{self, ByoBatch};
 use crate::kitty_gfx;
@@ -24,14 +25,26 @@ impl Plugin for ByoPlugin {
         app.init_resource::<IdMap>()
             .init_resource::<events::observers::PointerEnterState>()
             .init_resource::<kitty_gfx::store::KittyGfxImageStore>()
+            .init_resource::<io::DeferredTtyEvents>()
             .add_message::<ByoBatch>()
             .add_systems(
                 Startup,
-                (io::setup_io, setup_engine, tty::setup_root_tty).chain(),
+                (
+                    font::setup_font_store,
+                    io::setup_io,
+                    setup_engine,
+                    tty::setup_root_tty,
+                )
+                    .chain(),
             )
             .add_systems(
                 PreUpdate,
-                (io::process_stdin_events, commands::process_commands).chain(),
+                (
+                    io::process_stdin_events,
+                    commands::process_commands,
+                    io::process_deferred_tty,
+                )
+                    .chain(),
             )
             .add_systems(
                 PostUpdate,

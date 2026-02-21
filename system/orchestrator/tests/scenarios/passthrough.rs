@@ -52,9 +52,9 @@ async fn redirect_injects_frame() {
     assert!(
         matches!(&cmds[0], Command::Pragma { kind, targets }
             if matches!(kind, byo::PragmaKind::Redirect)
-               && targets.first().map(|t| t.as_ref()) == Some("term-a")
+               && targets.first().map(|t| t.as_ref()) == Some("app:term-a")
         ),
-        "expected #redirect term-a, got: {redirect}"
+        "expected #redirect app:term-a, got: {redirect}"
     );
 
     // Second message: passthrough data
@@ -106,14 +106,20 @@ async fn interleaved_clients_switch_redirect() {
     // App A passthrough
     send_passthrough(&mut router, pid(2), b"from-a").await;
     let redirect_a = recv_byo_raw(&mut compositor_rx);
-    assert!(redirect_a.contains("term-a"), "expected redirect to term-a");
+    assert!(
+        redirect_a.contains("app-a:term-a"),
+        "expected redirect to app-a:term-a, got: {redirect_a}"
+    );
     let data_a = recv_passthrough_raw(&mut compositor_rx);
     assert_eq!(data_a, b"from-a");
 
     // App B passthrough — should switch redirect
     send_passthrough(&mut router, pid(3), b"from-b").await;
     let redirect_b = recv_byo_raw(&mut compositor_rx);
-    assert!(redirect_b.contains("term-b"), "expected redirect to term-b");
+    assert!(
+        redirect_b.contains("app-b:term-b"),
+        "expected redirect to app-b:term-b, got: {redirect_b}"
+    );
     let data_b = recv_passthrough_raw(&mut compositor_rx);
     assert_eq!(data_b, b"from-b");
 
@@ -121,8 +127,8 @@ async fn interleaved_clients_switch_redirect() {
     send_passthrough(&mut router, pid(2), b"from-a-again").await;
     let redirect_a2 = recv_byo_raw(&mut compositor_rx);
     assert!(
-        redirect_a2.contains("term-a"),
-        "expected redirect back to term-a"
+        redirect_a2.contains("app-a:term-a"),
+        "expected redirect back to app-a:term-a, got: {redirect_a2}"
     );
     let data_a2 = recv_passthrough_raw(&mut compositor_rx);
     assert_eq!(data_a2, b"from-a-again");
@@ -236,7 +242,10 @@ async fn default_and_redirected_interleave() {
     // Custom app passthrough — needs redirect
     send_passthrough(&mut router, pid(3), b"custom-data").await;
     let redirect = recv_byo_raw(&mut compositor_rx);
-    assert!(redirect.contains("my-tty"));
+    assert!(
+        redirect.contains("app-custom:my-tty"),
+        "expected app-custom:my-tty, got: {redirect}"
+    );
     let data = recv_passthrough_raw(&mut compositor_rx);
     assert_eq!(data, b"custom-data");
 

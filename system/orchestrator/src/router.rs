@@ -111,7 +111,8 @@ pub struct Router {
     pending_graphics: Vec<(ProcessId, Vec<u8>)>,
     /// Buffered passthrough payloads awaiting a `tty` observer.
     /// Cleared once the first `tty` observer subscribes.
-    pending_passthrough: Vec<(ProcessId, Vec<u8>)>,
+    /// (from, qualified_target, raw) — target captured at buffering time.
+    pending_passthrough: Vec<(ProcessId, String, Vec<u8>)>,
 }
 
 impl Default for Router {
@@ -545,36 +546,45 @@ impl Router {
             return;
         }
 
-        // Inject a redirect frame if the compositor's target needs switching.
-        if target != self.last_forwarded_target {
-            let mut redirect_buf = Vec::new();
-            if target == "/" {
-                let _ = write!(redirect_buf, "\n#unredirect");
-            } else {
-                let _ = write!(redirect_buf, "\n#redirect {target}");
-            }
-            self.last_forwarded_target = target.to_owned();
+        // Qualify the target with the client name so the compositor can
+        // look it up in its IdMap (which stores qualified IDs).
+        let qualified_target = if target == "/" {
+            "/".to_owned()
+        } else {
+            let client = self.client_name(from).unwrap_or("");
+            crate::id::qualify(client, target)
+        };
 
-            let redirect_arc = Arc::new(redirect_buf);
-            if let Some(observers) = self.observers.get("tty") {
-                for &pid in observers {
+        if let Some(observers) = self.observers.get("tty") {
+            let observers: Vec<ProcessId> = observers.clone();
+
+            // Inject a redirect frame if the compositor's target needs switching.
+            if qualified_target != self.last_forwarded_target {
+                let mut redirect_buf = Vec::new();
+                if qualified_target == "/" {
+                    let _ = write!(redirect_buf, "\n#unredirect");
+                } else {
+                    let _ = write!(redirect_buf, "\n#redirect {qualified_target}");
+                }
+                self.last_forwarded_target.clone_from(&qualified_target);
+
+                let redirect_arc = Arc::new(redirect_buf);
+                for &pid in &observers {
                     if pid != from {
                         self.send_to(pid, WriteMsg::Byo(Arc::clone(&redirect_arc)));
                     }
                 }
             }
-        }
 
-        if let Some(observers) = self.observers.get("tty") {
             let arc = Arc::new(raw);
-            for &pid in observers {
+            for &pid in &observers {
                 if pid != from {
                     self.send_to(pid, WriteMsg::Passthrough(Arc::clone(&arc)));
                 }
             }
         } else {
-            // No tty observer yet — buffer for replay when one subscribes.
-            self.pending_passthrough.push((from, raw));
+            // No tty observer yet — buffer target + data for replay.
+            self.pending_passthrough.push((from, qualified_target, raw));
         }
     }
 
@@ -787,6 +797,10 @@ impl Router {
     }
 
     /// Flush buffered passthrough payloads to newly-registered `tty` observers.
+    ///
+    /// Each pending entry carries the qualified target that was computed at
+    /// buffering time, so redirect frames are injected correctly even when
+    /// the app has changed targets multiple times before any observer existed.
     fn flush_pending_passthrough(&mut self) {
         if self.pending_passthrough.is_empty() {
             return;
@@ -796,24 +810,18 @@ impl Router {
         };
         let observers: Vec<ProcessId> = observers.clone();
         let pending = std::mem::take(&mut self.pending_passthrough);
-        for (from, raw) in pending {
-            // Inject redirect frames as needed (same logic as handle_passthrough).
-            let target = self
-                .passthrough_targets
-                .get(&from)
-                .map(|s| s.as_str())
-                .unwrap_or("/");
-            if target.is_empty() {
-                continue; // discard
+        for (from, qualified_target, raw) in pending {
+            if qualified_target.is_empty() {
+                continue; // discard target
             }
-            if target != self.last_forwarded_target {
+            if qualified_target != self.last_forwarded_target {
                 let mut redirect_buf = Vec::new();
-                if target == "/" {
+                if qualified_target == "/" {
                     let _ = write!(redirect_buf, "\n#unredirect");
                 } else {
-                    let _ = write!(redirect_buf, "\n#redirect {target}");
+                    let _ = write!(redirect_buf, "\n#redirect {qualified_target}");
                 }
-                self.last_forwarded_target = target.to_owned();
+                self.last_forwarded_target.clone_from(&qualified_target);
                 let redirect_arc = Arc::new(redirect_buf);
                 for &pid in &observers {
                     if pid != from {
