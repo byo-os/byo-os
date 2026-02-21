@@ -83,6 +83,8 @@ pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
         tw_transition_easing,
         tw_transition_delay,
         background_image,
+        background_image_slice,
+        background_image_repeat,
         events,
         pointer_events,
         box_shadow,
@@ -364,15 +366,62 @@ pub fn reconcile_views(
 pub struct ResolvedBackgroundImage {
     pub selected_id: u32,
     pub at_scale: f32,
+    /// True when a synthetic child handles the image (HiDPI 9-slice).
+    pub uses_slice_child: bool,
+}
+
+/// Tracks the synthetic child entity used for HiDPI 9-slice backgrounds.
+/// Stored on the parent view entity for O(1) access without hierarchy traversal.
+#[derive(Component)]
+pub struct SliceBackgroundChild(pub Entity);
+
+/// Parse `background-image-slice` prop into per-side pixel values.
+/// Accepts CSS-like shorthand: "16", "10 20", "10 16 20 24" (top right bottom left).
+/// Values are in **logical pixels** (the app-facing unit).
+fn parse_slice_border(s: &str) -> Option<[f32; 4]> {
+    let parts: Vec<f32> = s
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    match parts.len() {
+        1 => Some([parts[0]; 4]),
+        2 => Some([parts[0], parts[1], parts[0], parts[1]]),
+        4 => Some([parts[0], parts[1], parts[2], parts[3]]),
+        _ => None,
+    }
+}
+
+/// Build a `TextureSlicer` from logical-pixel border values and image scale.
+/// The border values are multiplied by `image_scale` to get source-pixel slice lines.
+/// Border order: [top, right, bottom, left] → min_inset = (left, top), max_inset = (right, bottom).
+fn build_slicer(border: [f32; 4], image_scale: f32, repeat_mode: &str) -> TextureSlicer {
+    let scale_mode = match repeat_mode {
+        "tile" => SliceScaleMode::Tile { stretch_value: 1.0 },
+        _ => SliceScaleMode::Stretch,
+    };
+    let [top, right, bottom, left] = border;
+    TextureSlicer {
+        border: BorderRect {
+            min_inset: Vec2::new(left * image_scale, top * image_scale),
+            max_inset: Vec2::new(right * image_scale, bottom * image_scale),
+        },
+        center_scale_mode: scale_mode,
+        sides_scale_mode: scale_mode,
+        max_corner_scale: 1.0,
+    }
 }
 
 /// Reconcile `background-image` prop → `ImageNode` component.
 ///
 /// Runs over all views with a `background_image` prop (not just Changed),
 /// because images may be uploaded after the view is created. Only does
-/// actual work when the state needs updating. Supports multi-density
-/// image sets via `$img(1 @2x, 2 @1x)` syntax — picks the best match
-/// for the current display scale factor.
+/// actual work when the state needs updating.
+///
+/// Three modes:
+/// 1. **No slice** — `ImageNode` on the view directly (stretches to fit).
+/// 2. **Slice + 1x image** — `ImageNode` with `NodeImageMode::Sliced` on the view.
+/// 3. **Slice + non-1x image** — synthetic child entity: oversized node + scale-down
+///    transform so 9-slice corners render at correct logical size with full resolution.
 #[allow(clippy::type_complexity)]
 pub fn reconcile_view_images(
     mut commands: Commands,
@@ -381,11 +430,13 @@ pub fn reconcile_view_images(
         &ViewProps,
         Option<&ImageNode>,
         Option<&ResolvedBackgroundImage>,
+        Option<&SliceBackgroundChild>,
         Option<&ComputedNode>,
+        Option<&Node>,
     )>,
     store: Res<KittyGfxImageStore>,
 ) {
-    for (entity, props, existing_image, resolved_bg, computed_node) in &query {
+    for (entity, props, existing_image, resolved_bg, slice_child, computed_node, node) in &query {
         let resolved = resolve_view_props(props);
         match resolved.background_image {
             Some(ref value) => {
@@ -400,45 +451,214 @@ pub fn reconcile_view_images(
                     .map_or(1.0, |cn| 1.0 / cn.inverse_scale_factor);
 
                 // Parse multi-density entries and pick best match
-                let selected = if let Some(entries) = byo::vars::parse_img_args(var.args) {
-                    byo::vars::best_img_match(&entries, display_scale).map(|e| e.id)
-                } else {
-                    None
+                let Some(entries) = byo::vars::parse_img_args(var.args) else {
+                    continue;
                 };
-                let Some(id) = selected else { continue };
+                let Some(best) = byo::vars::best_img_match(&entries, display_scale) else {
+                    continue;
+                };
+                let id = best.id;
+                let image_scale = best.scale;
 
-                // Check if already resolved to same ID at same scale
+                // Parse slice props
+                let slice_border = resolved
+                    .background_image_slice
+                    .as_deref()
+                    .and_then(parse_slice_border);
+                let repeat_mode = resolved
+                    .background_image_repeat
+                    .as_deref()
+                    .unwrap_or("stretch");
+
+                // Decide which mode we need: synthetic child for non-1x images
+                // that use 9-slice or tiling (both are pixel-size-sensitive).
+                let needs_slice_child =
+                    image_scale != 1.0 && (slice_border.is_some() || repeat_mode == "tile");
+
+                // Check if already resolved to same state
                 if let Some(rbg) = resolved_bg
                     && rbg.selected_id == id
                     && rbg.at_scale == display_scale
-                    && existing_image.is_some()
+                    && rbg.uses_slice_child == needs_slice_child
+                    && (if needs_slice_child {
+                        slice_child.is_some()
+                    } else {
+                        existing_image.is_some()
+                    })
                 {
                     continue;
                 }
 
-                if let Some(kitty_img) = store.get(id) {
-                    commands.entity(entity).insert((
-                        ImageNode {
-                            image: kitty_img.handle.clone(),
-                            ..default()
-                        },
-                        ResolvedBackgroundImage {
-                            selected_id: id,
-                            at_scale: display_scale,
-                        },
-                    ));
+                let Some(kitty_img) = store.get(id) else {
+                    continue;
+                };
+
+                if needs_slice_child {
+                    // ── HiDPI synthetic child: oversize + scale-down ──
+                    let child_image_mode = if let Some(border) = slice_border {
+                        NodeImageMode::Sliced(build_slicer(border, image_scale, repeat_mode))
+                    } else {
+                        // Tiled without slice
+                        NodeImageMode::Tiled {
+                            tile_x: true,
+                            tile_y: true,
+                            stretch_value: 1.0,
+                        }
+                    };
+                    let inv_scale = 1.0 / image_scale;
+                    let pct = image_scale * 100.0; // 200% for @2x
+                    let offset_pct = (1.0 - image_scale) * 50.0; // -50% for @2x
+
+                    // Replicate border radius from parent (scaled up)
+                    let parent_border_radius = node.map_or(BorderRadius::DEFAULT, |n| {
+                        scale_border_radius(n.border_radius, image_scale)
+                    });
+                    // Replicate border width from parent (scaled up)
+                    let parent_border =
+                        node.map_or(UiRect::DEFAULT, |n| scale_ui_rect(n.border, image_scale));
+                    let parent_border_color =
+                        resolved.border_color.as_ref().map_or(Color::NONE, |c| c.0);
+
+                    let child_image_node = ImageNode {
+                        image: kitty_img.handle.clone(),
+                        image_mode: child_image_mode,
+                        ..default()
+                    };
+                    let child_node = Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(offset_pct),
+                        top: Val::Percent(offset_pct),
+                        width: Val::Percent(pct),
+                        height: Val::Percent(pct),
+                        border: parent_border,
+                        border_radius: parent_border_radius,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    };
+                    let child_transform = UiTransform {
+                        scale: Vec2::splat(inv_scale),
+                        ..default()
+                    };
+                    // Use i32::MIN to ensure it's behind everything, even negative z-indices
+                    let child_z = ZIndex(i32::MIN);
+                    let child_border_color = BorderColor::all(parent_border_color);
+
+                    if let Some(sc) = slice_child {
+                        // Update existing synthetic child
+                        commands.entity(sc.0).insert((
+                            child_image_node,
+                            child_node,
+                            child_transform,
+                            child_z,
+                            child_border_color,
+                        ));
+                    } else {
+                        // Spawn new synthetic child
+                        let child_entity = commands
+                            .spawn((
+                                child_image_node,
+                                child_node,
+                                child_transform,
+                                child_z,
+                                child_border_color,
+                                ChildOf(entity),
+                            ))
+                            .id();
+                        commands
+                            .entity(entity)
+                            .insert(SliceBackgroundChild(child_entity));
+                    }
+
+                    // Remove direct ImageNode from parent if present
+                    if existing_image.is_some() {
+                        commands.entity(entity).remove::<ImageNode>();
+                    }
+                } else {
+                    // ── Direct image on parent (no slice, or slice + 1x) ──
+                    let image_mode = if let Some(border) = slice_border {
+                        NodeImageMode::Sliced(build_slicer(border, 1.0, repeat_mode))
+                    } else if repeat_mode == "tile" {
+                        NodeImageMode::Tiled {
+                            tile_x: true,
+                            tile_y: true,
+                            stretch_value: 1.0,
+                        }
+                    } else {
+                        NodeImageMode::Auto
+                    };
+
+                    commands.entity(entity).insert(ImageNode {
+                        image: kitty_img.handle.clone(),
+                        image_mode,
+                        ..default()
+                    });
+
+                    // Remove synthetic child if it was previously needed
+                    remove_slice_child(&mut commands, entity, slice_child);
                 }
-                // If image not found yet, do nothing — will reconcile when uploaded
+
+                // Update resolved state
+                commands.entity(entity).insert(ResolvedBackgroundImage {
+                    selected_id: id,
+                    at_scale: display_scale,
+                    uses_slice_child: needs_slice_child,
+                });
             }
             None => {
-                // Remove ImageNode and ResolvedBackgroundImage if present
-                if existing_image.is_some() {
+                // Remove everything
+                if existing_image.is_some() || slice_child.is_some() {
                     commands
                         .entity(entity)
                         .remove::<(ImageNode, ResolvedBackgroundImage)>();
+                    remove_slice_child(&mut commands, entity, slice_child);
                 }
             }
         }
+    }
+}
+
+/// Despawn the synthetic slice child and remove the tracking component.
+fn remove_slice_child(
+    commands: &mut Commands,
+    parent: Entity,
+    slice_child: Option<&SliceBackgroundChild>,
+) {
+    if let Some(sc) = slice_child {
+        commands.entity(sc.0).despawn();
+        commands.entity(parent).remove::<SliceBackgroundChild>();
+    }
+}
+
+/// Scale a `BorderRadius` by a factor (for replicating on oversized synthetic child).
+fn scale_border_radius(br: BorderRadius, factor: f32) -> BorderRadius {
+    BorderRadius {
+        top_left: scale_val(br.top_left, factor),
+        top_right: scale_val(br.top_right, factor),
+        bottom_right: scale_val(br.bottom_right, factor),
+        bottom_left: scale_val(br.bottom_left, factor),
+    }
+}
+
+/// Scale a `UiRect` by a factor (for replicating borders on synthetic child).
+fn scale_ui_rect(r: UiRect, factor: f32) -> UiRect {
+    UiRect {
+        top: scale_val(r.top, factor),
+        right: scale_val(r.right, factor),
+        bottom: scale_val(r.bottom, factor),
+        left: scale_val(r.left, factor),
+    }
+}
+
+/// Scale a `Val` by a factor. Px and Percent are multiplied; Auto is unchanged.
+fn scale_val(v: Val, factor: f32) -> Val {
+    match v {
+        Val::Px(x) => Val::Px(x * factor),
+        Val::Percent(x) => Val::Percent(x * factor),
+        Val::Vw(x) => Val::Vw(x * factor),
+        Val::Vh(x) => Val::Vh(x * factor),
+        Val::VMin(x) => Val::VMin(x * factor),
+        Val::VMax(x) => Val::VMax(x * factor),
+        other => other,
     }
 }
 
@@ -1293,5 +1513,116 @@ pub fn reorder_children(
 
         let sorted: Vec<Entity> = child_order.iter().map(|(e, _)| *e).collect();
         commands.entity(parent).replace_children(&sorted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_slice_border tests ─────────────────────────────────
+
+    #[test]
+    fn parse_slice_uniform() {
+        assert_eq!(parse_slice_border("16"), Some([16.0; 4]));
+    }
+
+    #[test]
+    fn parse_slice_two_values() {
+        // vertical horizontal → top right bottom left
+        assert_eq!(parse_slice_border("10 20"), Some([10.0, 20.0, 10.0, 20.0]));
+    }
+
+    #[test]
+    fn parse_slice_four_values() {
+        assert_eq!(
+            parse_slice_border("10 16 20 24"),
+            Some([10.0, 16.0, 20.0, 24.0])
+        );
+    }
+
+    #[test]
+    fn parse_slice_invalid() {
+        assert!(parse_slice_border("abc").is_none());
+        assert!(parse_slice_border("").is_none());
+        assert!(parse_slice_border("1 2 3").is_none()); // 3 values not supported
+    }
+
+    #[test]
+    fn parse_slice_fractional() {
+        assert_eq!(parse_slice_border("8.5"), Some([8.5; 4]));
+    }
+
+    // ── build_slicer tests ───────────────────────────────────────
+
+    #[test]
+    fn build_slicer_stretch_1x() {
+        let slicer = build_slicer([16.0, 16.0, 16.0, 16.0], 1.0, "stretch");
+        assert_eq!(slicer.border, BorderRect::all(16.0));
+        assert!(matches!(slicer.center_scale_mode, SliceScaleMode::Stretch));
+        assert!(matches!(slicer.sides_scale_mode, SliceScaleMode::Stretch));
+    }
+
+    #[test]
+    fn build_slicer_tile_2x() {
+        let slicer = build_slicer([10.0, 20.0, 10.0, 20.0], 2.0, "tile");
+        // min_inset = (left, top) = (20*2, 10*2) = (40, 20)
+        // max_inset = (right, bottom) = (20*2, 10*2) = (40, 20)
+        assert_eq!(slicer.border.min_inset, Vec2::new(40.0, 20.0));
+        assert_eq!(slicer.border.max_inset, Vec2::new(40.0, 20.0));
+        assert!(matches!(
+            slicer.center_scale_mode,
+            SliceScaleMode::Tile { .. }
+        ));
+    }
+
+    #[test]
+    fn build_slicer_asymmetric() {
+        let slicer = build_slicer([10.0, 16.0, 20.0, 24.0], 1.0, "stretch");
+        // min_inset = (left=24, top=10), max_inset = (right=16, bottom=20)
+        assert_eq!(slicer.border.min_inset, Vec2::new(24.0, 10.0));
+        assert_eq!(slicer.border.max_inset, Vec2::new(16.0, 20.0));
+    }
+
+    // ── scale helpers tests ──────────────────────────────────────
+
+    #[test]
+    fn scale_val_px() {
+        assert_eq!(scale_val(Val::Px(16.0), 2.0), Val::Px(32.0));
+    }
+
+    #[test]
+    fn scale_val_percent() {
+        assert_eq!(scale_val(Val::Percent(50.0), 2.0), Val::Percent(100.0));
+    }
+
+    #[test]
+    fn scale_val_auto_unchanged() {
+        assert_eq!(scale_val(Val::Auto, 3.0), Val::Auto);
+    }
+
+    #[test]
+    fn scale_border_radius_uniform() {
+        let br = BorderRadius::all(Val::Px(8.0));
+        let scaled = scale_border_radius(br, 2.0);
+        assert_eq!(scaled.top_left, Val::Px(16.0));
+        assert_eq!(scaled.top_right, Val::Px(16.0));
+        assert_eq!(scaled.bottom_right, Val::Px(16.0));
+        assert_eq!(scaled.bottom_left, Val::Px(16.0));
+    }
+
+    #[test]
+    fn scale_ui_rect_mixed() {
+        let r = UiRect {
+            top: Val::Px(4.0),
+            right: Val::Px(8.0),
+            bottom: Val::Px(12.0),
+            left: Val::Px(16.0),
+        };
+        let scaled = scale_ui_rect(r, 2.0);
+        assert_eq!(scaled.top, Val::Px(8.0));
+        assert_eq!(scaled.right, Val::Px(16.0));
+        assert_eq!(scaled.bottom, Val::Px(24.0));
+        assert_eq!(scaled.left, Val::Px(32.0));
     }
 }

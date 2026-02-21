@@ -51,8 +51,12 @@ pub struct ViewProps {
     pub scale: Option<f32>,
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
-    // Background image (e.g. "$img(42)")
+    // Background image (e.g. "$img(42)" or "$img(1 @1x, 2 @2x)")
     pub background_image: Option<String>,
+    // 9-slice: border insets in logical px ("16" or "10 16 20 24")
+    pub background_image_slice: Option<String>,
+    // 9-slice: repeat mode ("stretch" or "tile")
+    pub background_image_repeat: Option<String>,
     // Input events
     pub events: Option<String>,
     pub pointer_events: Option<ByoPointerEvents>,

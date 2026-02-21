@@ -1927,4 +1927,90 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert_eq!(remove, vec!["tooltip"]);
     }
+
+    // ── remap_img_vars tests ─────────────────────────────────────
+
+    /// Helper that applies the same remapping logic as `remap_img_vars`
+    /// on a single prop value string, given a local→global ID map.
+    fn remap_value(value: &str, id_map: &HashMap<u32, u32>) -> String {
+        let result = byo::vars::replace(value, |var| {
+            if var.name != "img" {
+                return None;
+            }
+            let entries = byo::vars::parse_img_args(var.args)?;
+            let mut any_changed = false;
+            let remapped: Vec<_> = entries
+                .into_iter()
+                .map(|mut entry| {
+                    if let Some(&global_id) = id_map.get(&entry.id) {
+                        entry.id = global_id;
+                        any_changed = true;
+                    }
+                    entry
+                })
+                .collect();
+            if any_changed {
+                Some(format!("$img({})", byo::vars::format_img_args(&remapped)))
+            } else {
+                None
+            }
+        });
+        result.into_owned()
+    }
+
+    #[test]
+    fn remap_single_img() {
+        let map = HashMap::from([(1, 100)]);
+        assert_eq!(remap_value("$img(1)", &map), "$img(100)");
+    }
+
+    #[test]
+    fn remap_multi_density_img() {
+        let map = HashMap::from([(1, 100), (2, 200)]);
+        assert_eq!(
+            remap_value("$img(1 @1x, 2 @2x)", &map),
+            "$img(100 @1x, 200 @2x)"
+        );
+    }
+
+    #[test]
+    fn remap_partial_match() {
+        // Only image 1 is in the map, image 2 is not
+        let map = HashMap::from([(1, 100)]);
+        assert_eq!(
+            remap_value("$img(1 @1x, 2 @2x)", &map),
+            "$img(100 @1x, 2 @2x)"
+        );
+    }
+
+    #[test]
+    fn remap_no_match_unchanged() {
+        let map = HashMap::from([(99, 999)]);
+        // No mapping for image 1 — should stay unchanged
+        assert_eq!(remap_value("$img(1)", &map), "$img(1)");
+    }
+
+    #[test]
+    fn remap_non_img_var_unchanged() {
+        let map = HashMap::from([(1, 100)]);
+        assert_eq!(remap_value("$env(HOME)", &map), "$env(HOME)");
+    }
+
+    #[test]
+    fn remap_multi_density_with_modifiers() {
+        let map = HashMap::from([(1, 100), (2, 200)]);
+        assert_eq!(
+            remap_value("$img(1@2x dark, 2@1x light)", &map),
+            "$img(100 @2x dark, 200 @1x light)"
+        );
+    }
+
+    #[test]
+    fn remap_embedded_in_prop_value() {
+        let map = HashMap::from([(5, 500)]);
+        assert_eq!(
+            remap_value("url($img(5))/path", &map),
+            "url($img(500))/path"
+        );
+    }
 }
