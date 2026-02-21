@@ -508,13 +508,26 @@ impl Router {
             for prop in props.iter_mut() {
                 if let Prop::Value { value, .. } = prop {
                     let replaced = byo::vars::replace(value, |var| {
-                        if var.name == "img"
-                            && let Ok(local_id) = var.args.parse::<u32>()
-                            && let Some(&global_id) = gfx_map.id_map.get(&local_id)
-                        {
-                            return Some(format!("$img({global_id})"));
+                        if var.name != "img" {
+                            return None;
                         }
-                        None
+                        let entries = byo::vars::parse_img_args(var.args)?;
+                        let mut any_changed = false;
+                        let remapped: Vec<_> = entries
+                            .into_iter()
+                            .map(|mut entry| {
+                                if let Some(&global_id) = gfx_map.id_map.get(&entry.id) {
+                                    entry.id = global_id;
+                                    any_changed = true;
+                                }
+                                entry
+                            })
+                            .collect();
+                        if any_changed {
+                            Some(format!("$img({})", byo::vars::format_img_args(&remapped)))
+                        } else {
+                            None
+                        }
                     });
                     if let std::borrow::Cow::Owned(new_val) = replaced {
                         *value = byo::ByteStr::from(new_val);

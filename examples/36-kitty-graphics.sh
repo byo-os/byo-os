@@ -1,9 +1,9 @@
 #!/bin/bash
-# Bouncing BYO logo — Kitty Graphics Protocol + $img(N) backgrounds
+# Bouncing BYO logo — Kitty Graphics Protocol + multi-density $img() backgrounds
 #
 # Demonstrates:
-#   1. Uploading a PNG via the Kitty Terminal Graphics Protocol (chunked base64)
-#   2. Displaying it on a view via background-image=$img(N)
+#   1. Uploading 1x and 2x PNGs via the Kitty Terminal Graphics Protocol
+#   2. Displaying via background-image="$img(1 @1x, 2 @2x)" (compositor picks best)
 #   3. Animating the view — bouncing DVD-screensaver style
 #
 # Run from the project root:  ./examples/36-kitty-graphics.sh
@@ -36,18 +36,19 @@ transmit_png() {
     { openssl base64 -e -A -in "$file" | fold -b -w 4096 | send_chunked "$id"; }
 }
 
-# ─── Phase 1: Upload the BYO logo ────────────────────────────────────────────
+# ─── Phase 1: Upload the BYO logo (1x and 2x) ──────────────────────────────
 
 transmit_png 1 assets/byo-logo.png
+transmit_png 2 assets/byo-logo@2x.png
 
-# Give the compositor a moment to decode and store the image
+# Give the compositor a moment to decode and store the images
 sleep 0.1
 
 # ─── Phase 2: Create the scene ───────────────────────────────────────────────
 # A dark background with the logo centered, plus a bounce counter.
 
-LOGO_W=256
-LOGO_H=128
+LOGO_W=512
+LOGO_H=234
 START_X=100
 START_Y=100
 
@@ -55,7 +56,7 @@ printf '\e_B
   +view root class="relative w-full h-full bg-zinc-950 overflow-clip" {
     +view logo class="absolute border-2 overflow-clip"
         width=%d height=%d left=%d top=%d
-        background-image=$img(1)
+        background-image="$img(1 @1x, 2 @2x)"
         border-color="#34d399"
     +view hud class="absolute flex gap-4 items-center" right=16 bottom=16 {
       +text bounces content="Bounces: 0" class="text-sm text-zinc-500"

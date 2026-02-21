@@ -358,43 +358,84 @@ pub fn reconcile_views(
     }
 }
 
+/// Tracks which image ID and scale was selected for a view's background,
+/// so we can avoid redundant updates and re-evaluate on scale changes.
+#[derive(Component)]
+pub struct ResolvedBackgroundImage {
+    pub selected_id: u32,
+    pub at_scale: f32,
+}
+
 /// Reconcile `background-image` prop → `ImageNode` component.
 ///
 /// Runs over all views with a `background_image` prop (not just Changed),
 /// because images may be uploaded after the view is created. Only does
-/// actual work when the state needs updating.
+/// actual work when the state needs updating. Supports multi-density
+/// image sets via `$img(1 @2x, 2 @1x)` syntax — picks the best match
+/// for the current display scale factor.
+#[allow(clippy::type_complexity)]
 pub fn reconcile_view_images(
     mut commands: Commands,
-    query: Query<(Entity, &ViewProps, Option<&ImageNode>)>,
+    query: Query<(
+        Entity,
+        &ViewProps,
+        Option<&ImageNode>,
+        Option<&ResolvedBackgroundImage>,
+        Option<&ComputedNode>,
+    )>,
     store: Res<KittyGfxImageStore>,
 ) {
-    for (entity, props, existing_image) in &query {
+    for (entity, props, existing_image, resolved_bg, computed_node) in &query {
         let resolved = resolve_view_props(props);
         match resolved.background_image {
             Some(ref value) => {
-                // Scan for $img(N)
+                // Scan for $img(...)
                 let refs = byo::vars::scan(value);
                 let img_ref = refs.iter().find(|r| r.name == "img");
-                if let Some(var) = img_ref
-                    && let Ok(id) = var.args.parse::<u32>()
-                    && let Some(kitty_img) = store.get(id)
+                let Some(var) = img_ref else { continue };
+
+                // Determine display scale from ComputedNode
+                let display_scale = computed_node
+                    .filter(|cn| cn.inverse_scale_factor > 0.0)
+                    .map_or(1.0, |cn| 1.0 / cn.inverse_scale_factor);
+
+                // Parse multi-density entries and pick best match
+                let selected = if let Some(entries) = byo::vars::parse_img_args(var.args) {
+                    byo::vars::best_img_match(&entries, display_scale).map(|e| e.id)
+                } else {
+                    None
+                };
+                let Some(id) = selected else { continue };
+
+                // Check if already resolved to same ID at same scale
+                if let Some(rbg) = resolved_bg
+                    && rbg.selected_id == id
+                    && rbg.at_scale == display_scale
+                    && existing_image.is_some()
                 {
-                    // Check if ImageNode already has the correct handle
-                    let needs_update =
-                        existing_image.is_none_or(|img| img.image != kitty_img.handle);
-                    if needs_update {
-                        commands.entity(entity).insert(ImageNode {
+                    continue;
+                }
+
+                if let Some(kitty_img) = store.get(id) {
+                    commands.entity(entity).insert((
+                        ImageNode {
                             image: kitty_img.handle.clone(),
                             ..default()
-                        });
-                    }
+                        },
+                        ResolvedBackgroundImage {
+                            selected_id: id,
+                            at_scale: display_scale,
+                        },
+                    ));
                 }
                 // If image not found yet, do nothing — will reconcile when uploaded
             }
             None => {
-                // Remove ImageNode if present
+                // Remove ImageNode and ResolvedBackgroundImage if present
                 if existing_image.is_some() {
-                    commands.entity(entity).remove::<ImageNode>();
+                    commands
+                        .entity(entity)
+                        .remove::<(ImageNode, ResolvedBackgroundImage)>();
                 }
             }
         }

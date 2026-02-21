@@ -147,6 +147,191 @@ pub fn replace<'a>(value: &'a str, mut f: impl FnMut(&VarRef) -> Option<String>)
     Cow::Owned(result)
 }
 
+/// A parsed multi-density image entry from `$img()` args.
+///
+/// Entries represent individual images in a multi-density set:
+/// - `$img(1)` → one entry with id=1, scale=1.0, no modifiers
+/// - `$img(1 @2x, 2 @1x)` → two entries with different scales
+/// - `$img(1@2x dark, 2@1x light)` → entries with modifiers (future use)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImgEntry {
+    pub id: u32,
+    pub scale: f32,
+    pub modifiers: Vec<String>,
+}
+
+/// Parse `$img()` args into multi-density entries.
+///
+/// Syntax: comma-separated entries, each with a leading integer ID,
+/// optional `@<float>x` scale, and optional word modifiers.
+///
+/// # Examples
+///
+/// ```
+/// use byo::vars::parse_img_args;
+///
+/// let entries = parse_img_args("42").unwrap();
+/// assert_eq!(entries.len(), 1);
+/// assert_eq!(entries[0].id, 42);
+/// assert_eq!(entries[0].scale, 1.0);
+///
+/// let entries = parse_img_args("1 @2x, 2 @1x").unwrap();
+/// assert_eq!(entries.len(), 2);
+/// assert_eq!(entries[0].scale, 2.0);
+/// assert_eq!(entries[1].scale, 1.0);
+/// ```
+pub fn parse_img_args(args: &str) -> Option<Vec<ImgEntry>> {
+    let args = args.trim();
+    if args.is_empty() {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+
+    for part in args.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        // Tokenize: split on whitespace, but also split leading digits from `@`
+        // e.g. "1@2x" → ["1", "@2x"] and "1 @2x dark" → ["1", "@2x", "dark"]
+        let mut tokens = Vec::new();
+        for token in part.split_whitespace() {
+            // Check if token has digits followed by @: "1@2x" → "1" + "@2x"
+            if let Some(at_pos) = token.find('@') {
+                if at_pos > 0 {
+                    tokens.push(&token[..at_pos]);
+                    tokens.push(&token[at_pos..]);
+                } else {
+                    tokens.push(token);
+                }
+            } else {
+                tokens.push(token);
+            }
+        }
+
+        if tokens.is_empty() {
+            continue;
+        }
+
+        // First token must be a number (the image ID)
+        let id: u32 = tokens[0].parse().ok()?;
+        let mut scale = 1.0_f32;
+        let mut modifiers = Vec::new();
+
+        for &tok in &tokens[1..] {
+            if tok.starts_with('@') && tok.ends_with('x') && tok.len() > 2 {
+                // Scale descriptor: @2x, @1.5x, etc.
+                let num_str = &tok[1..tok.len() - 1];
+                if let Ok(s) = num_str.parse::<f32>() {
+                    scale = s;
+                    continue;
+                }
+            }
+            // Everything else is a modifier
+            modifiers.push(tok.to_string());
+        }
+
+        entries.push(ImgEntry {
+            id,
+            scale,
+            modifiers,
+        });
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Pick the best image entry for a given display scale factor.
+///
+/// Algorithm: smallest scale >= display_scale, else largest available.
+///
+/// # Examples
+///
+/// ```
+/// use byo::vars::{ImgEntry, best_img_match};
+///
+/// let entries = vec![
+///     ImgEntry { id: 1, scale: 1.0, modifiers: vec![] },
+///     ImgEntry { id: 2, scale: 2.0, modifiers: vec![] },
+/// ];
+/// // On a 2x display, pick the 2x image
+/// assert_eq!(best_img_match(&entries, 2.0).unwrap().id, 2);
+/// // On a 1x display, pick the 1x image
+/// assert_eq!(best_img_match(&entries, 1.0).unwrap().id, 1);
+/// ```
+pub fn best_img_match(entries: &[ImgEntry], display_scale: f32) -> Option<&ImgEntry> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    // Find smallest scale >= display_scale
+    let mut best_ge: Option<&ImgEntry> = None;
+    let mut best_largest: Option<&ImgEntry> = None;
+
+    for entry in entries {
+        if entry.scale >= display_scale && best_ge.is_none_or(|b| entry.scale < b.scale) {
+            best_ge = Some(entry);
+        }
+        if best_largest.is_none_or(|b| entry.scale > b.scale) {
+            best_largest = Some(entry);
+        }
+    }
+
+    best_ge.or(best_largest)
+}
+
+/// Serialize image entries back to `$img()` args string.
+///
+/// Single entry with scale=1.0 and no modifiers produces just the ID
+/// for backward compatibility: `"42"` instead of `"42 @1x"`.
+///
+/// # Examples
+///
+/// ```
+/// use byo::vars::{ImgEntry, format_img_args};
+///
+/// // Simple backward-compatible case
+/// let entries = vec![ImgEntry { id: 42, scale: 1.0, modifiers: vec![] }];
+/// assert_eq!(format_img_args(&entries), "42");
+///
+/// // Multi-entry always includes scale
+/// let entries = vec![
+///     ImgEntry { id: 1, scale: 2.0, modifiers: vec![] },
+///     ImgEntry { id: 2, scale: 1.0, modifiers: vec![] },
+/// ];
+/// assert_eq!(format_img_args(&entries), "1 @2x, 2 @1x");
+/// ```
+pub fn format_img_args(entries: &[ImgEntry]) -> String {
+    // Single entry with scale=1.0 and no modifiers → just the ID
+    if entries.len() == 1 && entries[0].scale == 1.0 && entries[0].modifiers.is_empty() {
+        return entries[0].id.to_string();
+    }
+
+    let mut parts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut s = entry.id.to_string();
+        // Format scale: omit trailing .0 for integer scales
+        if entry.scale == entry.scale.floor() {
+            s.push_str(&format!(" @{}x", entry.scale as u32));
+        } else {
+            s.push_str(&format!(" @{}x", entry.scale));
+        }
+        for m in &entry.modifiers {
+            s.push(' ');
+            s.push_str(m);
+        }
+        parts.push(s);
+    }
+
+    parts.join(", ")
+}
+
 fn is_name_start(b: u8) -> bool {
     b.is_ascii_alphabetic()
 }
@@ -308,5 +493,236 @@ mod tests {
         let result = replace("", |_| Some("X".to_string()));
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result, "");
+    }
+
+    // ── parse_img_args() tests ───────────────────────────────────
+
+    #[test]
+    fn parse_single_id() {
+        let entries = parse_img_args("42").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 42);
+        assert_eq!(entries[0].scale, 1.0);
+        assert!(entries[0].modifiers.is_empty());
+    }
+
+    #[test]
+    fn parse_multi_entry() {
+        let entries = parse_img_args("1 @2x, 2 @1x").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].scale, 2.0);
+        assert_eq!(entries[1].id, 2);
+        assert_eq!(entries[1].scale, 1.0);
+    }
+
+    #[test]
+    fn parse_glued_at() {
+        let entries = parse_img_args("1@2x, 2@1x").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].scale, 2.0);
+        assert_eq!(entries[1].id, 2);
+        assert_eq!(entries[1].scale, 1.0);
+    }
+
+    #[test]
+    fn parse_fractional_scale() {
+        let entries = parse_img_args("5 @1.5x").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 5);
+        assert_eq!(entries[0].scale, 1.5);
+    }
+
+    #[test]
+    fn parse_with_modifiers() {
+        let entries = parse_img_args("1@2x dark, 2@1x light").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].modifiers, vec!["dark"]);
+        assert_eq!(entries[1].modifiers, vec!["light"]);
+    }
+
+    #[test]
+    fn parse_empty_returns_none() {
+        assert!(parse_img_args("").is_none());
+        assert!(parse_img_args("  ").is_none());
+    }
+
+    #[test]
+    fn parse_invalid_first_token_returns_none() {
+        assert!(parse_img_args("abc").is_none());
+        assert!(parse_img_args("@2x").is_none());
+    }
+
+    #[test]
+    fn parse_single_with_scale() {
+        let entries = parse_img_args("3 @3x").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 3);
+        assert_eq!(entries[0].scale, 3.0);
+    }
+
+    // ── best_img_match() tests ───────────────────────────────────
+
+    #[test]
+    fn match_exact_scale() {
+        let entries = vec![
+            ImgEntry {
+                id: 1,
+                scale: 1.0,
+                modifiers: vec![],
+            },
+            ImgEntry {
+                id: 2,
+                scale: 2.0,
+                modifiers: vec![],
+            },
+        ];
+        assert_eq!(best_img_match(&entries, 2.0).unwrap().id, 2);
+        assert_eq!(best_img_match(&entries, 1.0).unwrap().id, 1);
+    }
+
+    #[test]
+    fn match_smallest_ge() {
+        let entries = vec![
+            ImgEntry {
+                id: 1,
+                scale: 1.0,
+                modifiers: vec![],
+            },
+            ImgEntry {
+                id: 2,
+                scale: 2.0,
+                modifiers: vec![],
+            },
+            ImgEntry {
+                id: 3,
+                scale: 3.0,
+                modifiers: vec![],
+            },
+        ];
+        // 1.5x display → pick 2x (smallest >= 1.5)
+        assert_eq!(best_img_match(&entries, 1.5).unwrap().id, 2);
+    }
+
+    #[test]
+    fn match_fallback_largest() {
+        let entries = vec![
+            ImgEntry {
+                id: 1,
+                scale: 1.0,
+                modifiers: vec![],
+            },
+            ImgEntry {
+                id: 2,
+                scale: 2.0,
+                modifiers: vec![],
+            },
+        ];
+        // 3x display → no scale >= 3, fallback to largest (2x)
+        assert_eq!(best_img_match(&entries, 3.0).unwrap().id, 2);
+    }
+
+    #[test]
+    fn match_single_entry() {
+        let entries = vec![ImgEntry {
+            id: 42,
+            scale: 1.0,
+            modifiers: vec![],
+        }];
+        assert_eq!(best_img_match(&entries, 2.0).unwrap().id, 42);
+        assert_eq!(best_img_match(&entries, 1.0).unwrap().id, 42);
+    }
+
+    #[test]
+    fn match_empty_returns_none() {
+        assert!(best_img_match(&[], 2.0).is_none());
+    }
+
+    // ── format_img_args() tests ──────────────────────────────────
+
+    #[test]
+    fn format_single_default_scale() {
+        let entries = vec![ImgEntry {
+            id: 42,
+            scale: 1.0,
+            modifiers: vec![],
+        }];
+        assert_eq!(format_img_args(&entries), "42");
+    }
+
+    #[test]
+    fn format_single_non_default_scale() {
+        let entries = vec![ImgEntry {
+            id: 5,
+            scale: 2.0,
+            modifiers: vec![],
+        }];
+        assert_eq!(format_img_args(&entries), "5 @2x");
+    }
+
+    #[test]
+    fn format_multi_entry() {
+        let entries = vec![
+            ImgEntry {
+                id: 1,
+                scale: 2.0,
+                modifiers: vec![],
+            },
+            ImgEntry {
+                id: 2,
+                scale: 1.0,
+                modifiers: vec![],
+            },
+        ];
+        assert_eq!(format_img_args(&entries), "1 @2x, 2 @1x");
+    }
+
+    #[test]
+    fn format_fractional_scale() {
+        let entries = vec![ImgEntry {
+            id: 1,
+            scale: 1.5,
+            modifiers: vec![],
+        }];
+        assert_eq!(format_img_args(&entries), "1 @1.5x");
+    }
+
+    #[test]
+    fn format_with_modifiers() {
+        let entries = vec![
+            ImgEntry {
+                id: 1,
+                scale: 2.0,
+                modifiers: vec!["dark".into()],
+            },
+            ImgEntry {
+                id: 2,
+                scale: 1.0,
+                modifiers: vec!["light".into()],
+            },
+        ];
+        assert_eq!(format_img_args(&entries), "1 @2x dark, 2 @1x light");
+    }
+
+    #[test]
+    fn format_parse_roundtrip() {
+        let original = "1 @2x, 2 @1x";
+        let entries = parse_img_args(original).unwrap();
+        assert_eq!(format_img_args(&entries), original);
+    }
+
+    #[test]
+    fn format_parse_roundtrip_single() {
+        let original = "42";
+        let entries = parse_img_args(original).unwrap();
+        assert_eq!(format_img_args(&entries), original);
+    }
+
+    #[test]
+    fn format_parse_roundtrip_modifiers() {
+        let original = "1 @2x dark, 2 @1x light";
+        let entries = parse_img_args(original).unwrap();
+        assert_eq!(format_img_args(&entries), original);
     }
 }
