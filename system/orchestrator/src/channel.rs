@@ -67,8 +67,8 @@ impl<T> TrackedUnboundedReceiver<T> {
 /// Create a tracked `tokio::sync::mpsc` unbounded channel.
 pub fn tracked_unbounded_channel<T>(
     name: impl Into<Arc<str>>,
-    high_mark: usize,
-    low_mark: usize,
+    high_mark: isize,
+    low_mark: isize,
 ) -> (TrackedUnboundedSender<T>, TrackedUnboundedReceiver<T>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let counter = ChannelCounter::new(name, high_mark, low_mark);

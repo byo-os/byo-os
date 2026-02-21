@@ -4,9 +4,13 @@
 //! Sends increment, receives decrement. When depth crosses `high_mark`
 //! upward a warning fires; when it drops below `low_mark` a recovery
 //! info log fires. The hysteresis band prevents log spam.
+//!
+//! The counter uses `AtomicIsize` so that relaxed-ordering reordering
+//! (dec observed before inc) simply produces a briefly negative value
+//! instead of wrapping to `usize::MAX` and panicking.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc;
 
 // ---------------------------------------------------------------------------
@@ -19,7 +23,7 @@ use std::sync::mpsc;
 /// alert state.
 #[derive(Clone)]
 pub struct ChannelCounter {
-    len: Arc<AtomicUsize>,
+    len: Arc<AtomicIsize>,
     state: Arc<AlertState>,
 }
 
@@ -27,8 +31,8 @@ struct AlertState {
     name: Arc<str>,
     /// True while the queue is in the "high" state.
     high: AtomicBool,
-    high_mark: usize,
-    low_mark: usize,
+    high_mark: isize,
+    low_mark: isize,
 }
 
 impl ChannelCounter {
@@ -40,10 +44,10 @@ impl ChannelCounter {
     ///
     /// `low_mark` should be less than `high_mark` to create a hysteresis
     /// band that prevents rapid toggling.
-    pub fn new(name: impl Into<Arc<str>>, high_mark: usize, low_mark: usize) -> Self {
+    pub fn new(name: impl Into<Arc<str>>, high_mark: isize, low_mark: isize) -> Self {
         debug_assert!(low_mark < high_mark, "low_mark must be < high_mark");
         Self {
-            len: Arc::new(AtomicUsize::new(0)),
+            len: Arc::new(AtomicIsize::new(0)),
             state: Arc::new(AlertState {
                 name: name.into(),
                 high: AtomicBool::new(false),
@@ -55,8 +59,7 @@ impl ChannelCounter {
 
     /// Increment and warn if crossing the high-water mark.
     pub fn inc(&self) {
-        let prev = self.len.fetch_add(1, Ordering::Relaxed);
-        let new = prev + 1;
+        let new = self.len.fetch_add(1, Ordering::Relaxed) + 1;
         if new > self.state.high_mark && !self.state.high.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 channel = &*self.state.name,
@@ -69,8 +72,7 @@ impl ChannelCounter {
 
     /// Decrement and log recovery if crossing below the low-water mark.
     pub fn dec(&self) {
-        let prev = self.len.fetch_sub(1, Ordering::Relaxed);
-        let new = prev.saturating_sub(1);
+        let new = self.len.fetch_sub(1, Ordering::Relaxed) - 1;
         if new < self.state.low_mark && self.state.high.swap(false, Ordering::Relaxed) {
             tracing::info!(
                 channel = &*self.state.name,
@@ -81,8 +83,8 @@ impl ChannelCounter {
         }
     }
 
-    /// Current depth (relaxed read — may be slightly stale).
-    pub fn load(&self) -> usize {
+    /// Current depth (relaxed read — may be slightly stale or briefly negative).
+    pub fn load(&self) -> isize {
         self.len.load(Ordering::Relaxed)
     }
 }
@@ -162,8 +164,8 @@ impl<T> TrackedReceiver<T> {
 /// a channel depth counter with hysteresis warnings.
 pub fn tracked_channel<T>(
     name: impl Into<Arc<str>>,
-    high_mark: usize,
-    low_mark: usize,
+    high_mark: isize,
+    low_mark: isize,
 ) -> (TrackedSender<T>, TrackedReceiver<T>) {
     let (tx, rx) = mpsc::channel();
     let counter = ChannelCounter::new(name, high_mark, low_mark);
