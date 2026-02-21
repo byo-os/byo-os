@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
-use tokio::sync::mpsc;
 
 use bytes::Bytes;
 
 use byo::scanner::{Handler, Scanner};
 use byo::{APC_START, KITTY_GFX_PROTOCOL_ID, PROTOCOL_ID, ST};
 
+use crate::channel::{TrackedUnboundedSender, tracked_unbounded_channel};
 use crate::router::RouterMsg;
 
 /// Unique identifier for a managed process.
@@ -40,14 +40,14 @@ pub enum WriteMsg {
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
-    pub tx: mpsc::UnboundedSender<WriteMsg>,
+    pub tx: TrackedUnboundedSender<WriteMsg>,
 }
 
 /// Scanner handler that collects complete payloads and sends them to the
 /// router channel.
 struct CollectHandler {
     process_id: ProcessId,
-    router_tx: mpsc::Sender<RouterMsg>,
+    router_tx: TrackedUnboundedSender<RouterMsg>,
 }
 
 impl Handler for CollectHandler {
@@ -68,8 +68,7 @@ impl Handler for CollectHandler {
             from: self.process_id,
             commands,
         };
-        // try_send avoids deadlocks in the sync scanner callback.
-        let _ = self.router_tx.try_send(msg);
+        let _ = self.router_tx.send(msg);
     }
 
     fn on_kitty_gfx(&mut self, payload: &[u8]) {
@@ -77,7 +76,7 @@ impl Handler for CollectHandler {
             from: self.process_id,
             raw: payload.to_vec(),
         };
-        let _ = self.router_tx.try_send(msg);
+        let _ = self.router_tx.send(msg);
     }
 
     fn on_passthrough(&mut self, data: &[u8]) {
@@ -85,7 +84,7 @@ impl Handler for CollectHandler {
             from: self.process_id,
             raw: data.to_vec(),
         };
-        let _ = self.router_tx.try_send(msg);
+        let _ = self.router_tx.send(msg);
     }
 }
 
@@ -101,7 +100,7 @@ pub fn spawn_process(
     name: String,
     command: &str,
     args: &[String],
-    router_tx: mpsc::Sender<RouterMsg>,
+    router_tx: TrackedUnboundedSender<RouterMsg>,
 ) -> std::io::Result<Process> {
     // Split the command string on whitespace so that commands like
     // "cargo run -p byo-compositor" work without requiring separate args.
@@ -118,7 +117,8 @@ pub fn spawn_process(
     let stdout = child.stdout.take().expect("child stdout piped");
     let stdin = child.stdin.take().expect("child stdin piped");
 
-    let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteMsg>();
+    let (write_tx, write_rx) =
+        tracked_unbounded_channel::<WriteMsg>(format!("write-{name}"), 512, 256);
 
     // Reader task: child stdout → Scanner → RouterMsg.
     let reader_router_tx = router_tx.clone();
@@ -137,11 +137,9 @@ pub fn spawn_process(
     let monitor_id = id;
     tokio::spawn(async move {
         let _ = child.wait().await;
-        let _ = monitor_router_tx
-            .send(RouterMsg::Disconnected {
-                process: monitor_id,
-            })
-            .await;
+        let _ = monitor_router_tx.send(RouterMsg::Disconnected {
+            process: monitor_id,
+        });
     });
 
     Ok(Process {
@@ -154,12 +152,12 @@ pub fn spawn_process(
 async fn reader_task(
     process_id: ProcessId,
     mut stdout: tokio::process::ChildStdout,
-    router_tx: mpsc::Sender<RouterMsg>,
+    router_tx: TrackedUnboundedSender<RouterMsg>,
 ) {
     let mut scanner = Scanner::new();
     let mut handler = CollectHandler {
         process_id,
-        router_tx: router_tx.clone(),
+        router_tx,
     };
     let mut buf = [0u8; 4096];
 
@@ -173,16 +171,14 @@ async fn reader_task(
         }
     }
 
-    let _ = router_tx
-        .send(RouterMsg::Disconnected {
-            process: process_id,
-        })
-        .await;
+    let _ = handler.router_tx.send(RouterMsg::Disconnected {
+        process: process_id,
+    });
 }
 
 async fn writer_task(
     mut stdin: tokio::process::ChildStdin,
-    mut rx: mpsc::UnboundedReceiver<WriteMsg>,
+    mut rx: crate::channel::TrackedUnboundedReceiver<WriteMsg>,
 ) {
     let mut frame = Vec::new();
     while let Some(msg) = rx.recv().await {

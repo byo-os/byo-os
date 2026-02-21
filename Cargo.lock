@@ -1708,6 +1708,7 @@ dependencies = [
  "byo-macros",
  "bytes",
  "indexmap",
+ "tracing",
 ]
 
 [[package]]

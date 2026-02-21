@@ -11,3 +11,4 @@ macros = ["dep:byo-macros"]
 byo-macros = { workspace = true, optional = true }
 indexmap.workspace = true
 bytes.workspace = true
+tracing.workspace = true

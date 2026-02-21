@@ -6,6 +6,7 @@
 
 pub mod assert;
 pub mod byte_str;
+pub mod channel;
 pub mod emitter;
 pub mod events;
 pub mod kitty_gfx;

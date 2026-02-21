@@ -10,9 +10,9 @@ use byo_orchestrator::router::Router;
 /// fully complete and all messages consumed.
 async fn setup_initial_expansion() -> (
     Router,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
 ) {
     let mut router = Router::new();
     let (compositor, mut compositor_rx) = mock_process(1, "compositor");
@@ -288,9 +288,9 @@ async fn re_expansion_removes_node() {
 /// for `settings` fully complete and all messages consumed.
 async fn setup_two_buttons() -> (
     Router,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
-    tokio::sync::mpsc::UnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
+    byo_orchestrator::channel::TrackedUnboundedReceiver<byo_orchestrator::process::WriteMsg>,
 ) {
     let mut router = Router::new();
     let (compositor, mut compositor_rx) = mock_process(1, "compositor");

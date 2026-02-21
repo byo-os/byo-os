@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod channel;
 pub mod config;
 pub mod id;
 pub mod process;

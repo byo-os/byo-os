@@ -9,9 +9,10 @@
 //! directly without propagation.
 
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use byo::channel::{TrackedSender, tracked_channel};
 
 use bevy::prelude::*;
 use byo::protocol::{EventKind, Prop};
@@ -193,7 +194,7 @@ pub enum EngineInput {
 /// Handle for sending messages to the propagation engine.
 #[derive(Resource, Clone)]
 pub struct EngineHandle {
-    tx: mpsc::Sender<EngineInput>,
+    tx: TrackedSender<EngineInput>,
 }
 
 impl EngineHandle {
@@ -808,7 +809,7 @@ fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> 
 /// - `emitter`: shared stdout emitter for writing events
 /// - `capture_state`: shared capture state for ECS systems to read
 pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> EngineHandle {
-    let (tx, rx) = mpsc::channel::<EngineInput>();
+    let (tx, rx) = tracked_channel::<EngineInput>("events", 256, 128);
 
     std::thread::Builder::new()
         .name("byo-propagation".into())
@@ -845,8 +846,8 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                         info!("propagation engine shutting down");
                         break;
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         debug!("propagation engine channel disconnected");
                         break;
                     }

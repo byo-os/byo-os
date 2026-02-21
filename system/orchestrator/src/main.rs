@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use byo_orchestrator::channel::tracked_unbounded_channel;
 use byo_orchestrator::config::{Config, ProcessConfig};
 use byo_orchestrator::process::{ProcessId, spawn_process};
 use byo_orchestrator::router::{Router, RouterMsg};
@@ -56,7 +56,7 @@ async fn main() {
     info!("loaded config with {} processes", config.process.len());
 
     // Central router channel — all process reader tasks send here.
-    let (router_tx, mut router_rx) = mpsc::channel::<RouterMsg>(1024);
+    let (router_tx, mut router_rx) = tracked_unbounded_channel::<RouterMsg>("router", 1024, 512);
 
     // Spawn all configured processes and register with the router.
     let mut router = Router::new();

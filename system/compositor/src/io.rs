@@ -3,13 +3,13 @@
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxy, EventLoopProxyWrapper, WinitUserEvent};
+use byo::channel::{TrackedReceiver, TrackedSender, tracked_channel};
 use byo::emitter::Emitter;
 use byo::parser::parse_bytes;
 use byo::protocol::PragmaKind;
 use byo::scanner::{Handler, Scanner};
 use bytes::Bytes;
 use std::io::{self, Read, Stdout};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use crate::id_map::IdMap;
@@ -35,7 +35,7 @@ pub enum StdinEvent {
 /// Resource wrapping the receiving end of the unified stdin event channel.
 #[derive(Resource)]
 pub struct StdinEventQueue {
-    pub rx: Mutex<mpsc::Receiver<StdinEvent>>,
+    pub rx: Mutex<TrackedReceiver<StdinEvent>>,
 }
 
 /// Buffered TTY/KittyGfx events from `process_stdin_events` that need entity
@@ -75,7 +75,7 @@ impl StdoutEmitter {
 /// Scanner handler that parses BYO payloads and sends them through a single
 /// ordered channel, then wakes the Bevy event loop for immediate processing.
 struct StdinHandler {
-    tx: mpsc::Sender<StdinEvent>,
+    tx: TrackedSender<StdinEvent>,
     event_loop_proxy: EventLoopProxy<WinitUserEvent>,
     /// Current passthrough target. `"/"` = root tty, empty = discard.
     pipe_target: String,
@@ -151,7 +151,7 @@ impl Handler for StdinHandler {
 /// Startup system: spawns the stdin reader thread, creates the stdout
 /// emitter, and sends the initial observe subscription.
 pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrapper>) {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = tracked_channel::<StdinEvent>("stdin", 1024, 512);
 
     // Clone the inner winit EventLoopProxy for the stdin thread
     let proxy: EventLoopProxy<WinitUserEvent> = (*event_loop_proxy).clone();
