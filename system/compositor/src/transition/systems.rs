@@ -1215,23 +1215,21 @@ fn check_shadow_list(
     let filtered_target: Vec<ByoShadow> = target.iter().filter(|s| !s.inset).cloned().collect();
     if !shadow_list_approx_eq(&current, &filtered_target)
         && let Some(rule) = config.find_rule(AnimatableProp::BoxShadow)
-    {
-        if let TransitionType::Eased {
+        && let TransitionType::Eased {
             duration_secs,
             delay_secs,
             easing,
         } = &rule.transition_type
-        {
-            upsert_transition(
-                transitions,
-                AnimatableProp::BoxShadow,
-                AnimatableValue::ShadowList(current),
-                AnimatableValue::ShadowList(filtered_target),
-                *duration_secs,
-                *delay_secs,
-                *easing,
-            );
-        }
+    {
+        upsert_transition(
+            transitions,
+            AnimatableProp::BoxShadow,
+            AnimatableValue::ShadowList(current),
+            AnimatableValue::ShadowList(filtered_target),
+            *duration_secs,
+            *delay_secs,
+            *easing,
+        );
     }
 }
 

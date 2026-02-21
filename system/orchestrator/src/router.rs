@@ -508,12 +508,11 @@ impl Router {
             for prop in props.iter_mut() {
                 if let Prop::Value { value, .. } = prop {
                     let replaced = byo::vars::replace(value, |var| {
-                        if var.name == "img" {
-                            if let Ok(local_id) = var.args.parse::<u32>() {
-                                if let Some(&global_id) = gfx_map.id_map.get(&local_id) {
-                                    return Some(format!("$img({global_id})"));
-                                }
-                            }
+                        if var.name == "img"
+                            && let Ok(local_id) = var.args.parse::<u32>()
+                            && let Some(&global_id) = gfx_map.id_map.get(&local_id)
+                        {
+                            return Some(format!("$img({global_id})"));
                         }
                         None
                     });

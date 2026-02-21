@@ -347,41 +347,38 @@ impl Codegen {
         let (seq_binds, seq_expr) = self.gen_seq_value(seq);
 
         // Optimize known literal kinds to direct emitter methods
-        if let IrValue::Literal(k) = kind {
-            match k.as_str() {
-                "expand" => {
-                    let (target_binds, target_expr) =
-                        self.gen_str_value(targets.first().expect("expand needs a target"));
-                    if !props.is_empty() {
-                        if has_dynamic_props(props) {
-                            let props_var = self.fresh_ident("props");
-                            let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
-                            return quote! {
-                                {
-                                    #seq_binds
-                                    #target_binds
-                                    let mut #props_var = ::std::vec::Vec::new();
-                                    #push_stmts
-                                    #em_ident.expand(#seq_expr, #target_expr, &#props_var)?;
-                                }
-                            };
-                        } else {
-                            let prop_items = self.gen_static_prop_items(props);
-                            return quote! {
-                                #seq_binds
-                                #target_binds
-                                #em_ident.expand(#seq_expr, #target_expr, &[#(#prop_items),*])?;
-                            };
-                        }
-                    } else {
-                        return quote! {
+        if let IrValue::Literal(k) = kind
+            && k.as_str() == "expand"
+        {
+            let (target_binds, target_expr) =
+                self.gen_str_value(targets.first().expect("expand needs a target"));
+            if !props.is_empty() {
+                if has_dynamic_props(props) {
+                    let props_var = self.fresh_ident("props");
+                    let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                    return quote! {
+                        {
                             #seq_binds
                             #target_binds
-                            #em_ident.expand(#seq_expr, #target_expr, &[])?;
-                        };
-                    }
+                            let mut #props_var = ::std::vec::Vec::new();
+                            #push_stmts
+                            #em_ident.expand(#seq_expr, #target_expr, &#props_var)?;
+                        }
+                    };
+                } else {
+                    let prop_items = self.gen_static_prop_items(props);
+                    return quote! {
+                        #seq_binds
+                        #target_binds
+                        #em_ident.expand(#seq_expr, #target_expr, &[#(#prop_items),*])?;
+                    };
                 }
-                _ => {}
+            } else {
+                return quote! {
+                    #seq_binds
+                    #target_binds
+                    #em_ident.expand(#seq_expr, #target_expr, &[])?;
+                };
             }
         }
 

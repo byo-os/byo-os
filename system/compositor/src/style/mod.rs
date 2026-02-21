@@ -1201,12 +1201,12 @@ fn propagate_pointer_events_none(
     };
     for child in children.iter() {
         // If this child has its own explicit pointer-events prop, respect it
-        if let Ok(child_props) = all_views.get(child) {
-            if child_props.pointer_events.is_some() {
-                // Child has explicit setting — don't override, but if it's also
-                // none, it will propagate when its own reconciliation runs
-                continue;
-            }
+        if let Ok(child_props) = all_views.get(child)
+            && child_props.pointer_events.is_some()
+        {
+            // Child has explicit setting — don't override, but if it's also
+            // none, it will propagate when its own reconciliation runs
+            continue;
         }
         // Inherit: set IGNORE on this child too
         commands.entity(child).insert(Pickable::IGNORE);

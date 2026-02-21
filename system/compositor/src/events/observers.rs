@@ -14,6 +14,14 @@ use crate::components::{ByoLayer, ByoText, ByoView, ByoWindow};
 use crate::events::config::EventSubscriptions;
 use crate::id_map::IdMap;
 
+/// Query filter matching any BYO entity type.
+type ByoEntityFilter = Or<(
+    With<ByoView>,
+    With<ByoText>,
+    With<ByoLayer>,
+    With<ByoWindow>,
+)>;
+
 use super::engine::{
     Button, CaptureState, EngineHandle, EngineInput, Modifiers, PointerData, PointerType, SpineNode,
 };
@@ -44,6 +52,7 @@ pub fn register_observers(app: &mut App) {
 /// Build the propagation spine from a hit entity up to the root.
 /// Returns spine ordered root → leaf, filtering only BYO entities
 /// that have event subscriptions for the given event kind.
+#[allow(clippy::too_many_arguments)]
 fn build_spine(
     entity: Entity,
     kind: &EventKind,
@@ -51,15 +60,7 @@ fn build_spine(
     id_map: &IdMap,
     parent_query: &Query<&ChildOf>,
     subs_query: &Query<&EventSubscriptions>,
-    byo_entities: &Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: &Query<(), ByoEntityFilter>,
     node_query: &Query<&ComputedNode>,
     ui_transforms: &Query<&UiGlobalTransform>,
 ) -> Vec<SpineNode> {
@@ -68,33 +69,33 @@ fn build_spine(
 
     while let Some(e) = current {
         // Only include BYO entities that are in the IdMap
-        if byo_entities.get(e).is_ok() {
-            if let Some(byo_id) = id_map.get_id(e) {
-                // Compute local coordinates and dimensions relative to this element
-                let (local_x, local_y, w, h) = compute_local_coords(
-                    e,
-                    pointer.client_x,
-                    pointer.client_y,
-                    node_query,
-                    ui_transforms,
-                );
+        if byo_entities.get(e).is_ok()
+            && let Some(byo_id) = id_map.get_id(e)
+        {
+            // Compute local coordinates and dimensions relative to this element
+            let (local_x, local_y, w, h) = compute_local_coords(
+                e,
+                pointer.client_x,
+                pointer.client_y,
+                node_query,
+                ui_transforms,
+            );
 
-                if let Ok(subs) = subs_query.get(e) {
-                    if let Some(sub) = subs.get(kind) {
-                        spine.push(SpineNode {
-                            byo_id: byo_id.to_string(),
-                            phase: sub.phase,
-                            passive: sub.passive,
-                            verbose: sub.verbose,
-                            local_x,
-                            local_y,
-                            width: w,
-                            height: h,
-                        });
-                    }
-                }
-                // Even if no subscription, we still walk up the tree
+            if let Ok(subs) = subs_query.get(e)
+                && let Some(sub) = subs.get(kind)
+            {
+                spine.push(SpineNode {
+                    byo_id: byo_id.to_string(),
+                    phase: sub.phase,
+                    passive: sub.passive,
+                    verbose: sub.verbose,
+                    local_x,
+                    local_y,
+                    width: w,
+                    height: h,
+                });
             }
+            // Even if no subscription, we still walk up the tree
         }
 
         // Walk up to parent
@@ -113,15 +114,7 @@ fn build_ancestor_chain(
     entity: Entity,
     id_map: &IdMap,
     parent_query: &Query<&ChildOf>,
-    byo_entities: &Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: &Query<(), ByoEntityFilter>,
 ) -> Vec<Entity> {
     let mut chain = Vec::new();
     let mut current = Some(entity);
@@ -272,6 +265,7 @@ fn read_modifiers(keys: &ButtonInput<KeyCode>) -> Modifiers {
 }
 
 /// Create PointerData from a Bevy pointer event.
+#[allow(clippy::too_many_arguments)]
 fn make_pointer_data(
     pointer_id: &PointerId,
     location: &Location,
@@ -313,15 +307,7 @@ fn on_pointer_down(
     keys: Res<ButtonInput<KeyCode>>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
-    byo_entities: Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
@@ -372,15 +358,7 @@ fn on_pointer_up(
     capture_state: Res<CaptureState>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
-    byo_entities: Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
@@ -437,15 +415,7 @@ fn on_pointer_move(
     capture_state: Res<CaptureState>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
-    byo_entities: Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
@@ -501,15 +471,7 @@ fn on_pointer_over(
     mut enter_state: ResMut<PointerEnterState>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
-    byo_entities: Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
@@ -640,15 +602,7 @@ fn on_pointer_out(
     keys: Res<ButtonInput<KeyCode>>,
     parent_query: Query<&ChildOf>,
     subs_query: Query<&EventSubscriptions>,
-    byo_entities: Query<
-        (),
-        Or<(
-            With<ByoView>,
-            With<ByoText>,
-            With<ByoLayer>,
-            With<ByoWindow>,
-        )>,
-    >,
+    byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {

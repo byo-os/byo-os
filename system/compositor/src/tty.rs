@@ -295,15 +295,12 @@ pub fn reconcile_tty(
         let new_count = new_rows.len();
 
         // Update/reuse existing rows.
-        for i in 0..old_count.min(new_count) {
-            let new_runs = &new_rows[i];
-
+        for (i, new_runs) in new_rows.iter().enumerate().take(old_count.min(new_count)) {
             if state.rendered[i].runs.len() == new_runs.len() {
                 // Same run structure — update components in place.
-                for j in 0..new_runs.len() {
+                for (j, new_r) in new_runs.iter().enumerate() {
                     let text_entity = state.rendered[i].runs[j].text_entity;
                     let cell_entity = state.rendered[i].runs[j].cell_entity;
-                    let new_r = &new_runs[j];
 
                     if state.rendered[i].runs[j].text != new_r.text {
                         if let Ok(mut t) = texts.get_mut(text_entity) {

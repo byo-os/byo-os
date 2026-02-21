@@ -109,14 +109,14 @@ impl KittyGfxImageStore {
     /// Get or assign an image ID. If the command specifies `i=N`, use that.
     /// Otherwise auto-assign a unique ID starting from 1.
     pub fn resolve_id(&mut self, cmd: &byo::kitty_gfx::KittyGfxCommand) -> u32 {
-        if let Some(id) = cmd.image_id {
-            if id > 0 {
-                // Track the max seen for auto-assign
-                if id >= self.next_auto_id {
-                    self.next_auto_id = id + 1;
-                }
-                return id;
+        if let Some(id) = cmd.image_id
+            && id > 0
+        {
+            // Track the max seen for auto-assign
+            if id >= self.next_auto_id {
+                self.next_auto_id = id + 1;
             }
+            return id;
         }
         // Auto-assign
         if self.next_auto_id == 0 {

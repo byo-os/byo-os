@@ -379,16 +379,16 @@ fn resolve_image<'a>(
     store: &'a KittyGfxImageStore,
 ) -> (u32, Option<&'a KittyGfxImage>) {
     // Try image ID first
-    if let Some(id) = cmd.image_id {
-        if let Some(img) = store.get(id) {
-            return (id, Some(img));
-        }
+    if let Some(id) = cmd.image_id
+        && let Some(img) = store.get(id)
+    {
+        return (id, Some(img));
     }
     // Fall back to image number
-    if let Some(number) = cmd.image_number {
-        if let Some((id, img)) = store.get_by_number(number) {
-            return (id, Some(img));
-        }
+    if let Some(number) = cmd.image_number
+        && let Some((id, img)) = store.get_by_number(number)
+    {
+        return (id, Some(img));
     }
     (cmd.image_id.unwrap_or(0), None)
 }

@@ -491,37 +491,35 @@ impl StdinHandler {
                 let mut em = Emitter::new(&mut self.stdout);
                 em.frame(|em| em.ack(ack_kind, ack_seq, &ack_props))?;
             }
-        } else {
-            if value_changed {
-                // Uncontrolled: update internal state, patch visuals, emit input
-                let state = self.daemon.get_mut(source_qid).unwrap();
-                state.value = Some(snapped);
-                let input_seq = if wants_input {
-                    Some(self.daemon.next_seq("input"))
-                } else {
-                    None
-                };
-
-                let daemon = &self.daemon;
-                let state = daemon.get(source_qid).unwrap();
-                let mut em = Emitter::new(&mut self.stdout);
-                em.frame(|em| {
-                    em.ack(ack_kind, ack_seq, &ack_props)?;
-                    patch_slider_state(em, state)?;
-                    if let Some(seq) = input_seq {
-                        em.event(
-                            "input",
-                            seq,
-                            source_qid,
-                            &[Prop::val("value", snapped.to_string())],
-                        )?;
-                    }
-                    Ok(())
-                })?;
+        } else if value_changed {
+            // Uncontrolled: update internal state, patch visuals, emit input
+            let state = self.daemon.get_mut(source_qid).unwrap();
+            state.value = Some(snapped);
+            let input_seq = if wants_input {
+                Some(self.daemon.next_seq("input"))
             } else {
-                let mut em = Emitter::new(&mut self.stdout);
-                em.frame(|em| em.ack(ack_kind, ack_seq, &ack_props))?;
-            }
+                None
+            };
+
+            let daemon = &self.daemon;
+            let state = daemon.get(source_qid).unwrap();
+            let mut em = Emitter::new(&mut self.stdout);
+            em.frame(|em| {
+                em.ack(ack_kind, ack_seq, &ack_props)?;
+                patch_slider_state(em, state)?;
+                if let Some(seq) = input_seq {
+                    em.event(
+                        "input",
+                        seq,
+                        source_qid,
+                        &[Prop::val("value", snapped.to_string())],
+                    )?;
+                }
+                Ok(())
+            })?;
+        } else {
+            let mut em = Emitter::new(&mut self.stdout);
+            em.frame(|em| em.ack(ack_kind, ack_seq, &ack_props))?;
         }
 
         Ok(())

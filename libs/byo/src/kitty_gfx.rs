@@ -208,7 +208,7 @@ pub fn parse(data: &[u8]) -> Result<KittyGfxCommand, ParseError> {
 
     // Split at first ';' — control is before, payload is after
     let (control, payload) = match data_str.find(';') {
-        Some(pos) => (&data_str[..pos], data_str[pos + 1..].as_bytes()),
+        Some(pos) => (&data_str[..pos], &data_str.as_bytes()[pos + 1..]),
         None => (data_str, &[] as &[u8]),
     };
 
