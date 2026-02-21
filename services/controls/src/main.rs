@@ -11,6 +11,7 @@ mod state;
 use std::collections::HashMap;
 use std::io::{self, Read, Stdout};
 
+use byo::byo_write;
 use byo::emitter::Emitter;
 use byo::parser::parse;
 use byo::protocol::{Command, EventKind, Prop, RequestKind};
@@ -149,8 +150,9 @@ impl StdinHandler {
             None => {
                 info!("  unknown ID {id}, ACK-only");
                 // Unknown ID — ACK and move on
+                let ack_kind = kind.as_str();
                 let mut em = Emitter::new(&mut self.stdout);
-                return em.frame(|em| em.ack(kind.as_str(), seq, &[Prop::val("handled", "true")]));
+                return em.frame(|em| byo_write!(em, !ack {ack_kind} {seq} handled=true));
             }
         };
 
@@ -179,7 +181,7 @@ impl StdinHandler {
             }
             _ => {
                 let mut em = Emitter::new(&mut self.stdout);
-                em.frame(|em| em.ack(ack_kind, seq, &[Prop::val("handled", "true")]))?;
+                em.frame(|em| byo_write!(em, !ack {ack_kind} {seq} handled=true))?;
             }
         }
 
@@ -211,10 +213,10 @@ impl StdinHandler {
         let state = daemon.get(source_qid).unwrap();
         let mut em = Emitter::new(&mut self.stdout);
         em.frame(|em| {
-            em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+            byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
             emit_visual_patch(em, state)?;
             if let Some(seq) = enter_seq {
-                em.event("pointerenter", seq, source_qid, &[])?;
+                byo_write!(em, !pointerenter {seq} {source_qid})?;
             }
             Ok(())
         })
@@ -246,10 +248,10 @@ impl StdinHandler {
         let state = daemon.get(source_qid).unwrap();
         let mut em = Emitter::new(&mut self.stdout);
         em.frame(|em| {
-            em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+            byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
             emit_visual_patch(em, state)?;
             if let Some(seq) = leave_seq {
-                em.event("pointerleave", seq, source_qid, &[])?;
+                byo_write!(em, !pointerleave {seq} {source_qid})?;
             }
             Ok(())
         })
@@ -279,7 +281,7 @@ impl StdinHandler {
             let state = daemon.get(source_qid).unwrap();
             let mut em = Emitter::new(&mut self.stdout);
             em.frame(|em| {
-                em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+                byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
                 emit_visual_patch(em, state)
             })
         }
@@ -307,16 +309,11 @@ impl StdinHandler {
         let state = daemon.get(source_qid).unwrap();
         let mut em = Emitter::new(&mut self.stdout);
         em.frame(|em| {
-            em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+            byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
             emit_visual_patch(em, state)?;
             if let Some(seq) = change_seq {
                 let v = value.unwrap_or(50.0);
-                em.event(
-                    "change",
-                    seq,
-                    source_qid,
-                    &[Prop::val("value", v.to_string())],
-                )?;
+                byo_write!(em, !change {seq} {source_qid} value={v.to_string()})?;
             }
             Ok(())
         })
@@ -356,9 +353,9 @@ impl StdinHandler {
                 };
                 let mut em = Emitter::new(&mut self.stdout);
                 em.frame(|em| {
-                    em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+                    byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
                     if let Some(seq) = press_seq {
-                        em.event("press", seq, source_qid, &[])?;
+                        byo_write!(em, !press {seq} {source_qid})?;
                     }
                     Ok(())
                 })?;
@@ -393,14 +390,9 @@ impl StdinHandler {
         if is_controlled {
             let mut em = Emitter::new(&mut self.stdout);
             em.frame(|em| {
-                em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+                byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
                 if let Some(seq) = change_seq {
-                    em.event(
-                        "change",
-                        seq,
-                        source_qid,
-                        &[Prop::val("checked", new_checked.to_string())],
-                    )?;
+                    byo_write!(em, !change {seq} {source_qid} checked={new_checked.to_string()})?;
                 }
                 Ok(())
             })?;
@@ -413,15 +405,10 @@ impl StdinHandler {
             let state = daemon.get(source_qid).unwrap();
             let mut em = Emitter::new(&mut self.stdout);
             em.frame(|em| {
-                em.ack(ack_kind, ack_seq, &[Prop::val("handled", "true")])?;
+                byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
                 patch_checkbox_state(em, state)?;
                 if let Some(seq) = change_seq {
-                    em.event(
-                        "change",
-                        seq,
-                        source_qid,
-                        &[Prop::val("checked", new_checked.to_string())],
-                    )?;
+                    byo_write!(em, !change {seq} {source_qid} checked={new_checked.to_string()})?;
                 }
                 Ok(())
             })?;
@@ -437,12 +424,6 @@ impl StdinHandler {
         source_qid: &str,
         request_capture: bool,
     ) -> io::Result<()> {
-        let ack_props: Vec<Prop> = if request_capture {
-            vec![Prop::val("handled", "true"), Prop::val("capture", "true")]
-        } else {
-            vec![Prop::val("handled", "true")]
-        };
-
         // x = pointer position relative to the dispatch element (track)
         // width = dispatch element's computed width
         let prop_map = props_to_map(props);
@@ -479,17 +460,20 @@ impl StdinHandler {
                 let input_seq = self.daemon.next_seq("input");
                 let mut em = Emitter::new(&mut self.stdout);
                 em.frame(|em| {
-                    em.ack(ack_kind, ack_seq, &ack_props)?;
-                    em.event(
-                        "input",
-                        input_seq,
-                        source_qid,
-                        &[Prop::val("value", snapped.to_string())],
-                    )
+                    byo_write!(em,
+                        !ack {ack_kind} {ack_seq} handled=true
+                            if request_capture { capture=true }
+                    )?;
+                    byo_write!(em, !input {input_seq} {source_qid} value={snapped.to_string()})
                 })?;
             } else {
                 let mut em = Emitter::new(&mut self.stdout);
-                em.frame(|em| em.ack(ack_kind, ack_seq, &ack_props))?;
+                em.frame(|em| {
+                    byo_write!(em,
+                        !ack {ack_kind} {ack_seq} handled=true
+                            if request_capture { capture=true }
+                    )
+                })?;
             }
         } else if value_changed {
             // Uncontrolled: update internal state, patch visuals, emit input
@@ -505,21 +489,24 @@ impl StdinHandler {
             let state = daemon.get(source_qid).unwrap();
             let mut em = Emitter::new(&mut self.stdout);
             em.frame(|em| {
-                em.ack(ack_kind, ack_seq, &ack_props)?;
+                byo_write!(em,
+                    !ack {ack_kind} {ack_seq} handled=true
+                        if request_capture { capture=true }
+                )?;
                 patch_slider_state(em, state)?;
                 if let Some(seq) = input_seq {
-                    em.event(
-                        "input",
-                        seq,
-                        source_qid,
-                        &[Prop::val("value", snapped.to_string())],
-                    )?;
+                    byo_write!(em, !input {seq} {source_qid} value={snapped.to_string()})?;
                 }
                 Ok(())
             })?;
         } else {
             let mut em = Emitter::new(&mut self.stdout);
-            em.frame(|em| em.ack(ack_kind, ack_seq, &ack_props))?;
+            em.frame(|em| {
+                byo_write!(em,
+                    !ack {ack_kind} {ack_seq} handled=true
+                        if request_capture { capture=true }
+                )
+            })?;
         }
 
         Ok(())
@@ -551,7 +538,7 @@ fn emit_visual_patch<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
 /// Emit an ACK-only frame (no additional response).
 fn ack_only(stdout: &mut Stdout, kind: &str, seq: u64) -> io::Result<()> {
     let mut em = Emitter::new(stdout);
-    em.frame(|em| em.ack(kind, seq, &[Prop::val("handled", "true")]))
+    em.frame(|em| byo_write!(em, !ack {kind} {seq} handled=true))
 }
 
 /// Convert a Prop slice to a HashMap for easy lookup.
@@ -580,7 +567,7 @@ fn main() {
     {
         let mut stdout = io::stdout();
         let mut em = Emitter::new(&mut stdout);
-        em.frame(|em| em.claim_many(&["button", "checkbox", "slider"]))
+        em.frame(|em| byo_write!(em, #claim button, checkbox, slider))
             .expect("failed to claim types");
     }
 

@@ -2,8 +2,8 @@
 
 use std::io;
 
+use byo::byo_write;
 use byo::emitter::Emitter;
-use byo::protocol::Prop;
 
 use crate::state::ControlState;
 
@@ -102,31 +102,23 @@ pub fn expand_button<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
 
     let root_class = button_root_class(state);
 
-    let mut root_props = vec![Prop::val("class", root_class)];
-
-    if !state.disabled {
-        root_props.push(Prop::val(
-            "events",
-            "pointerdown,pointerup,pointerenter,pointerleave,click",
-        ));
-        root_props.push(Prop::val("pointer-events", "auto"));
-    }
-
     let text_color = if state.disabled {
-        // Use alpha modifier for disabled text (e.g. text-white/40)
         format!("{}/40", style.text_color)
     } else {
         style.text_color.to_string()
     };
     let text_class = format!("{text_size} font-medium {text_color}");
 
-    em.upsert_with("view", &format!("{id}-root"), &root_props, |em| {
-        em.upsert(
-            "text",
-            &format!("{id}-label"),
-            &[Prop::val("content", label), Prop::val("class", text_class)],
-        )
-    })
+    byo_write!(em,
+        +view {format!("{id}-root")} class={root_class}
+            if !state.disabled {
+                events="pointerdown,pointerup,pointerenter,pointerleave,click"
+                pointer-events=auto
+            }
+        {
+            +text {format!("{id}-label")} content={label} class={text_class}
+        }
+    )
 }
 
 /// Build the checkbox box class string.
@@ -163,15 +155,6 @@ pub fn expand_checkbox<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) 
         root_class.push_str(" opacity-50");
     }
 
-    let mut root_props = vec![Prop::val("class", root_class)];
-    if !state.disabled {
-        root_props.push(Prop::val(
-            "events",
-            "pointerdown,pointerup,pointerenter,pointerleave,click",
-        ));
-        root_props.push(Prop::val("pointer-events", "auto"));
-    }
-
     let box_class = checkbox_box_class(checked, state.hover, state.disabled);
     let check_content = if checked { "\u{2713}" } else { "" };
 
@@ -186,28 +169,19 @@ pub fn expand_checkbox<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) 
         "text-sm text-white"
     };
 
-    em.upsert_with("view", &format!("{id}-root"), &root_props, |em| {
-        em.upsert_with(
-            "view",
-            &format!("{id}-box"),
-            &[Prop::val("class", box_class)],
-            |em| {
-                em.upsert(
-                    "text",
-                    &format!("{id}-check"),
-                    &[
-                        Prop::val("content", check_content),
-                        Prop::val("class", check_class),
-                    ],
-                )
-            },
-        )?;
-        em.upsert(
-            "text",
-            &format!("{id}-label"),
-            &[Prop::val("content", label), Prop::val("class", label_class)],
-        )
-    })
+    byo_write!(em,
+        +view {format!("{id}-root")} class={root_class}
+            if !state.disabled {
+                events="pointerdown,pointerup,pointerenter,pointerleave,click"
+                pointer-events=auto
+            }
+        {
+            +view {format!("{id}-box")} class={box_class} {
+                +text {format!("{id}-check")} content={check_content} class={check_class}
+            }
+            +text {format!("{id}-label")} content={label} class={label_class}
+        }
+    )
 }
 
 /// Emit the expansion for a slider.
@@ -237,12 +211,6 @@ pub fn expand_slider<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
         "bg-blue-500"
     };
 
-    let mut track_props = vec![Prop::val("class", "h-2 rounded-full bg-zinc-700")];
-    if !state.disabled {
-        track_props.push(Prop::val("events", "pointerdown,pointermove,pointerup"));
-        track_props.push(Prop::val("pointer-events", "auto"));
-    }
-
     let value_display = format_value(value);
 
     let label_class = if state.disabled {
@@ -256,42 +224,23 @@ pub fn expand_slider<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
         "text-sm text-white"
     };
 
-    em.upsert_with(
-        "view",
-        &format!("{id}-root"),
-        &[Prop::val("class", root_class)],
-        |em| {
-            em.upsert_with(
-                "view",
-                &format!("{id}-header"),
-                &[Prop::val("class", "flex justify-between")],
-                |em| {
-                    em.upsert(
-                        "text",
-                        &format!("{id}-label"),
-                        &[Prop::val("content", label), Prop::val("class", label_class)],
-                    )?;
-                    em.upsert(
-                        "text",
-                        &format!("{id}-value"),
-                        &[
-                            Prop::val("content", value_display.as_str()),
-                            Prop::val("class", value_class),
-                        ],
-                    )
-                },
-            )?;
-            em.upsert_with("view", &format!("{id}-track"), &track_props, |em| {
-                em.upsert(
-                    "view",
-                    &format!("{id}-fill"),
-                    &[
-                        Prop::val("class", format!("h-full rounded-full {fill_bg}")),
-                        Prop::val("width", format!("{pct:.1}%")),
-                    ],
-                )
-            })
-        },
+    byo_write!(em,
+        +view {format!("{id}-root")} class={root_class} {
+            +view {format!("{id}-header")} class="flex justify-between" {
+                +text {format!("{id}-label")} content={label} class={label_class}
+                +text {format!("{id}-value")} content={value_display.as_str()} class={value_class}
+            }
+            +view {format!("{id}-track")} class="h-2 rounded-full bg-zinc-700"
+                if !state.disabled {
+                    events="pointerdown,pointermove,pointerup"
+                    pointer-events=auto
+                }
+            {
+                +view {format!("{id}-fill")}
+                    class={format!("h-full rounded-full {fill_bg}")}
+                    width={format!("{pct:.1}%")}
+            }
+        }
     )
 }
 
@@ -311,7 +260,7 @@ pub fn patch_button_state<W: io::Write>(
 ) -> io::Result<()> {
     let id = &state.local_id;
     let class = button_root_class(state);
-    em.patch("view", &format!("{id}-root"), &[Prop::val("class", class)])
+    byo_write!(em, @view {format!("{id}-root")} class={class})
 }
 
 /// Emit a patch for checkbox visual state (hover, checked).
@@ -324,15 +273,9 @@ pub fn patch_checkbox_state<W: io::Write>(
     let box_class = checkbox_box_class(checked, state.hover, state.disabled);
     let check_content = if checked { "\u{2713}" } else { "" };
 
-    em.patch(
-        "view",
-        &format!("{id}-box"),
-        &[Prop::val("class", box_class)],
-    )?;
-    em.patch(
-        "text",
-        &format!("{id}-check"),
-        &[Prop::val("content", check_content)],
+    byo_write!(em,
+        @view {format!("{id}-box")} class={box_class}
+        @text {format!("{id}-check")} content={check_content}
     )
 }
 
@@ -360,18 +303,11 @@ pub fn patch_slider_state<W: io::Write>(
 
     let value_display = format_value(value);
 
-    em.patch(
-        "text",
-        &format!("{id}-value"),
-        &[Prop::val("content", value_display.as_str())],
-    )?;
-    em.patch(
-        "view",
-        &format!("{id}-fill"),
-        &[
-            Prop::val("class", format!("h-full rounded-full {fill_bg}")),
-            Prop::val("width", format!("{pct:.1}%")),
-        ],
+    byo_write!(em,
+        @text {format!("{id}-value")} content={value_display.as_str()}
+        @view {format!("{id}-fill")}
+            class={format!("h-full rounded-full {fill_bg}")}
+            width={format!("{pct:.1}%")}
     )
 }
 
