@@ -67,6 +67,41 @@ impl AnimatableValue {
             _ => None,
         }
     }
+
+    /// Extract the inner f32 from an F32 or any Val variant (except Auto).
+    pub fn inner_f32(&self) -> Option<f32> {
+        match self {
+            AnimatableValue::F32(v) => Some(*v),
+            AnimatableValue::Val(v) => match v {
+                Val::Px(f)
+                | Val::Percent(f)
+                | Val::Vw(f)
+                | Val::Vh(f)
+                | Val::VMin(f)
+                | Val::VMax(f) => Some(*f),
+                Val::Auto => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Produce a new `AnimatableValue` with the same type/variant but a different f32 payload.
+    /// For `F32(x)` → `F32(f)`, for `Val(Percent(x))` → `Val(Percent(f))`, etc.
+    pub fn with_f32(&self, f: f32) -> AnimatableValue {
+        match self {
+            AnimatableValue::F32(_) => AnimatableValue::F32(f),
+            AnimatableValue::Val(v) => AnimatableValue::Val(match v {
+                Val::Px(_) => Val::Px(f),
+                Val::Percent(_) => Val::Percent(f),
+                Val::Vw(_) => Val::Vw(f),
+                Val::Vh(_) => Val::Vh(f),
+                Val::VMin(_) => Val::VMin(f),
+                Val::VMax(_) => Val::VMax(f),
+                Val::Auto => Val::Auto,
+            }),
+            other => other.clone(),
+        }
+    }
 }
 
 /// The internal animation state of a transition.
@@ -83,10 +118,16 @@ pub enum TransitionState {
     },
     /// Velocity-based damped spring (ODE integration per frame).
     /// Supports retargeting: when target changes mid-animation, velocity is preserved.
+    ///
+    /// The ODE integrator operates on raw `f32` (`current`, `velocity`).
+    /// `target` is an `AnimatableValue` that preserves the output type —
+    /// `F32` for raw float properties, `Val(Percent(x))` for percent fields, etc.
+    /// The target's inner f32 is extracted for the ODE; `current_value()` uses
+    /// `target.with_f32(current)` to reconstruct the correctly-typed output.
     PhysicsSpring {
         current: f32,
         velocity: f32,
-        target: f32,
+        target: AnimatableValue,
         stiffness: f32,
         damping: f32,
     },
@@ -114,7 +155,8 @@ impl ActiveTransition {
                 damping,
             } => {
                 // Semi-implicit Euler (symplectic — stable and simple)
-                let accel = -*stiffness * (*current - *target) - *damping * *velocity;
+                let tgt = target.inner_f32().unwrap_or(*current);
+                let accel = -*stiffness * (*current - tgt) - *damping * *velocity;
                 *velocity += accel * delta;
                 *current += *velocity * delta;
             }
@@ -140,7 +182,9 @@ impl ActiveTransition {
                 let eased = easing.sample(progress);
                 from.interpolate(to, eased)
             }
-            TransitionState::PhysicsSpring { current, .. } => AnimatableValue::F32(*current),
+            TransitionState::PhysicsSpring {
+                current, target, ..
+            } => target.with_f32(*current),
         }
     }
 
@@ -148,7 +192,7 @@ impl ActiveTransition {
     pub fn final_value(&self) -> AnimatableValue {
         match &self.state {
             TransitionState::Eased { to, .. } => to.clone(),
-            TransitionState::PhysicsSpring { target, .. } => AnimatableValue::F32(*target),
+            TransitionState::PhysicsSpring { target, .. } => target.clone(),
         }
     }
 
@@ -166,7 +210,10 @@ impl ActiveTransition {
                 velocity,
                 target,
                 ..
-            } => (*current - *target).abs() < 0.001 && velocity.abs() < 0.01,
+            } => {
+                let tgt = target.inner_f32().unwrap_or(*current);
+                (*current - tgt).abs() < 0.001 && velocity.abs() < 0.01
+            }
         }
     }
 }
@@ -320,11 +367,14 @@ pub fn upsert_transition(
 /// If an existing physics spring exists for this prop, only the target is updated
 /// (velocity and current position are preserved — this is the key retargeting behavior).
 /// If an eased transition exists, it is replaced with a new spring.
+///
+/// `target` is an `AnimatableValue` preserving the output type (e.g. `Val(Percent(80.0))`
+/// or `F32(100.0)`). The inner f32 is used for the ODE; the variant is preserved for output.
 pub fn upsert_physics_spring(
     transitions: &mut Vec<ActiveTransition>,
     prop: AnimatableProp,
-    current_bevy: f32,
-    target: f32,
+    current_f32: f32,
+    target: AnimatableValue,
     stiffness: f32,
     damping: f32,
 ) {
@@ -344,7 +394,7 @@ pub fn upsert_physics_spring(
             _ => {
                 // Replace eased transition with new spring
                 existing.state = TransitionState::PhysicsSpring {
-                    current: current_bevy,
+                    current: current_f32,
                     velocity: 0.0,
                     target,
                     stiffness,
@@ -356,7 +406,7 @@ pub fn upsert_physics_spring(
         transitions.push(ActiveTransition {
             prop,
             state: TransitionState::PhysicsSpring {
-                current: current_bevy,
+                current: current_f32,
                 velocity: 0.0,
                 target,
                 stiffness,
@@ -495,7 +545,7 @@ mod tests {
             state: TransitionState::PhysicsSpring {
                 current: 50.0,
                 velocity: 10.0,
-                target: 100.0,
+                target: AnimatableValue::F32(100.0),
                 stiffness: 100.0,
                 damping: 12.0,
             },
@@ -512,7 +562,7 @@ mod tests {
             state: TransitionState::PhysicsSpring {
                 current: 100.0005,
                 velocity: 0.005,
-                target: 100.0,
+                target: AnimatableValue::F32(100.0),
                 stiffness: 100.0,
                 damping: 12.0,
             },
@@ -527,7 +577,7 @@ mod tests {
             state: TransitionState::PhysicsSpring {
                 current: 0.0,
                 velocity: 0.0,
-                target: 100.0,
+                target: AnimatableValue::F32(100.0),
                 stiffness: 100.0,
                 damping: 12.0,
             },
@@ -551,7 +601,7 @@ mod tests {
             &mut transitions,
             AnimatableProp::TranslateX,
             0.0,
-            100.0,
+            AnimatableValue::F32(100.0),
             100.0,
             12.0,
         );
@@ -565,10 +615,12 @@ mod tests {
             velocity: vel_before,
             current: pos_before,
             ..
-        } = transitions[0].state
+        } = &transitions[0].state
         else {
             panic!()
         };
+        let vel_before = *vel_before;
+        let pos_before = *pos_before;
         assert!(
             vel_before.abs() > 0.1,
             "should have velocity, got {vel_before}"
@@ -579,7 +631,7 @@ mod tests {
             &mut transitions,
             AnimatableProp::TranslateX,
             pos_before,
-            200.0,
+            AnimatableValue::F32(200.0),
             100.0,
             12.0,
         );
@@ -588,7 +640,7 @@ mod tests {
         let TransitionState::PhysicsSpring {
             velocity: vel_after,
             current: pos_after,
-            target,
+            ref target,
             ..
         } = transitions[0].state
         else {
@@ -598,7 +650,7 @@ mod tests {
         assert_eq!(vel_after, vel_before);
         assert_eq!(pos_after, pos_before);
         // Target should be updated
-        assert_eq!(target, 200.0);
+        assert_eq!(target.as_f32(), Some(200.0));
     }
 
     #[test]
@@ -608,7 +660,7 @@ mod tests {
             &mut transitions,
             AnimatableProp::TranslateX,
             0.0,
-            100.0,
+            AnimatableValue::F32(100.0),
             100.0,
             12.0,
         );
@@ -616,7 +668,7 @@ mod tests {
         let TransitionState::PhysicsSpring {
             current,
             velocity,
-            target,
+            ref target,
             ..
         } = transitions[0].state
         else {
@@ -624,7 +676,7 @@ mod tests {
         };
         assert_eq!(current, 0.0);
         assert_eq!(velocity, 0.0);
-        assert_eq!(target, 100.0);
+        assert_eq!(target.as_f32(), Some(100.0));
     }
 
     // --- Shadow list interpolation tests ---
@@ -734,7 +786,7 @@ mod tests {
             &mut transitions,
             AnimatableProp::TranslateX,
             25.0,
-            100.0,
+            AnimatableValue::F32(100.0),
             100.0,
             12.0,
         );
@@ -743,5 +795,106 @@ mod tests {
             transitions[0].state,
             TransitionState::PhysicsSpring { .. }
         ));
+    }
+
+    // --- Physics spring Val variant tests ---
+
+    #[test]
+    fn physics_spring_val_percent() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::Width,
+            state: TransitionState::PhysicsSpring {
+                current: 50.0,
+                velocity: 0.0,
+                target: AnimatableValue::Val(Val::Percent(80.0)),
+                stiffness: 100.0,
+                damping: 12.0,
+            },
+        };
+        assert_eq!(t.current_value().as_val(), Some(Val::Percent(50.0)));
+        assert_eq!(t.final_value().as_val(), Some(Val::Percent(80.0)));
+    }
+
+    #[test]
+    fn physics_spring_val_vw() {
+        let t = ActiveTransition {
+            prop: AnimatableProp::Width,
+            state: TransitionState::PhysicsSpring {
+                current: 25.0,
+                velocity: 0.0,
+                target: AnimatableValue::Val(Val::Vw(75.0)),
+                stiffness: 100.0,
+                damping: 12.0,
+            },
+        };
+        assert_eq!(t.current_value().as_val(), Some(Val::Vw(25.0)));
+        assert_eq!(t.final_value().as_val(), Some(Val::Vw(75.0)));
+    }
+
+    #[test]
+    fn physics_spring_retarget_preserves_variant() {
+        let mut transitions = Vec::new();
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::Width,
+            50.0,
+            AnimatableValue::Val(Val::Percent(80.0)),
+            100.0,
+            12.0,
+        );
+        // Simulate ticks
+        for _ in 0..10 {
+            transitions[0].tick(1.0 / 60.0);
+        }
+        // Retarget — target variant is preserved via the new AnimatableValue
+        upsert_physics_spring(
+            &mut transitions,
+            AnimatableProp::Width,
+            60.0,
+            AnimatableValue::Val(Val::Percent(90.0)),
+            100.0,
+            12.0,
+        );
+        // Should still emit Val::Percent
+        assert!(matches!(
+            transitions[0].current_value().as_val(),
+            Some(Val::Percent(_))
+        ));
+        assert_eq!(
+            transitions[0].final_value().as_val(),
+            Some(Val::Percent(90.0))
+        );
+    }
+
+    #[test]
+    fn animatable_value_inner_f32() {
+        assert_eq!(AnimatableValue::F32(42.0).inner_f32(), Some(42.0));
+        assert_eq!(AnimatableValue::Val(Val::Px(10.0)).inner_f32(), Some(10.0));
+        assert_eq!(
+            AnimatableValue::Val(Val::Percent(50.0)).inner_f32(),
+            Some(50.0)
+        );
+        assert_eq!(AnimatableValue::Val(Val::Vw(25.0)).inner_f32(), Some(25.0));
+        assert_eq!(AnimatableValue::Val(Val::Auto).inner_f32(), None);
+        assert_eq!(AnimatableValue::Color(Color::WHITE).inner_f32(), None);
+    }
+
+    #[test]
+    fn animatable_value_with_f32() {
+        let cases: &[(AnimatableValue, Val)] = &[
+            (AnimatableValue::Val(Val::Px(0.0)), Val::Px(99.0)),
+            (AnimatableValue::Val(Val::Percent(0.0)), Val::Percent(99.0)),
+            (AnimatableValue::Val(Val::Vw(0.0)), Val::Vw(99.0)),
+            (AnimatableValue::Val(Val::Vh(0.0)), Val::Vh(99.0)),
+            (AnimatableValue::Val(Val::VMin(0.0)), Val::VMin(99.0)),
+            (AnimatableValue::Val(Val::VMax(0.0)), Val::VMax(99.0)),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(input.with_f32(99.0).as_val(), Some(*expected));
+        }
+        assert_eq!(
+            AnimatableValue::F32(0.0).with_f32(99.0).as_f32(),
+            Some(99.0)
+        );
     }
 }

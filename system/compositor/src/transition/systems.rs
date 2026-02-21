@@ -473,7 +473,7 @@ pub fn handle_view_transitions(
                         ..
                     } => {
                         debug!(
-                            "physics spring started: {:?} from {:.3} to {:.3} (k={}, d={})",
+                            "physics spring started: {:?} from {:.3} to {:?} (k={}, d={})",
                             t.prop, current, target, stiffness, damping
                         );
                     }
@@ -1110,23 +1110,50 @@ fn check_border_radius(
     if (from - to).abs() > 0.01
         && let Some(rule) = config.find_rule(prop)
     {
-        // Physics springs only support f32; border radius uses Val → skip
-        if let TransitionType::Eased {
-            duration_secs,
-            delay_secs,
-            easing,
-        } = &rule.transition_type
-        {
-            upsert_transition(
-                transitions,
-                prop,
-                AnimatableValue::Val(Val::Px(from)),
-                AnimatableValue::Val(Val::Px(to)),
-                *duration_secs,
-                *delay_secs,
-                *easing,
-            );
+        match &rule.transition_type {
+            TransitionType::Eased {
+                duration_secs,
+                delay_secs,
+                easing,
+            } => {
+                upsert_transition(
+                    transitions,
+                    prop,
+                    AnimatableValue::Val(Val::Px(from)),
+                    AnimatableValue::Val(Val::Px(to)),
+                    *duration_secs,
+                    *delay_secs,
+                    *easing,
+                );
+            }
+            TransitionType::PhysicsSpring { stiffness, damping } => {
+                let has_active = transitions.iter().any(|t| t.prop == prop);
+                if has_active || (from - to).abs() > 0.001 {
+                    upsert_physics_spring(
+                        transitions,
+                        prop,
+                        from,
+                        AnimatableValue::Val(Val::Px(to)),
+                        *stiffness,
+                        *damping,
+                    );
+                }
+            }
         }
+    }
+}
+
+/// Extract the inner f32 from two same-variant `Val` values.
+/// Returns `None` if variants differ or either is `Auto`.
+fn extract_val_pair(a: Val, b: Val) -> Option<(f32, f32)> {
+    match (a, b) {
+        (Val::Px(a), Val::Px(b))
+        | (Val::Percent(a), Val::Percent(b))
+        | (Val::Vw(a), Val::Vw(b))
+        | (Val::Vh(a), Val::Vh(b))
+        | (Val::VMin(a), Val::VMin(b))
+        | (Val::VMax(a), Val::VMax(b)) => Some((a, b)),
+        _ => None,
     }
 }
 
@@ -1159,13 +1186,17 @@ fn check_val(
                 );
             }
             TransitionType::PhysicsSpring { stiffness, damping } => {
-                // Physics springs store/emit raw f32 and the tick writes it back
-                // as Val::Px — so only Px↔Px is correct. Supporting other variants
-                // would require storing the Val variant in PhysicsSpring state.
-                if let (Val::Px(cur), Val::Px(tgt)) = (current, target) {
+                if let Some((cur_f, _)) = extract_val_pair(current, target) {
                     let has_active = transitions.iter().any(|t| t.prop == prop);
-                    if has_active || (cur - tgt).abs() > 0.001 {
-                        upsert_physics_spring(transitions, prop, cur, tgt, *stiffness, *damping);
+                    if has_active || !val_approx_eq(current, target) {
+                        upsert_physics_spring(
+                            transitions,
+                            prop,
+                            cur_f,
+                            AnimatableValue::Val(target),
+                            *stiffness,
+                            *damping,
+                        );
                     }
                 }
             }
@@ -1196,22 +1227,37 @@ fn check_val_clamped(
         if !val_approx_eq(clamped_from, clamped_to)
             && let Some(rule) = config.find_rule(prop)
         {
-            // Physics springs only support f32; Val properties use eased transitions only
-            if let TransitionType::Eased {
-                duration_secs,
-                delay_secs,
-                easing,
-            } = &rule.transition_type
-            {
-                upsert_transition(
-                    transitions,
-                    prop,
-                    AnimatableValue::Val(clamped_from),
-                    AnimatableValue::Val(clamped_to),
-                    *duration_secs,
-                    *delay_secs,
-                    *easing,
-                );
+            match &rule.transition_type {
+                TransitionType::Eased {
+                    duration_secs,
+                    delay_secs,
+                    easing,
+                } => {
+                    upsert_transition(
+                        transitions,
+                        prop,
+                        AnimatableValue::Val(clamped_from),
+                        AnimatableValue::Val(clamped_to),
+                        *duration_secs,
+                        *delay_secs,
+                        *easing,
+                    );
+                }
+                TransitionType::PhysicsSpring { stiffness, damping } => {
+                    if let Some((cur_f, _)) = extract_val_pair(clamped_from, clamped_to) {
+                        let has_active = transitions.iter().any(|t| t.prop == prop);
+                        if has_active || !val_approx_eq(clamped_from, clamped_to) {
+                            upsert_physics_spring(
+                                transitions,
+                                prop,
+                                cur_f,
+                                AnimatableValue::Val(clamped_to),
+                                *stiffness,
+                                *damping,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1284,7 +1330,14 @@ fn check_f32(
             TransitionType::PhysicsSpring { stiffness, damping } => {
                 let has_active = transitions.iter().any(|t| t.prop == prop);
                 if has_active || (current - target).abs() > 0.001 {
-                    upsert_physics_spring(transitions, prop, current, target, *stiffness, *damping);
+                    upsert_physics_spring(
+                        transitions,
+                        prop,
+                        current,
+                        AnimatableValue::F32(target),
+                        *stiffness,
+                        *damping,
+                    );
                 }
             }
         }
@@ -1848,7 +1901,7 @@ pub fn handle_tty_transitions(
                         ..
                     } => {
                         debug!(
-                            "tty physics spring started: {:?} from {:.3} to {:.3} (k={}, d={})",
+                            "tty physics spring started: {:?} from {:.3} to {:?} (k={}, d={})",
                             t.prop, current, target, stiffness, damping
                         );
                     }
