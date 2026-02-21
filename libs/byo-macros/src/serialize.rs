@@ -190,6 +190,9 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
         IrCommand::ForLoop { .. } => {
             return Err("byo_str!/byo_assert_eq! does not support `for` loops".to_string());
         }
+        IrCommand::Match { .. } => {
+            return Err("byo_str!/byo_assert_eq! does not support `match` expressions".to_string());
+        }
     }
     Ok(())
 }

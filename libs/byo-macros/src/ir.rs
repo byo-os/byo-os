@@ -92,4 +92,15 @@ pub enum IrCommand {
         iter: TokenStream,
         body: Vec<IrCommand>,
     },
+    /// `match expr { pat => { cmds... }, ... }`
+    Match {
+        expr: TokenStream,
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// A single arm in a `match` expression.
+pub struct MatchArm {
+    pub pattern: TokenStream,
+    pub body: Vec<IrCommand>,
 }

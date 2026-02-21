@@ -163,6 +163,21 @@ impl Codegen {
                     }
                 }
             }
+            IrCommand::Match { expr, arms } => {
+                let arm_code: Vec<TokenStream> = arms
+                    .iter()
+                    .map(|arm| {
+                        let pat = &arm.pattern;
+                        let body = self.gen_commands(&arm.body, em_ident);
+                        quote! { #pat => { #body } }
+                    })
+                    .collect();
+                quote! {
+                    match #expr {
+                        #(#arm_code)*
+                    }
+                }
+            }
         }
     }
 

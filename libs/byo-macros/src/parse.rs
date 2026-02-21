@@ -21,7 +21,7 @@
 
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
-use crate::ir::{IrCommand, IrProp, IrValue};
+use crate::ir::{IrCommand, IrProp, IrValue, MatchArm};
 
 /// Check if two tokens are adjacent (no whitespace between them) by
 /// comparing their span positions. Only meaningful when `real_spans` is true.
@@ -171,7 +171,7 @@ impl Parser {
                     Some(TokenTree::Punct(p)) => {
                         matches!(p.as_char(), '+' | '-' | '@' | '!' | '#' | '?' | '.')
                     }
-                    Some(TokenTree::Ident(id)) => id == "if" || id == "for",
+                    Some(TokenTree::Ident(id)) => id == "if" || id == "for" || id == "match",
                     _ => false,
                 };
             }
@@ -341,8 +341,8 @@ impl Parser {
                 break;
             }
 
-            // `for` in command position — not a prop
-            if self.peek_keyword("for") {
+            // `for`/`match` in command position — not a prop
+            if self.peek_keyword("for") || self.peek_keyword("match") {
                 break;
             }
 
@@ -496,6 +496,48 @@ impl Parser {
         Ok(collected.into_iter().collect())
     }
 
+    /// Collect tokens for a match arm pattern: everything until `=>`.
+    fn collect_until_fat_arrow(&mut self) -> Result<TokenStream, String> {
+        let mut collected = Vec::new();
+        loop {
+            // Look for `=` immediately followed by `>`
+            if self.peek_punct('=')
+                && self.pos + 1 < self.tokens.len()
+                && matches!(&self.tokens[self.pos + 1], TokenTree::Punct(p) if p.as_char() == '>')
+            {
+                self.pos += 2; // consume `=>`
+                break;
+            }
+            match self.next() {
+                Some(tt) => collected.push(tt),
+                None => return Err("unexpected end of input, expected `=>`".to_string()),
+            }
+        }
+        if collected.is_empty() {
+            return Err("expected pattern before `=>`".to_string());
+        }
+        Ok(collected.into_iter().collect())
+    }
+
+    /// Parse the arms inside a `match` brace block.
+    fn parse_match_arms(&mut self) -> Result<Vec<MatchArm>, String> {
+        match self.next() {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                let mut inner = Parser::new(g.stream(), self.real_spans);
+                let mut arms = Vec::new();
+                while !inner.is_empty() {
+                    let pattern = inner.collect_until_fat_arrow()?;
+                    let body = inner.parse_command_block()?;
+                    // Eat optional trailing comma
+                    inner.eat_punct(',');
+                    arms.push(MatchArm { pattern, body });
+                }
+                Ok(arms)
+            }
+            other => Err(format!("expected {{ match arms }}, found {:?}", other)),
+        }
+    }
+
     /// Expect and consume an ident, returning its string value.
     fn expect_ident(&mut self, msg: &str) -> Result<String, String> {
         match self.next() {
@@ -535,6 +577,13 @@ impl Parser {
             let iter = self.collect_until_brace()?;
             let body = self.parse_command_block()?;
             return Ok(IrCommand::ForLoop { pat, iter, body });
+        }
+
+        // `match` — pattern matching
+        if self.eat_keyword("match") {
+            let expr = self.collect_until_brace()?;
+            let arms = self.parse_match_arms()?;
+            return Ok(IrCommand::Match { expr, arms });
         }
 
         // `+` — upsert
@@ -591,7 +640,7 @@ impl Parser {
         }
 
         Err(format!(
-            "expected command (+, -, @, !, #, ?, ., if, for), found {:?}",
+            "expected command (+, -, @, !, #, ?, ., if, for, match), found {:?}",
             self.peek()
         ))
     }
@@ -1333,6 +1382,65 @@ mod tests {
                 );
             }
             _ => panic!("expected Event"),
+        }
+    }
+
+    #[test]
+    fn parse_match_basic() {
+        let cmds = parse_str(
+            r#"
+            match kind {
+                "button" => {
+                    +view root class="btn"
+                }
+                "checkbox" => {
+                    +view root class="chk"
+                }
+                _ => {
+                    +view root class="unknown"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Match { arms, .. } => {
+                assert_eq!(arms.len(), 3);
+                assert_eq!(arms[0].body.len(), 1);
+                assert_eq!(arms[1].body.len(), 1);
+                assert_eq!(arms[2].body.len(), 1);
+            }
+            _ => panic!("expected Match"),
+        }
+    }
+
+    #[test]
+    fn parse_match_nested() {
+        let cmds = parse_str(
+            r#"
+            +view root {
+                match kind {
+                    "a" => {
+                        +view child_a
+                    }
+                    _ => {
+                        +view child_b
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Upsert {
+                children: Some(ch), ..
+            } => {
+                assert_eq!(ch.len(), 1);
+                assert!(matches!(&ch[0], IrCommand::Match { arms, .. } if arms.len() == 2));
+            }
+            _ => panic!("expected Upsert with Match child"),
         }
     }
 
