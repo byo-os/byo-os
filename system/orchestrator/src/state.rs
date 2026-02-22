@@ -189,15 +189,22 @@ fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
         return;
     };
     match &obj.kind {
-        ObjectKind::Slot => {
-            let id = obj.id.to_string();
+        ObjectKind::SlotContent => {
+            // Slot QIDs use `parent{name` format (e.g. `app:d{header`).
+            // Extract the bare slot name after `{` for the wire.
+            let local = obj.id.local_id();
+            let slot_name = local.rfind('{').map(|i| &local[i + 1..]).unwrap_or(local);
             let mut em = Emitter::new(&mut *buf);
-            let _ = em.slot_push(&id);
+            let _ = em.slot_push(slot_name);
             for child_id in &obj.children {
                 write_child_node(tree, child_id, buf);
             }
             let mut em = Emitter::new(&mut *buf);
             let _ = em.pop();
+        }
+        ObjectKind::Slot => {
+            // Expansion-side slot placeholder — skip during serialization.
+            // Content comes from the linked SlotContent node via slot_ref.
         }
         ObjectKind::Type(kind) => {
             let id = obj.id.to_string();
@@ -454,19 +461,38 @@ mod tests {
     }
 
     #[test]
-    fn write_reduced_upsert_slot_skipped() {
+    fn write_reduced_upsert_slot_content_skipped() {
         use byo::tree::ObjectKind;
         let mut tree = ObjectTree::new();
         tree.upsert(
-            ObjectKind::Slot,
-            &qid("app", "header"),
+            ObjectKind::SlotContent,
+            &qid("app", "d{header"),
             &IndexMap::new(),
             pid(1),
         );
         let mut buf = Vec::new();
         assert!(!write_reduced_upsert(
             &tree,
-            &qid("app", "header"),
+            &qid("app", "d{header"),
+            &mut buf
+        ));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn write_reduced_upsert_slot_skipped() {
+        use byo::tree::ObjectKind;
+        let mut tree = ObjectTree::new();
+        tree.upsert(
+            ObjectKind::Slot,
+            &qid("controls", "hdr-wrap{header"),
+            &IndexMap::new(),
+            pid(2),
+        );
+        let mut buf = Vec::new();
+        assert!(!write_reduced_upsert(
+            &tree,
+            &qid("controls", "hdr-wrap{header"),
             &mut buf
         ));
         assert!(buf.is_empty());
@@ -500,14 +526,14 @@ mod tests {
             pid(1),
         );
 
-        // Slot node for "header"
+        // SlotContent node for "header" — QID: app:dialog{header
         tree.upsert(
-            ObjectKind::Slot,
-            &qid("app", "header"),
+            ObjectKind::SlotContent,
+            &qid("app", "dialog{header"),
             &IndexMap::new(),
             pid(1),
         );
-        tree.set_parent(&qid("app", "header"), &qid("app", "dialog"));
+        tree.set_parent(&qid("app", "dialog{header"), &qid("app", "dialog"));
 
         // Child inside the header slot
         tree.upsert(
@@ -516,23 +542,31 @@ mod tests {
             &props(&[("content", "Hello")]),
             pid(1),
         );
-        tree.set_parent(&qid("app", "title"), &qid("app", "header"));
+        tree.set_parent(&qid("app", "title"), &qid("app", "dialog{header"));
 
-        // Slot node for default "_"
-        tree.upsert(ObjectKind::Slot, &qid("app", "_"), &IndexMap::new(), pid(1));
-        tree.set_parent(&qid("app", "_"), &qid("app", "dialog"));
+        // SlotContent node for default "_" — QID: app:dialog{_
+        tree.upsert(
+            ObjectKind::SlotContent,
+            &qid("app", "dialog{_"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "dialog{_"), &qid("app", "dialog"));
 
         // Child inside default slot
         tree.upsert("view".into(), &qid("app", "body"), &IndexMap::new(), pid(1));
-        tree.set_parent(&qid("app", "body"), &qid("app", "_"));
+        tree.set_parent(&qid("app", "body"), &qid("app", "dialog{_"));
 
         let mut buf = Vec::new();
         assert!(write_children(&tree, &qid("app", "dialog"), &mut buf));
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("{app:header"));
-        assert!(s.contains("+text app:title content=Hello"));
-        assert!(s.contains("{app:_"));
-        assert!(s.contains("+view app:body"));
+        assert!(s.contains("{header"), "expected {{header in: {s}");
+        assert!(
+            s.contains("+text app:title content=Hello"),
+            "expected title in: {s}"
+        );
+        assert!(s.contains("{_"), "expected {{_ in: {s}");
+        assert!(s.contains("+view app:body"), "expected body in: {s}");
     }
 
     #[test]

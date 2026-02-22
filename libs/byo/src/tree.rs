@@ -18,7 +18,11 @@ use crate::protocol::{Command, Prop};
 pub enum ObjectKind {
     /// A regular BYO object type (e.g. "view", "text", "button").
     Type(String),
-    /// A slot node — orchestrator-internal, stores projected children.
+    /// App-side slot: groups projected content for a named slot.
+    /// Analogous to light DOM children with `slot="name"` in Web Components.
+    SlotContent,
+    /// Expansion-side slot: placeholder in a daemon's expansion template.
+    /// Analogous to `<slot name="name">` in Web Components.
     Slot,
 }
 
@@ -28,11 +32,11 @@ impl ObjectKind {
         matches!(self, ObjectKind::Type(_))
     }
 
-    /// Returns the type name if this is `Type`, or `None` for `Slot`.
+    /// Returns the type name if this is `Type`, or `None` for slots.
     pub fn as_type(&self) -> Option<&str> {
         match self {
             ObjectKind::Type(s) => Some(s),
-            ObjectKind::Slot => None,
+            ObjectKind::SlotContent | ObjectKind::Slot => None,
         }
     }
 }
@@ -41,6 +45,7 @@ impl std::fmt::Display for ObjectKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ObjectKind::Type(k) => f.write_str(k),
+            ObjectKind::SlotContent => f.write_str("_slot_content"),
             ObjectKind::Slot => f.write_str("_slot"),
         }
     }
@@ -74,6 +79,10 @@ pub struct ObjectState<K = String, D = ()> {
     pub children: Vec<K>,
     pub parent: Option<K>,
     pub data: D,
+    /// Cross-reference for slot nodes:
+    /// - `SlotContent` → points to the corresponding `Slot` (expansion-side)
+    /// - `Slot` → points to the corresponding `SlotContent` (app-side)
+    pub slot_ref: Option<K>,
 }
 
 /// A tree of objects with parent-child relationships.
@@ -119,6 +128,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
                     children: Vec::new(),
                     parent: None,
                     data,
+                    slot_ref: None,
                 },
             );
         }
@@ -190,6 +200,13 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
     /// Returns `true` if the object has children.
     pub fn has_children(&self, id: &K) -> bool {
         self.objects.get(id).is_some_and(|o| !o.children.is_empty())
+    }
+
+    /// Set the slot cross-reference between a `SlotContent` and a `Slot` node.
+    pub fn set_slot_ref(&mut self, id: &K, target: &K) {
+        if let Some(obj) = self.objects.get_mut(id) {
+            obj.slot_ref = Some(target.clone());
+        }
     }
 
     /// Get all objects of a given type.
@@ -277,7 +294,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
         let mut current = obj.parent.clone()?;
         loop {
             let ancestor = self.objects.get(&current)?;
-            if let ObjectKind::Type(kind) = &ancestor.kind
+            if let Some(kind) = ancestor.kind.as_type()
                 && predicate(kind)
             {
                 return Some(current);
@@ -326,10 +343,10 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
                 }
                 Command::Push { slot } => {
                     if let Some(name) = slot {
-                        // Slot push — create a slot node.
+                        // Slot push — create a slot content node.
                         let key = make_key(name);
-                        let data = make_data("_slot", name);
-                        self.upsert(ObjectKind::Slot, &key, &IndexMap::new(), data);
+                        let data = make_data("_slot_content", name);
+                        self.upsert(ObjectKind::SlotContent, &key, &IndexMap::new(), data);
                         if let Some(parent) = parent_stack.last() {
                             self.set_parent(&key, parent);
                         }
@@ -860,7 +877,7 @@ mod tests {
         assert_eq!(dialog.children, vec![key("header")]);
 
         let header = tree.get(&key("header")).unwrap();
-        assert_eq!(header.kind, ObjectKind::Slot);
+        assert_eq!(header.kind, ObjectKind::SlotContent);
         assert_eq!(header.parent, Some(key("dialog")));
         assert_eq!(header.children, vec![key("title")]);
 

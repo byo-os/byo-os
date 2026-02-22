@@ -413,10 +413,16 @@ impl Router {
                 }
                 Command::Push { slot } => {
                     if let Some(name) = slot {
-                        // Slot push — create a slot node in the state tree.
-                        let slot_qid = QualifiedId::new(client, name);
-                        self.state
-                            .upsert(ObjectKind::Slot, &slot_qid, &IndexMap::new(), owner);
+                        // Slot push — create a SlotContent node in the state tree.
+                        // QID format: client:parent{name (e.g. app:d{header).
+                        let parent_local = last_qid.as_ref().map(|q| q.local_id()).unwrap_or("");
+                        let slot_qid = QualifiedId::new(client, &format!("{parent_local}{{{name}"));
+                        self.state.upsert(
+                            ObjectKind::SlotContent,
+                            &slot_qid,
+                            &IndexMap::new(),
+                            owner,
+                        );
                         if let Some(parent) = parent_stack.last() {
                             self.state.set_parent(&slot_qid, parent);
                         }
@@ -1246,13 +1252,14 @@ impl Router {
                     }
                     Command::Push { slot } => {
                         if let Some(name) = slot {
-                            // Slot push — create a slot node in the state tree.
-                            let slot_qid = if name.contains(':') {
-                                QualifiedId::parse(name)
-                                    .unwrap_or_else(|| QualifiedId::new("", name))
-                            } else {
-                                QualifiedId::new("", name)
-                            };
+                            // Expansion-side Slot node in the state tree.
+                            // QID format: client:parent_local{name.
+                            let (parent_client, parent_local) = last_qid
+                                .as_ref()
+                                .map(|q| (q.client().to_owned(), q.local_id().to_owned()))
+                                .unwrap_or_default();
+                            let slot_local = format!("{parent_local}{{{name}");
+                            let slot_qid = QualifiedId::new(&parent_client, &slot_local);
                             self.state.upsert(
                                 ObjectKind::Slot,
                                 &slot_qid,
@@ -1390,12 +1397,14 @@ impl Router {
                 }
                 Command::Push { slot } => {
                     if let Some(name) = slot {
-                        // Slot push — create/update slot node in state tree.
-                        let slot_qid = if name.contains(':') {
-                            QualifiedId::parse(name).unwrap_or_else(|| QualifiedId::new("", name))
-                        } else {
-                            QualifiedId::new("", name)
-                        };
+                        // Expansion-side Slot node in state tree.
+                        // QID format: client:parent_local{name.
+                        let (parent_client, parent_local) = last_qid
+                            .as_ref()
+                            .map(|q| (q.client().to_owned(), q.local_id().to_owned()))
+                            .unwrap_or_default();
+                        let slot_local = format!("{parent_local}{{{name}");
+                        let slot_qid = QualifiedId::new(&parent_client, &slot_local);
                         seen_qids.insert(slot_qid.clone());
                         self.state.upsert(
                             ObjectKind::Slot,
