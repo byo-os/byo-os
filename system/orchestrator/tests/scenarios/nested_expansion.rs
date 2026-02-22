@@ -136,7 +136,7 @@ async fn two_daemon_a_to_b() {
         ),
         "expected +view controls:save-root, got: {s}"
     );
-    assert!(matches!(&cmds[1], Command::Push));
+    assert!(matches!(&cmds[1], Command::Push { .. }));
     assert!(
         matches!(
             &cmds[2],
@@ -256,12 +256,12 @@ async fn three_daemon_a_to_b_to_c() {
         matches!(&cmds[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "daemona:wa"),
         "expected +view daemona:wa, got: {s}"
     );
-    assert!(matches!(&cmds[1], Command::Push));
+    assert!(matches!(&cmds[1], Command::Push { .. }));
     assert!(
         matches!(&cmds[2], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "daemonb:wb"),
         "expected +view daemonb:wb, got: {s}"
     );
-    assert!(matches!(&cmds[3], Command::Push));
+    assert!(matches!(&cmds[3], Command::Push { .. }));
     assert!(
         matches!(&cmds[4], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "daemonc:wc"),
         "expected +view daemonc:wc, got: {s}"
@@ -469,7 +469,7 @@ async fn self_referential_a_to_a() {
         matches!(&cmds[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "daemona:outer"),
         "expected +view daemona:outer, got: {s}"
     );
-    assert!(matches!(&cmds[1], Command::Push));
+    assert!(matches!(&cmds[1], Command::Push { .. }));
     assert!(
         matches!(&cmds[2], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "daemona:inner"),
         "expected +view daemona:inner, got: {s}"

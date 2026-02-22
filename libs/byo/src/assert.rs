@@ -119,7 +119,8 @@ fn cmd_eq_unordered(a: &Command, b: &Command) -> bool {
             ka == kb && ia == ib
         }
 
-        (Command::Push, Command::Push) | (Command::Pop, Command::Pop) => true,
+        (Command::Push { slot: a }, Command::Push { slot: b }) => a == b,
+        (Command::Pop, Command::Pop) => true,
 
         (
             Command::Patch {

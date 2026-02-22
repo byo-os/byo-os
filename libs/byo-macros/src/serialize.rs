@@ -193,6 +193,17 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
         IrCommand::Match { .. } => {
             return Err("byo_str!/byo_assert_eq! does not support `match` expressions".to_string());
         }
+        IrCommand::SlotBlock { name, children } => {
+            out.push('\n');
+            out.push_str(indent);
+            out.push('{');
+            out.push_str(&expect_literal(name, "slot name")?);
+            let child_indent = format!("{indent}  ");
+            serialize_commands_into(children, out, &child_indent)?;
+            out.push('\n');
+            out.push_str(indent);
+            out.push('}');
+        }
     }
     Ok(())
 }

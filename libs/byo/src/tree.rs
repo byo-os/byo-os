@@ -8,12 +8,55 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::io::Write;
 
 use indexmap::IndexMap;
 
-use crate::emitter::write_value;
 use crate::protocol::{Command, Prop};
+
+/// The kind of an object in the tree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectKind {
+    /// A regular BYO object type (e.g. "view", "text", "button").
+    Type(String),
+    /// A slot node — orchestrator-internal, stores projected children.
+    Slot,
+}
+
+impl ObjectKind {
+    /// Returns `true` if this is a regular type (not a slot).
+    pub fn is_type(&self) -> bool {
+        matches!(self, ObjectKind::Type(_))
+    }
+
+    /// Returns the type name if this is `Type`, or `None` for `Slot`.
+    pub fn as_type(&self) -> Option<&str> {
+        match self {
+            ObjectKind::Type(s) => Some(s),
+            ObjectKind::Slot => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ObjectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObjectKind::Type(k) => f.write_str(k),
+            ObjectKind::Slot => f.write_str("_slot"),
+        }
+    }
+}
+
+impl From<&str> for ObjectKind {
+    fn from(s: &str) -> Self {
+        ObjectKind::Type(s.to_string())
+    }
+}
+
+impl From<String> for ObjectKind {
+    fn from(s: String) -> Self {
+        ObjectKind::Type(s)
+    }
+}
 
 /// A stored property value (reduced from [`Prop`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +68,7 @@ pub enum PropValue {
 /// A single object in the tree.
 #[derive(Debug, Clone)]
 pub struct ObjectState<K = String, D = ()> {
-    pub kind: String,
+    pub kind: ObjectKind,
     pub id: K,
     pub props: IndexMap<String, PropValue>,
     pub children: Vec<K>,
@@ -55,16 +98,22 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
 
     /// Upsert (full replace) an object. Replaces all props with the given set.
     /// Preserves children and parent relationships.
-    pub fn upsert(&mut self, kind: &str, id: &K, props: &IndexMap<String, PropValue>, data: D) {
+    pub fn upsert(
+        &mut self,
+        kind: ObjectKind,
+        id: &K,
+        props: &IndexMap<String, PropValue>,
+        data: D,
+    ) {
         if let Some(existing) = self.objects.get_mut(id) {
-            existing.kind = kind.to_owned();
+            existing.kind = kind;
             existing.props = props.clone();
             existing.data = data;
         } else {
             self.objects.insert(
                 id.clone(),
                 ObjectState {
-                    kind: kind.to_owned(),
+                    kind,
                     id: id.clone(),
                     props: props.clone(),
                     children: Vec::new(),
@@ -138,9 +187,17 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
         self.objects.get(id)
     }
 
+    /// Returns `true` if the object has children.
+    pub fn has_children(&self, id: &K) -> bool {
+        self.objects.get(id).is_some_and(|o| !o.children.is_empty())
+    }
+
     /// Get all objects of a given type.
     pub fn objects_of_type(&self, kind: &str) -> Vec<&ObjectState<K, D>> {
-        self.objects.values().filter(|o| o.kind == kind).collect()
+        self.objects
+            .values()
+            .filter(|o| matches!(&o.kind, ObjectKind::Type(k) if k == kind))
+            .collect()
     }
 
     /// Get all root-level IDs (objects with no parent).
@@ -167,66 +224,11 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
         self.objects.is_empty()
     }
 
-    /// Emit the reduced state of an object as wire-format bytes.
-    ///
-    /// Produces `+kind id props...` as a byte string suitable for
-    /// re-emission via the emitter.
-    pub fn reduced_command(&self, id: &K) -> Option<Vec<u8>> {
-        let mut buf = Vec::new();
-        if self.write_reduced_command(id, &mut buf) {
-            Some(buf)
-        } else {
-            None
-        }
-    }
-
-    /// Append the reduced state of an object to `buf`.
-    ///
-    /// Writes `+kind id props...` into the provided buffer. Returns `true`
-    /// if the object was found and written, `false` if not found.
-    /// The caller can reuse the buffer across calls with `buf.clear()`.
-    pub fn write_reduced_command(&self, id: &K, buf: &mut Vec<u8>) -> bool {
-        let Some(obj) = self.objects.get(id) else {
-            return false;
-        };
-        write!(buf, "+{} {}", obj.kind, obj.id).unwrap();
-        Self::write_props_to(buf, &obj.props);
-        true
-    }
-
-    /// Append `kind={kind} props...` for the object to `buf`.
-    ///
-    /// Writes the type and all props as key=value pairs, suitable for
-    /// appending after a `?expand {seq} {qid}` prefix. Returns `true`
-    /// if the object was found and written.
-    pub fn write_reduced_expand_props(&self, id: &K, buf: &mut Vec<u8>) -> bool {
-        let Some(obj) = self.objects.get(id) else {
-            return false;
-        };
-        write!(buf, " kind={}", obj.kind).unwrap();
-        Self::write_props_to(buf, &obj.props);
-        true
-    }
-
-    fn write_props_to(buf: &mut Vec<u8>, props: &IndexMap<String, PropValue>) {
-        for (key, value) in props {
-            match value {
-                PropValue::Str(s) => {
-                    write!(buf, " {key}=").unwrap();
-                    write_value(buf, s).unwrap();
-                }
-                PropValue::Flag => {
-                    write!(buf, " {key}").unwrap();
-                }
-            }
-        }
-    }
-
     /// Collect info about all descendants (depth-first).
     ///
     /// Returns `(id, kind, data)` tuples for each descendant,
     /// useful for notification before a destroy cascades.
-    pub fn descendants_info(&self, id: &K) -> Vec<(K, String, D)> {
+    pub fn descendants_info(&self, id: &K) -> Vec<(K, ObjectKind, D)> {
         let mut result = Vec::new();
         if let Some(obj) = self.objects.get(id) {
             for child in &obj.children {
@@ -269,13 +271,15 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
     }
 
     /// Walk up parent links to find the nearest ancestor whose type matches
-    /// a predicate.
+    /// a predicate. The predicate receives the type name (slot nodes are skipped).
     pub fn nearest_ancestor_where(&self, id: &K, predicate: impl Fn(&str) -> bool) -> Option<K> {
         let obj = self.objects.get(id)?;
         let mut current = obj.parent.clone()?;
         loop {
             let ancestor = self.objects.get(&current)?;
-            if predicate(&ancestor.kind) {
+            if let ObjectKind::Type(kind) = &ancestor.kind
+                && predicate(kind)
+            {
                 return Some(current);
             }
             current = ancestor.parent.clone()?;
@@ -307,7 +311,7 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
                     let key = make_key(id);
                     let map = props_to_map(props);
                     let data = make_data(kind, id);
-                    self.upsert(kind, &key, &map, data);
+                    self.upsert(ObjectKind::Type(kind.to_string()), &key, &map, data);
                     if let Some(parent) = parent_stack.last() {
                         self.set_parent(&key, parent);
                     }
@@ -320,8 +324,18 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
                     let key = make_key(id);
                     self.destroy(&key);
                 }
-                Command::Push => {
-                    if let Some(ref key) = last_key {
+                Command::Push { slot } => {
+                    if let Some(name) = slot {
+                        // Slot push — create a slot node.
+                        let key = make_key(name);
+                        let data = make_data("_slot", name);
+                        self.upsert(ObjectKind::Slot, &key, &IndexMap::new(), data);
+                        if let Some(parent) = parent_stack.last() {
+                            self.set_parent(&key, parent);
+                        }
+                        parent_stack.push(key.clone());
+                        last_key = Some(key);
+                    } else if let Some(ref key) = last_key {
                         parent_stack.push(key.clone());
                     }
                 }
@@ -399,7 +413,6 @@ pub fn props_to_patch(props: &[Prop]) -> (IndexMap<String, PropValue>, Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assert::assert_eq_bytes;
 
     fn props(pairs: &[(&str, &str)]) -> IndexMap<String, PropValue> {
         let mut m = IndexMap::new();
@@ -429,10 +442,10 @@ mod tests {
         let mut tree = TestTree::new();
         let id = key("sidebar");
         let p = props(&[("class", "w-64")]);
-        tree.upsert("view", &id, &p, 1);
+        tree.upsert("view".into(), &id, &p, 1);
 
         let obj = tree.get(&id).unwrap();
-        assert_eq!(obj.kind, "view");
+        assert_eq!(obj.kind, ObjectKind::Type("view".into()));
         assert_eq!(obj.props.len(), 1);
         assert_eq!(obj.props["class"], PropValue::Str("w-64".into()));
     }
@@ -442,8 +455,13 @@ mod tests {
         let mut tree = TestTree::new();
         let id = key("sidebar");
 
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), 1);
-        tree.upsert("view", &id, &props(&[("class", "w-32")]), 1);
+        tree.upsert(
+            "view".into(),
+            &id,
+            &props(&[("class", "w-64"), ("order", "0")]),
+            1,
+        );
+        tree.upsert("view".into(), &id, &props(&[("class", "w-32")]), 1);
 
         let obj = tree.get(&id).unwrap();
         assert_eq!(obj.props.len(), 1);
@@ -457,12 +475,12 @@ mod tests {
         let parent = key("root");
         let child = key("child");
 
-        tree.upsert("view", &parent, &IndexMap::new(), 1);
-        tree.upsert("view", &child, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &parent, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child, &IndexMap::new(), 1);
         tree.set_parent(&child, &parent);
 
         // Re-upsert parent — children should be preserved.
-        tree.upsert("view", &parent, &props(&[("class", "new")]), 1);
+        tree.upsert("view".into(), &parent, &props(&[("class", "new")]), 1);
         let obj = tree.get(&parent).unwrap();
         assert_eq!(obj.children.len(), 1);
         assert_eq!(obj.children[0], child);
@@ -473,7 +491,12 @@ mod tests {
         let mut tree = TestTree::new();
         let id = key("sidebar");
 
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), 1);
+        tree.upsert(
+            "view".into(),
+            &id,
+            &props(&[("class", "w-64"), ("order", "0")]),
+            1,
+        );
         tree.patch(&id, &props(&[("order", "1")]), &[]);
 
         let obj = tree.get(&id).unwrap();
@@ -487,7 +510,7 @@ mod tests {
         let id = key("sidebar");
 
         tree.upsert(
-            "view",
+            "view".into(),
             &id,
             &props(&[("class", "w-64"), ("tooltip", "hi")]),
             1,
@@ -504,7 +527,7 @@ mod tests {
         let mut tree = TestTree::new();
         let id = key("sidebar");
 
-        tree.upsert("view", &id, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &id, &IndexMap::new(), 1);
         tree.patch(&id, &flags(&["hidden"]), &[]);
 
         let obj = tree.get(&id).unwrap();
@@ -515,7 +538,7 @@ mod tests {
     fn destroy_removes_object() {
         let mut tree = TestTree::new();
         let id = key("sidebar");
-        tree.upsert("view", &id, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &id, &IndexMap::new(), 1);
         assert_eq!(tree.len(), 1);
 
         tree.destroy(&id);
@@ -530,9 +553,9 @@ mod tests {
         let child = key("child");
         let grandchild = key("grandchild");
 
-        tree.upsert("view", &root, &IndexMap::new(), 1);
-        tree.upsert("view", &child, &IndexMap::new(), 1);
-        tree.upsert("view", &grandchild, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &root, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &grandchild, &IndexMap::new(), 1);
         tree.set_parent(&child, &root);
         tree.set_parent(&grandchild, &child);
 
@@ -547,9 +570,9 @@ mod tests {
         let child1 = key("child1");
         let child2 = key("child2");
 
-        tree.upsert("view", &parent, &IndexMap::new(), 1);
-        tree.upsert("view", &child1, &IndexMap::new(), 1);
-        tree.upsert("view", &child2, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &parent, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child1, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child2, &IndexMap::new(), 1);
         tree.set_parent(&child1, &parent);
         tree.set_parent(&child2, &parent);
 
@@ -562,9 +585,9 @@ mod tests {
     #[test]
     fn remove_where_filters_by_data() {
         let mut tree = TestTree::new();
-        tree.upsert("view", &key("a"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("b"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("c"), &IndexMap::new(), 2);
+        tree.upsert("view".into(), &key("a"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("b"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("c"), &IndexMap::new(), 2);
 
         let removed = tree.remove_where(|obj| obj.data == 1);
         assert_eq!(removed.len(), 2);
@@ -575,9 +598,9 @@ mod tests {
     #[test]
     fn objects_of_type() {
         let mut tree = TestTree::new();
-        tree.upsert("view", &key("a"), &IndexMap::new(), 1);
-        tree.upsert("button", &key("b"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("c"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("a"), &IndexMap::new(), 1);
+        tree.upsert("button".into(), &key("b"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("c"), &IndexMap::new(), 1);
 
         let views = tree.objects_of_type("view");
         assert_eq!(views.len(), 2);
@@ -591,8 +614,8 @@ mod tests {
         let mut tree = TestTree::new();
         let parent = key("root");
         let child = key("child");
-        tree.upsert("view", &parent, &IndexMap::new(), 1);
-        tree.upsert("view", &child, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &parent, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child, &IndexMap::new(), 1);
         tree.set_parent(&child, &parent);
 
         let p = tree.get(&parent).unwrap();
@@ -606,8 +629,8 @@ mod tests {
         let mut tree = TestTree::new();
         let parent = key("root");
         let child = key("child");
-        tree.upsert("view", &parent, &IndexMap::new(), 1);
-        tree.upsert("view", &child, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &parent, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child, &IndexMap::new(), 1);
         tree.set_parent(&child, &parent);
         tree.set_parent(&child, &parent);
 
@@ -621,9 +644,9 @@ mod tests {
         let a = key("a");
         let b = key("b");
         let c = key("c");
-        tree.upsert("view", &a, &IndexMap::new(), 1);
-        tree.upsert("view", &b, &IndexMap::new(), 1);
-        tree.upsert("view", &c, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &a, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &b, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &c, &IndexMap::new(), 1);
 
         tree.set_parent(&c, &a);
         assert_eq!(tree.get(&a).unwrap().children, vec![c.clone()]);
@@ -643,9 +666,9 @@ mod tests {
         let a = key("a");
         let b = key("b");
         let c = key("c");
-        tree.upsert("view", &a, &IndexMap::new(), 1);
-        tree.upsert("view", &b, &IndexMap::new(), 1);
-        tree.upsert("view", &c, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &a, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &b, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &c, &IndexMap::new(), 1);
 
         tree.set_parent(&c, &a);
         tree.set_parent(&c, &b);
@@ -661,74 +684,34 @@ mod tests {
     }
 
     #[test]
-    fn reduced_command_output() {
-        let mut tree = TestTree::new();
-        let id = key("app:sidebar");
-        tree.upsert("view", &id, &props(&[("class", "w-64"), ("order", "0")]), 1);
-
-        let bytes = tree.reduced_command(&id).unwrap();
-        let s = String::from_utf8(bytes).unwrap();
-        assert_eq!(s, "+view app:sidebar class=w-64 order=0");
-    }
-
-    #[test]
-    fn reduced_command_with_flags() {
-        let mut tree = TestTree::new();
-        let id = key("app:sidebar");
-        let mut p = props(&[("class", "w-64")]);
-        p.insert("hidden".into(), PropValue::Flag);
-        tree.upsert("view", &id, &p, 1);
-
-        let bytes = tree.reduced_command(&id).unwrap();
-        assert_eq_bytes(&bytes, "+view app:sidebar class=w-64 hidden");
-    }
-
-    #[test]
-    fn reduced_command_quoted_value() {
-        let mut tree = TestTree::new();
-        let id = key("app:label");
-        tree.upsert("text", &id, &props(&[("content", "Hello, world")]), 1);
-
-        let bytes = tree.reduced_command(&id).unwrap();
-        let s = String::from_utf8(bytes).unwrap();
-        assert_eq!(s, "+text app:label content=\"Hello, world\"");
-    }
-
-    #[test]
-    fn reduced_command_nonexistent() {
-        let tree = TestTree::new();
-        assert!(tree.reduced_command(&key("nope")).is_none());
-    }
-
-    #[test]
     fn descendants_info_collects_all() {
         let mut tree = TestTree::new();
         let root = key("save");
         let child = key("save-root");
         let grandchild = key("save-label");
 
-        tree.upsert("button", &root, &IndexMap::new(), 1);
-        tree.upsert("view", &child, &IndexMap::new(), 2);
-        tree.upsert("text", &grandchild, &IndexMap::new(), 2);
+        tree.upsert("button".into(), &root, &IndexMap::new(), 1);
+        tree.upsert("view".into(), &child, &IndexMap::new(), 2);
+        tree.upsert("text".into(), &grandchild, &IndexMap::new(), 2);
         tree.set_parent(&child, &root);
         tree.set_parent(&grandchild, &child);
 
         let info = tree.descendants_info(&root);
         assert_eq!(info.len(), 2);
         assert_eq!(info[0].0, child);
-        assert_eq!(info[0].1, "view");
+        assert_eq!(info[0].1, ObjectKind::Type("view".into()));
         assert_eq!(info[0].2, 2);
         assert_eq!(info[1].0, grandchild);
-        assert_eq!(info[1].1, "text");
+        assert_eq!(info[1].1, ObjectKind::Type("text".into()));
         assert_eq!(info[1].2, 2);
     }
 
     #[test]
     fn nearest_ancestor_where_found() {
         let mut tree = TestTree::new();
-        tree.upsert("view", &key("root"), &IndexMap::new(), 1);
-        tree.upsert("button", &key("btn"), &IndexMap::new(), 1);
-        tree.upsert("text", &key("label"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("root"), &IndexMap::new(), 1);
+        tree.upsert("button".into(), &key("btn"), &IndexMap::new(), 1);
+        tree.upsert("text".into(), &key("label"), &IndexMap::new(), 1);
         tree.set_parent(&key("btn"), &key("root"));
         tree.set_parent(&key("label"), &key("btn"));
 
@@ -739,8 +722,8 @@ mod tests {
     #[test]
     fn nearest_ancestor_where_not_found() {
         let mut tree = TestTree::new();
-        tree.upsert("button", &key("btn"), &IndexMap::new(), 1);
-        tree.upsert("text", &key("label"), &IndexMap::new(), 1);
+        tree.upsert("button".into(), &key("btn"), &IndexMap::new(), 1);
+        tree.upsert("text".into(), &key("label"), &IndexMap::new(), 1);
         tree.set_parent(&key("label"), &key("btn"));
 
         let ancestor = tree.nearest_ancestor_where(&key("label"), |kind| kind == "view");
@@ -750,9 +733,9 @@ mod tests {
     #[test]
     fn roots_returns_parentless() {
         let mut tree = TestTree::new();
-        tree.upsert("view", &key("a"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("b"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("c"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("a"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("b"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("c"), &IndexMap::new(), 1);
         tree.set_parent(&key("c"), &key("a"));
 
         let roots = tree.roots();
@@ -768,12 +751,12 @@ mod tests {
 
         assert_eq!(tree.len(), 2);
         let root = tree.get(&key("root")).unwrap();
-        assert_eq!(root.kind, "view");
+        assert_eq!(root.kind, ObjectKind::Type("view".into()));
         assert_eq!(root.props["class"], PropValue::Str("w-64".into()));
         assert_eq!(root.children, vec![key("label")]);
 
         let label = tree.get(&key("label")).unwrap();
-        assert_eq!(label.kind, "text");
+        assert_eq!(label.kind, ObjectKind::Type("text".into()));
         assert_eq!(label.parent, Some(key("root")));
     }
 
@@ -842,8 +825,8 @@ mod tests {
     #[test]
     fn remove_where_removes_from_parent_children() {
         let mut tree = TestTree::new();
-        tree.upsert("view", &key("parent"), &IndexMap::new(), 1);
-        tree.upsert("view", &key("child"), &IndexMap::new(), 2);
+        tree.upsert("view".into(), &key("parent"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("child"), &IndexMap::new(), 2);
         tree.set_parent(&key("child"), &key("parent"));
 
         tree.remove_where(|obj| obj.data == 2);
@@ -852,13 +835,37 @@ mod tests {
     }
 
     #[test]
-    fn reduced_command_with_comma_value() {
+    fn has_children_works() {
         let mut tree = TestTree::new();
-        let id = key("x");
-        tree.upsert("view", &id, &props(&[("data", "a,b")]), 1);
+        tree.upsert("view".into(), &key("parent"), &IndexMap::new(), 1);
+        tree.upsert("view".into(), &key("child"), &IndexMap::new(), 1);
+        assert!(!tree.has_children(&key("parent")));
 
-        let bytes = tree.reduced_command(&id).unwrap();
-        let s = String::from_utf8(bytes).unwrap();
-        assert_eq!(s, "+view x data=\"a,b\"");
+        tree.set_parent(&key("child"), &key("parent"));
+        assert!(tree.has_children(&key("parent")));
+        assert!(!tree.has_children(&key("child")));
+    }
+
+    #[test]
+    fn apply_with_slot_push() {
+        let mut tree = TestTree::new();
+        let commands = crate::parser::parse("+view dialog { {header +text title} }").unwrap();
+        tree.apply(&commands, |id| id.to_string(), |_, _| 0);
+
+        // dialog, header (slot), title
+        assert_eq!(tree.len(), 3);
+
+        let dialog = tree.get(&key("dialog")).unwrap();
+        assert_eq!(dialog.kind, ObjectKind::Type("view".into()));
+        assert_eq!(dialog.children, vec![key("header")]);
+
+        let header = tree.get(&key("header")).unwrap();
+        assert_eq!(header.kind, ObjectKind::Slot);
+        assert_eq!(header.parent, Some(key("dialog")));
+        assert_eq!(header.children, vec![key("title")]);
+
+        let title = tree.get(&key("title")).unwrap();
+        assert_eq!(title.kind, ObjectKind::Type("text".into()));
+        assert_eq!(title.parent, Some(key("header")));
     }
 }

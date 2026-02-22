@@ -7,12 +7,14 @@
 use proc_macro2::TokenStream;
 
 /// A value that is either a compile-time literal or a runtime expression.
+#[derive(Debug)]
 pub enum IrValue {
     Literal(String),
     Interpolation(TokenStream),
 }
 
 /// A property in the IR.
+#[derive(Debug)]
 pub enum IrProp {
     /// `key=value`
     Value { key: String, value: IrValue },
@@ -31,6 +33,7 @@ pub enum IrProp {
 }
 
 /// A command in the IR.
+#[derive(Debug)]
 pub enum IrCommand {
     /// `+type id props... [{ children }]`
     Upsert {
@@ -97,9 +100,15 @@ pub enum IrCommand {
         expr: TokenStream,
         arms: Vec<MatchArm>,
     },
+    /// `{name ... }` — Slot block (within children of a +/@ command)
+    SlotBlock {
+        name: IrValue,
+        children: Vec<IrCommand>,
+    },
 }
 
 /// A single arm in a `match` expression.
+#[derive(Debug)]
 pub struct MatchArm {
     pub pattern: TokenStream,
     pub body: Vec<IrCommand>,

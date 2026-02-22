@@ -304,7 +304,7 @@ fn cmd_children(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn write_records(cmds: &[Command], out: &mut (impl Write + ?Sized), json: bool) -> io::Result<()> {
     let mut i = 0;
     while i < cmds.len() {
-        if matches!(cmds[i], Command::Push | Command::Pop) {
+        if matches!(cmds[i], Command::Push { .. } | Command::Pop) {
             i += 1;
             continue;
         }
@@ -326,14 +326,14 @@ fn collect_children(cmds: &[Command], i: usize) -> (Option<&[Command]>, usize) {
     let next = i + 1;
     if matches!(cmds[i], Command::Upsert { .. } | Command::Patch { .. })
         && next < cmds.len()
-        && matches!(cmds[next], Command::Push)
+        && matches!(cmds[next], Command::Push { .. })
     {
         let start = next + 1;
         let mut depth = 1usize;
         let mut j = start;
         while j < cmds.len() {
             match cmds[j] {
-                Command::Push => depth += 1,
+                Command::Push { .. } => depth += 1,
                 Command::Pop => {
                     depth -= 1;
                     if depth == 0 {
@@ -418,7 +418,7 @@ fn write_tsv_record(
             let t = targets.join(",");
             writeln!(out, "#\t{}\t\t{t}\t\t", kind.as_str())
         }
-        Command::Push | Command::Pop => Ok(()),
+        Command::Push { .. } | Command::Pop => Ok(()),
     }
 }
 
@@ -541,7 +541,7 @@ fn write_json_obj(
             }
             out.write_all(b"]")?;
         }
-        Command::Push | Command::Pop => {}
+        Command::Push { .. } | Command::Pop => {}
     }
     out.write_all(b"}")
 }
@@ -582,7 +582,7 @@ fn write_json_body_field(out: &mut (impl Write + ?Sized), cmds: &[Command]) -> i
     let mut i = 0;
     let mut first = true;
     while i < cmds.len() {
-        if matches!(cmds[i], Command::Push | Command::Pop) {
+        if matches!(cmds[i], Command::Push { .. } | Command::Pop) {
             i += 1;
             continue;
         }

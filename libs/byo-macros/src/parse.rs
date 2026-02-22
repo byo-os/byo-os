@@ -639,6 +639,21 @@ impl Parser {
             return self.parse_response_command();
         }
 
+        // `{name ...}` — slot block (brace group whose first token is an ident
+        // that isn't a control keyword)
+        if let Some(TokenTree::Group(g)) = self.peek()
+            && g.delimiter() == Delimiter::Brace
+        {
+            let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+            if let Some(TokenTree::Ident(id)) = inner.first()
+                && !matches!(id.to_string().as_str(), "if" | "for" | "match")
+            {
+                let stream = g.stream();
+                self.pos += 1;
+                return self.parse_slot_block(stream);
+            }
+        }
+
         Err(format!(
             "expected command (+, -, @, !, #, ?, ., if, for, match), found {:?}",
             self.peek()
@@ -779,6 +794,16 @@ impl Parser {
                 other
             )),
         }
+    }
+
+    /// Parse a slot block: `{name cmd... }`. The brace group has already been
+    /// consumed; `stream` is its inner token stream. The first token is the
+    /// slot name (an ident), followed by commands.
+    fn parse_slot_block(&mut self, stream: TokenStream) -> Result<IrCommand, String> {
+        let mut inner = Parser::new(stream, self.real_spans);
+        let name = inner.parse_name_in("slot name", &[':', '-'])?;
+        let children = inner.parse_commands()?;
+        Ok(IrCommand::SlotBlock { name, children })
     }
 
     /// Parse a brace-delimited block of commands.
@@ -1452,5 +1477,62 @@ mod tests {
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0], IrCommand::Upsert { .. }));
         assert!(matches!(&cmds[1], IrCommand::Destroy { .. }));
+    }
+
+    #[test]
+    fn parse_slot_block() {
+        // {header +text t} inside children
+        let input = quote! {
+            +view root {
+                {header +text t}
+            }
+        };
+        let cmds = parse(input, false).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Upsert {
+                children: Some(ch), ..
+            } => {
+                assert_eq!(ch.len(), 1);
+                match &ch[0] {
+                    IrCommand::SlotBlock {
+                        name: IrValue::Literal(n),
+                        children,
+                    } => {
+                        assert_eq!(n, "header");
+                        assert_eq!(children.len(), 1);
+                        assert!(matches!(&children[0], IrCommand::Upsert { .. }));
+                    }
+                    other => panic!("expected SlotBlock, got: {other:?}"),
+                }
+            }
+            _ => panic!("expected Upsert with children"),
+        }
+    }
+
+    #[test]
+    fn parse_default_slot_block() {
+        // {_ +view v} — default slot
+        let input = quote! {
+            +view root {
+                {_ +view content}
+            }
+        };
+        let cmds = parse(input, false).unwrap();
+        match &cmds[0] {
+            IrCommand::Upsert {
+                children: Some(ch), ..
+            } => {
+                assert_eq!(ch.len(), 1);
+                match &ch[0] {
+                    IrCommand::SlotBlock {
+                        name: IrValue::Literal(n),
+                        ..
+                    } => assert_eq!(n, "_"),
+                    other => panic!("expected SlotBlock, got: {other:?}"),
+                }
+            }
+            _ => panic!("expected Upsert with children"),
+        }
     }
 }

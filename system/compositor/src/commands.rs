@@ -169,7 +169,8 @@ pub fn process_commands(
                     }
                 }
 
-                byo::Command::Push => {
+                byo::Command::Push { slot } => {
+                    debug_assert!(slot.is_none(), "compositor received slotted push");
                     if let Some(entity) = last_entity {
                         parent_stack.push(entity);
                     }

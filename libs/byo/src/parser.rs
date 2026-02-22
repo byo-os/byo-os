@@ -57,7 +57,7 @@ pub fn parse_bytes(input: Bytes) -> Result<Vec<Command>, ParseError> {
 ///
 /// let cmds = parse("+view root { +text child }").unwrap();
 /// assert!(matches!(&cmds[0], Command::Upsert { kind, id, .. } if kind == "view" && id == "root"));
-/// assert!(matches!(&cmds[1], Command::Push));
+/// assert!(matches!(&cmds[1], Command::Push { .. }));
 /// assert!(matches!(&cmds[2], Command::Upsert { kind, id, .. } if kind == "text" && id == "child"));
 /// assert!(matches!(&cmds[3], Command::Pop));
 /// ```
@@ -477,6 +477,17 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                     ) {
                         break;
                     }
+                    // `{` inside a response body is a slot declaration
+                    if matches!(
+                        self.peek(),
+                        Some(Spanned {
+                            token: Token::LBrace,
+                            ..
+                        })
+                    ) {
+                        self.parse_children(cmds)?;
+                        continue;
+                    }
                     self.parse_command(cmds)?;
                 }
 
@@ -511,7 +522,23 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             })
         ) {
             let open_span = self.advance().span; // consume {
-            cmds.push(Command::Push);
+            // Check for slot name: `{name` requires adjacency (no whitespace
+            // between `{` and identifier). Validated via span adjacency.
+            let slot = if let Some(Spanned {
+                token: Token::Word(w),
+                span: word_span,
+            }) = self.peek()
+                && open_span.end == word_span.start
+                && is_valid_slot_name(w)
+            {
+                let name = self.byte_str_at(*word_span);
+                self.advance();
+                Some(name)
+            } else {
+                None
+            };
+
+            cmds.push(Command::Push { slot });
 
             while !self.at_end() {
                 if matches!(
@@ -522,6 +549,18 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                     })
                 ) {
                     break;
+                }
+                // `{` inside a children block is a nested slot push
+                // (e.g. `+dialog { {header +text t} {_ +button ok} }`)
+                if matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::LBrace,
+                        ..
+                    })
+                ) {
+                    self.parse_children(cmds)?;
+                    continue;
                 }
                 self.parse_command(cmds)?;
             }
@@ -848,6 +887,16 @@ fn is_valid_id(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '-')
 }
 
+/// `[a-zA-Z_][a-zA-Z0-9_:-]*` — slot names allow `:` for qualified names.
+fn is_valid_slot_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '-')
+}
+
 /// `[a-zA-Z][a-zA-Z0-9_-]*`
 fn is_valid_name(s: &str) -> bool {
     let mut chars = s.chars();
@@ -908,7 +957,7 @@ mod tests {
             &cmds[0],
             Command::Upsert { kind, id, .. } if kind == "view" && id == "root"
         ));
-        assert!(matches!(&cmds[1], Command::Push));
+        assert!(matches!(&cmds[1], Command::Push { .. }));
         assert!(matches!(
             &cmds[2],
             Command::Upsert { kind, id, .. } if kind == "text" && id == "child"
@@ -923,9 +972,9 @@ mod tests {
         // +text c → Upsert, } → Pop, } → Pop = 7
         assert_eq!(cmds.len(), 7);
         assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "a"));
-        assert!(matches!(&cmds[1], Command::Push));
+        assert!(matches!(&cmds[1], Command::Push { .. }));
         assert!(matches!(&cmds[2], Command::Upsert { id, .. } if id == "b"));
-        assert!(matches!(&cmds[3], Command::Push));
+        assert!(matches!(&cmds[3], Command::Push { .. }));
         assert!(matches!(&cmds[4], Command::Upsert { id, .. } if id == "c"));
         assert!(matches!(&cmds[5], Command::Pop));
         assert!(matches!(&cmds[6], Command::Pop));
@@ -983,7 +1032,7 @@ mod tests {
         let cmds = parse("@view sidebar { +view child }").unwrap();
         assert_eq!(cmds.len(), 4);
         assert!(matches!(&cmds[0], Command::Patch { .. }));
-        assert!(matches!(&cmds[1], Command::Push));
+        assert!(matches!(&cmds[1], Command::Push { .. }));
         assert!(matches!(&cmds[2], Command::Upsert { .. }));
         assert!(matches!(&cmds[3], Command::Pop));
     }
@@ -1379,7 +1428,7 @@ mod tests {
             &cmds[1],
             Command::Upsert { kind, id, .. } if kind == "view" && id == "greeting"
         ));
-        assert!(matches!(&cmds[2], Command::Push));
+        assert!(matches!(&cmds[2], Command::Push { .. }));
         assert!(matches!(
             &cmds[3],
             Command::Upsert { kind, id, .. } if kind == "text" && id == "label"
@@ -1402,6 +1451,119 @@ mod tests {
         let cmds = parse(input).unwrap();
         // sidebar, push, item1, push, item1-label, pop, item2, push, item2-label, pop, pop
         assert_eq!(cmds.len(), 11);
+    }
+
+    // -- Slot pushes ----------------------------------------------------------
+
+    #[test]
+    fn slot_push_named() {
+        let cmds = parse("+view r {header +text t }").unwrap();
+        assert_eq!(cmds.len(), 4); // Upsert, Push{slot:header}, Upsert, Pop
+        assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "r"));
+        match &cmds[1] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
+            other => panic!("expected slotted Push, got: {other:?}"),
+        }
+        assert!(matches!(&cmds[2], Command::Upsert { id, .. } if id == "t"));
+        assert!(matches!(&cmds[3], Command::Pop));
+    }
+
+    #[test]
+    fn slot_push_space_is_not_slot() {
+        // `{ header` (space) — header should parse as next command, not a slot name
+        let err = parse("+view r { header }");
+        // "header" is not a valid command, so this should error
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn slot_push_default() {
+        let cmds = parse("+view r {_ +text t }").unwrap();
+        assert_eq!(cmds.len(), 4);
+        match &cmds[1] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "_"),
+            other => panic!("expected default slot Push, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_push_empty_children() {
+        let cmds = parse("+view r {}").unwrap();
+        assert_eq!(cmds.len(), 3); // Upsert, Push{slot:None}, Pop
+        match &cmds[1] {
+            Command::Push { slot: None } => {}
+            other => panic!("expected non-slotted Push, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_push_nested() {
+        // Free-standing slot pushes inside a children block:
+        //   +dialog { {header +text t} {_ +button ok} }
+        let cmds = parse("+dialog d { {header +text t} {_ +button ok} }").unwrap();
+        // Upsert d, Push{None}
+        //   Push{header}, Upsert t, Pop
+        //   Push{_}, Upsert ok, Pop
+        // Pop
+        assert_eq!(cmds.len(), 9);
+        assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "d"));
+        assert!(matches!(&cmds[1], Command::Push { slot: None }));
+        match &cmds[2] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
+            other => panic!("expected header slot, got: {other:?}"),
+        }
+        assert!(matches!(&cmds[3], Command::Upsert { id, .. } if id == "t"));
+        assert!(matches!(&cmds[4], Command::Pop));
+        match &cmds[5] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "_"),
+            other => panic!("expected default slot, got: {other:?}"),
+        }
+        assert!(matches!(&cmds[6], Command::Upsert { id, .. } if id == "ok"));
+        assert!(matches!(&cmds[7], Command::Pop));
+        assert!(matches!(&cmds[8], Command::Pop));
+    }
+
+    #[test]
+    fn slot_push_on_upsert() {
+        let cmds = parse("+view r {header}").unwrap();
+        assert_eq!(cmds.len(), 3); // Upsert, Push{header}, Pop
+        match &cmds[1] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
+            other => panic!("expected slotted Push, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regular_push_no_slot() {
+        let cmds = parse("+view root { +text child }").unwrap();
+        match &cmds[1] {
+            Command::Push { slot: None } => {}
+            other => panic!("expected non-slotted Push, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_in_expand_response() {
+        // .expand responses can contain slot declarations
+        let cmds = parse(".expand 0 { +view root { {_ +text fallback} } }").unwrap();
+        // Response body: Upsert root, Push{None}, Push{_}, Upsert fallback, Pop, Pop
+        match &cmds[0] {
+            Command::Response {
+                body: Some(body), ..
+            } => {
+                assert_eq!(body.len(), 6);
+                assert!(matches!(&body[0], Command::Upsert { id, .. } if id == "root"));
+                assert!(matches!(&body[1], Command::Push { slot: None }));
+                match &body[2] {
+                    Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "_"),
+                    other => panic!("expected default slot push, got: {other:?}"),
+                }
+                assert!(matches!(&body[3], Command::Upsert { id, .. } if id == "fallback"));
+                assert!(matches!(&body[4], Command::Pop));
+                assert!(matches!(&body[5], Command::Pop));
+            }
+            other => panic!("expected Response, got: {other:?}"),
+        }
     }
 
     // -- Error cases ----------------------------------------------------------
@@ -1620,7 +1782,7 @@ mod tests {
             }
             _ => panic!("expected Upsert"),
         }
-        assert!(matches!(&cmds[1], Command::Push));
+        assert!(matches!(&cmds[1], Command::Push { .. }));
         match &cmds[2] {
             Command::Upsert { kind, id, props } => {
                 assert_eq!(kind, "text");

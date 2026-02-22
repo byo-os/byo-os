@@ -13,6 +13,17 @@ use crate::id::{QualifiedId, qualify_into};
 use crate::process::ProcessId;
 use crate::router::RouterMsg;
 
+/// How to handle the children block following a daemon-owned command.
+enum SkipMode {
+    /// Pure skip: no slot collection (claimed but no expansion, or no children).
+    Skip,
+    /// Collect slot contents from children, then splice into the expansion.
+    CollectSlots {
+        expansion_cmds: Vec<byo::Command>,
+        app_client: String,
+    },
+}
+
 /// A batch waiting for daemon expansion to complete.
 #[derive(Debug)]
 pub struct PendingBatch {
@@ -26,6 +37,8 @@ pub struct PendingBatch {
     pub pending_expands: Vec<PendingExpand>,
     /// QID → (daemon PID, qualified expansion commands, is_re_expand) from daemons.
     pub expansions: HashMap<String, (ProcessId, Vec<Command>, bool)>,
+    /// True if this is a replay batch (from `#claim` — daemon restart recovery).
+    pub is_replay: bool,
 }
 
 impl PendingBatch {
@@ -36,6 +49,7 @@ impl PendingBatch {
             commands,
             pending_expands: Vec::new(),
             expansions: HashMap::new(),
+            is_replay: false,
         }
     }
 
@@ -120,6 +134,7 @@ impl PendingBatch {
             claims,
             &mut buf,
             &mut claimed_destroys,
+            None,
         );
         (buf, claimed_destroys)
     }
@@ -129,6 +144,7 @@ impl PendingBatch {
     ///
     /// When `client` is empty, IDs are assumed already qualified (expansion content).
     /// Claimed-type destroys are collected instead of emitted (handled by router).
+    /// `slot_contents` carries app-provided slot children for the current expansion scope.
     fn rewrite_commands(
         &self,
         commands: &[byo::Command],
@@ -136,18 +152,22 @@ impl PendingBatch {
         claims: &HashMap<String, ProcessId>,
         buf: &mut Vec<u8>,
         claimed_destroys: &mut Vec<QualifiedId>,
+        slot_contents: Option<&HashMap<String, Vec<byo::Command>>>,
     ) {
         // Track push/pop depth for skipping children of daemon-owned objects.
         let mut skip_depth: Option<usize> = None;
-        let mut skip_next_children = false;
+        let mut skip_next_children: Option<SkipMode> = None;
         let mut depth: usize = 0;
         let mut qid_buf = String::new();
+        let mut i = 0;
 
-        for cmd in commands {
+        while i < commands.len() {
+            let cmd = &commands[i];
+
             // If we're inside a daemon-owned subtree, skip until we pop back.
             if let Some(skip_at) = skip_depth {
                 match cmd {
-                    byo::Command::Push => depth += 1,
+                    byo::Command::Push { .. } => depth += 1,
                     byo::Command::Pop => {
                         if depth == skip_at {
                             skip_depth = None;
@@ -156,18 +176,55 @@ impl PendingBatch {
                     }
                     _ => {}
                 }
+                i += 1;
                 continue;
             }
 
             // Check if previous daemon-owned command is followed by a Push.
-            if skip_next_children {
-                skip_next_children = false;
-                if matches!(cmd, byo::Command::Push) {
-                    depth += 1;
-                    skip_depth = Some(depth);
-                    continue;
+            if let Some(mode) = skip_next_children.take() {
+                if matches!(cmd, byo::Command::Push { .. }) {
+                    match mode {
+                        SkipMode::Skip => {
+                            // Pure skip: no slot collection, just skip the block
+                            depth += 1;
+                            skip_depth = Some(depth);
+                            i += 1;
+                            continue;
+                        }
+                        SkipMode::CollectSlots {
+                            expansion_cmds,
+                            app_client,
+                        } => {
+                            // Collect slot contents from the children block
+                            let (slot_map, end_idx) = collect_slot_contents(commands, i);
+                            // Pre-qualify the slot contents with the app client
+                            let qualified_slots: HashMap<String, Vec<byo::Command>> = slot_map
+                                .into_iter()
+                                .map(|(k, v)| (k, qualify_commands(&v, &app_client)))
+                                .collect();
+                            // Rewrite expansion with qualified slot contents
+                            self.rewrite_commands(
+                                &expansion_cmds,
+                                "",
+                                claims,
+                                buf,
+                                claimed_destroys,
+                                if qualified_slots.is_empty() {
+                                    None
+                                } else {
+                                    Some(&qualified_slots)
+                                },
+                            );
+                            i = end_idx;
+                            continue;
+                        }
+                    }
                 }
                 // Not a Push — fall through to normal processing.
+                // For CollectSlots mode, emit the expansion without slot contents.
+                if let SkipMode::CollectSlots { expansion_cmds, .. } = mode {
+                    self.rewrite_commands(&expansion_cmds, "", claims, buf, claimed_destroys, None);
+                }
             }
 
             match cmd {
@@ -175,16 +232,17 @@ impl PendingBatch {
                     qualify_into(&mut qid_buf, client, id);
 
                     if *id != "_" && self.expansions.contains_key(&*qid_buf) {
-                        // Splice in the daemon expansion — recursively rewrite it.
+                        // Splice in the daemon expansion.
                         let (_, expansion_cmds, _) = &self.expansions[&*qid_buf];
-                        // Empty client: expansion IDs are already qualified.
-                        self.rewrite_commands(expansion_cmds, "", claims, buf, claimed_destroys);
-                        // If next command is Push, skip the children block.
-                        skip_next_children = true;
+                        // Defer rewriting until we know if there are children (for slots).
+                        skip_next_children = Some(SkipMode::CollectSlots {
+                            expansion_cmds: expansion_cmds.clone(),
+                            app_client: client.to_string(),
+                        });
                     } else if claims.contains_key(&**kind) && *id != "_" {
                         // Daemon-owned but no expansion (shouldn't happen
                         // if pending == 0, but handle gracefully).
-                        skip_next_children = true;
+                        skip_next_children = Some(SkipMode::Skip);
                     } else {
                         write_upsert(buf, kind, &qid_buf, props);
                     }
@@ -201,7 +259,55 @@ impl PendingBatch {
                         let _ = write!(buf, "\n-{kind} {qid_buf}");
                     }
                 }
-                byo::Command::Push => {
+                byo::Command::Push { slot } => {
+                    // In expansion scope, a slotted push triggers slot substitution.
+                    // Slot pushes are orchestrator-internal — consumed here, never
+                    // forwarded to the compositor.
+                    if let Some(name) = slot {
+                        let slot_key = name.to_string();
+                        let has_content = slot_contents
+                            .and_then(|m| m.get(&slot_key))
+                            .is_some_and(|c| !c.is_empty());
+
+                        // Collect the fallback content range (between slot Push
+                        // and its matching Pop).
+                        let fallback_start = i + 1;
+                        let mut scan = fallback_start;
+                        let mut scan_depth: usize = 1;
+                        while scan < commands.len() && scan_depth > 0 {
+                            match &commands[scan] {
+                                byo::Command::Push { .. } => scan_depth += 1,
+                                byo::Command::Pop => scan_depth -= 1,
+                                _ => {}
+                            }
+                            scan += 1;
+                        }
+                        // scan now points past the matching Pop
+                        let fallback_end = scan - 1; // the matching Pop
+
+                        if has_content {
+                            let content = &slot_contents.unwrap()[&slot_key];
+                            // Emit substituted content inline (no wrapping braces)
+                            self.rewrite_commands(content, "", claims, buf, claimed_destroys, None);
+                        } else {
+                            // No slot content — emit fallback content inline
+                            let fallback = &commands[fallback_start..fallback_end];
+                            if !fallback.is_empty() {
+                                self.rewrite_commands(
+                                    fallback,
+                                    client,
+                                    claims,
+                                    buf,
+                                    claimed_destroys,
+                                    None,
+                                );
+                            }
+                        }
+                        // Skip past the slot Push, its content, and matching Pop
+                        i = scan;
+                        continue;
+                    }
+                    // Regular (non-slotted) push
                     depth += 1;
                     buf.extend_from_slice(b" {");
                 }
@@ -214,7 +320,7 @@ impl PendingBatch {
                         // Claimed type: don't emit patch to compositor.
                         // Re-expansion is handled by the router.
                         // If next command is Push (children), skip them.
-                        skip_next_children = true;
+                        skip_next_children = Some(SkipMode::Skip);
                     } else {
                         qualify_into(&mut qid_buf, client, id);
                         write_patch(buf, kind, &qid_buf, props);
@@ -238,6 +344,12 @@ impl PendingBatch {
                     let _ = em.commands(std::slice::from_ref(cmd));
                 }
             }
+            i += 1;
+        }
+
+        // If the last command was an expanded type with no following Push, emit now
+        if let Some(SkipMode::CollectSlots { expansion_cmds, .. }) = skip_next_children {
+            self.rewrite_commands(&expansion_cmds, "", claims, buf, claimed_destroys, None);
         }
     }
 }
@@ -254,10 +366,9 @@ pub(crate) fn write_patch(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo
     write_props(buf, props);
 }
 
-/// Write props in wire format. Delegates to the canonical implementation
-/// in [`byo::emitter::write_props`].
-pub(crate) fn write_props(buf: &mut Vec<u8>, props: &[byo::Prop]) {
-    byo::emitter::write_props(&mut *buf, props).unwrap();
+/// Write props in wire format. Delegates to [`EmitProps::emit_props`].
+pub(crate) fn write_props(buf: &mut Vec<u8>, props: &(impl byo::emitter::EmitProps + ?Sized)) {
+    props.emit_props(&mut *buf).unwrap();
 }
 
 /// Write a value, auto-quoting as needed. Delegates to the canonical
@@ -284,9 +395,13 @@ pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8>
                 qualify_into(&mut qid_buf, client, id);
                 let _ = write!(buf, "\n-{kind} {qid_buf}");
             }
-            byo::Command::Push => {
-                buf.extend_from_slice(b" {");
-            }
+            byo::Command::Push { slot } => match slot {
+                Some(name) => {
+                    buf.extend_from_slice(b" {");
+                    buf.extend_from_slice(name.as_bytes());
+                }
+                None => buf.extend_from_slice(b" {"),
+            },
             byo::Command::Pop => {
                 buf.extend_from_slice(b"\n}");
             }
@@ -349,6 +464,106 @@ pub fn qualify_commands(commands: &[Command], client: &str) -> Vec<Command> {
             other => other.clone(),
         })
         .collect()
+}
+
+/// Collect slot contents from the children block of a daemon-owned object.
+///
+/// Starting from `commands[start_idx]` which must be `Push { slot: None }` (the
+/// outer children block), partitions children by slot name:
+/// - `Push { slot: Some(name) }` blocks → bucket `name`
+/// - Bare commands (not inside a named slot) → bucket `"_"` (default)
+///
+/// Returns (slot_map, end_idx) where end_idx is the index after the matching Pop.
+fn collect_slot_contents(
+    commands: &[byo::Command],
+    start_idx: usize,
+) -> (HashMap<String, Vec<byo::Command>>, usize) {
+    use byo::Command;
+
+    let mut slots: HashMap<String, Vec<Command>> = HashMap::new();
+    let mut default_cmds: Vec<Command> = Vec::new();
+    let mut i = start_idx + 1; // skip the outer Push
+    let outer_depth: usize = 1; // we're inside the outer Push
+
+    while i < commands.len() && outer_depth > 0 {
+        match &commands[i] {
+            Command::Pop if outer_depth == 1 => {
+                // Matching Pop for the outer block
+                i += 1;
+                break;
+            }
+            Command::Push { slot: Some(name) } if outer_depth == 1 => {
+                // Named slot block at the top level of children
+                let slot_name = name.to_string();
+                let mut slot_cmds = Vec::new();
+                let mut slot_depth: usize = 1;
+                i += 1; // skip the slot Push
+
+                while i < commands.len() && slot_depth > 0 {
+                    match &commands[i] {
+                        Command::Pop if slot_depth == 1 => {
+                            slot_depth = 0;
+                        }
+                        Command::Push { .. } => {
+                            slot_depth += 1;
+                            slot_cmds.push(commands[i].clone());
+                        }
+                        Command::Pop => {
+                            slot_depth -= 1;
+                            slot_cmds.push(commands[i].clone());
+                        }
+                        _ => {
+                            slot_cmds.push(commands[i].clone());
+                        }
+                    }
+                    i += 1;
+                }
+
+                if let Some(existing) = slots.get(&slot_name)
+                    && !existing.is_empty()
+                {
+                    tracing::warn!("duplicate slot targeting '{slot_name}' from app — ignoring");
+                    // Return empty slots to trigger fallback behavior
+                    return (HashMap::new(), i);
+                }
+                slots.insert(slot_name, slot_cmds);
+            }
+            Command::Push { .. } => {
+                // Non-slotted push inside the children block — part of default content
+                let mut push_depth: usize = 1;
+                default_cmds.push(commands[i].clone());
+                i += 1;
+                while i < commands.len() && push_depth > 0 {
+                    match &commands[i] {
+                        Command::Push { .. } => push_depth += 1,
+                        Command::Pop => push_depth -= 1,
+                        _ => {}
+                    }
+                    default_cmds.push(commands[i].clone());
+                    i += 1;
+                }
+                continue; // already advanced i
+            }
+            _ => {
+                // Bare command at top level — goes to default slot
+                default_cmds.push(commands[i].clone());
+                i += 1;
+                continue;
+            }
+        }
+    }
+
+    if !default_cmds.is_empty() {
+        if let Some(existing) = slots.get("_")
+            && !existing.is_empty()
+        {
+            tracing::warn!("duplicate default slot targeting from app — ignoring");
+            return (HashMap::new(), i);
+        }
+        slots.insert("_".to_string(), default_cmds);
+    }
+
+    (slots, i)
 }
 
 /// Maximum nesting depth for recursive daemon expansion.
@@ -612,5 +827,159 @@ mod tests {
         let (result, claimed_destroys) = batch.rewrite(&claims);
         assert_eq_bytes(&result, "-view app:sidebar");
         assert!(claimed_destroys.is_empty());
+    }
+
+    // -- Slot tests -----------------------------------------------------------
+
+    #[test]
+    fn collect_slot_contents_basic() {
+        // +dialog d { {header +text t} {footer +view f} }
+        let commands = cmds("+dialog d { {header +text t} {footer +view f} }");
+        // Push{None} is at index 1
+        let (slots, end_idx) = collect_slot_contents(&commands, 1);
+        assert_eq!(slots.len(), 2);
+        assert!(slots.contains_key("header"));
+        assert!(slots.contains_key("footer"));
+        // Header should contain: Upsert(text, t)
+        assert_eq!(slots["header"].len(), 1);
+        assert!(matches!(&slots["header"][0], byo::Command::Upsert { id, .. } if id == "t"));
+        // Footer should contain: Upsert(view, f)
+        assert_eq!(slots["footer"].len(), 1);
+        assert!(matches!(&slots["footer"][0], byo::Command::Upsert { id, .. } if id == "f"));
+        // end_idx should point past the outer Pop
+        assert_eq!(end_idx, commands.len());
+    }
+
+    #[test]
+    fn collect_slot_contents_default() {
+        // +dialog d { +text bare1 +text bare2 }
+        let commands = cmds("+dialog d { +text bare1 +text bare2 }");
+        let (slots, _) = collect_slot_contents(&commands, 1);
+        assert_eq!(slots.len(), 1);
+        assert!(slots.contains_key("_"));
+        assert_eq!(slots["_"].len(), 2);
+    }
+
+    #[test]
+    fn collect_slot_contents_mixed() {
+        // +dialog d { {header +text h} +view bare }
+        let commands = cmds("+dialog d { {header +text h} +view bare }");
+        let (slots, _) = collect_slot_contents(&commands, 1);
+        assert_eq!(slots.len(), 2);
+        assert!(slots.contains_key("header"));
+        assert!(slots.contains_key("_"));
+        assert_eq!(slots["header"].len(), 1);
+        assert_eq!(slots["_"].len(), 1);
+    }
+
+    #[test]
+    fn rewrite_with_default_slot() {
+        // App: +dialog d { +button ok label=OK }
+        // Dialog daemon expansion has a default slot: +view controls:d-root { {_ +text controls:fallback} }
+        let mut batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("+dialog d { +button ok label=OK }"),
+        );
+
+        let mut claims = HashMap::new();
+        claims.insert("dialog".to_string(), pid(2));
+        claims.insert("button".to_string(), pid(3));
+
+        // Dialog expansion with default slot
+        batch.expansions.insert(
+            "app:d".to_string(),
+            (
+                pid(2),
+                cmds("+view controls:d-root { {_ +text controls:fallback} }"),
+                false,
+            ),
+        );
+
+        // Button expansion (nested inside slot content)
+        batch.expansions.insert(
+            "app:ok".to_string(),
+            (pid(3), cmds("+view buttons:ok-root class=btn"), false),
+        );
+
+        let (result, _) = batch.rewrite(&claims);
+        // The default slot should receive the button (which itself expands)
+        assert_eq_bytes(
+            &result,
+            "+view controls:d-root { +view buttons:ok-root class=btn }",
+        );
+    }
+
+    #[test]
+    fn rewrite_with_named_slots() {
+        // App: +dialog d { {header +text title content=Hi} {footer +view actions} }
+        // Dialog expansion: +view controls:d-root { {header +text controls:hdr} {footer} }
+        let mut batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("+dialog d { {header +text title content=Hi} {footer +view actions} }"),
+        );
+
+        let mut claims = HashMap::new();
+        claims.insert("dialog".to_string(), pid(2));
+
+        batch.expansions.insert(
+            "app:d".to_string(),
+            (
+                pid(2),
+                cmds("+view controls:d-root { {header +text controls:hdr} {footer} }"),
+                false,
+            ),
+        );
+
+        let (result, _) = batch.rewrite(&claims);
+        // Header slot gets app's +text title, footer gets app's +view actions
+        // Fallback content (+text controls:hdr) is skipped because app provided header
+        assert_eq_bytes(
+            &result,
+            "+view controls:d-root { +text app:title content=Hi +view app:actions }",
+        );
+    }
+
+    #[test]
+    fn rewrite_with_slot_fallback() {
+        // App: +dialog d (no children — no slot content)
+        // Dialog expansion with fallback: +view controls:d-root { {_ +text controls:empty} }
+        let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+dialog d"));
+
+        let mut claims = HashMap::new();
+        claims.insert("dialog".to_string(), pid(2));
+
+        batch.expansions.insert(
+            "app:d".to_string(),
+            (
+                pid(2),
+                cmds("+view controls:d-root { {_ +text controls:empty} }"),
+                false,
+            ),
+        );
+
+        let (result, _) = batch.rewrite(&claims);
+        // No slot content → fallback content used
+        assert_eq_bytes(&result, "+view controls:d-root { +text controls:empty }");
+    }
+
+    #[test]
+    fn rewrite_with_no_fallback_no_content() {
+        // App: +dialog d (no children)
+        // Dialog expansion: +view controls:d-root { {_} }
+        let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+dialog d"));
+
+        let mut claims = HashMap::new();
+        claims.insert("dialog".to_string(), pid(2));
+
+        batch.expansions.insert(
+            "app:d".to_string(),
+            (pid(2), cmds("+view controls:d-root { {_} }"), false),
+        );
+
+        let (result, _) = batch.rewrite(&claims);
+        // Empty slot produces nothing — just the empty push/pop
+        assert_eq_bytes(&result, "+view controls:d-root { }");
     }
 }

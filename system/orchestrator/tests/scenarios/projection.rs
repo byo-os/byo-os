@@ -100,7 +100,7 @@ async fn semi_disjoint_observers() {
         matches!(&comp_cmds[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:root"),
         "expected +view app:root, got: {comp_msg}"
     );
-    assert!(matches!(&comp_cmds[1], Command::Push));
+    assert!(matches!(&comp_cmds[1], Command::Push { .. }));
     assert!(
         matches!(
             &comp_cmds[2],
@@ -130,7 +130,7 @@ async fn semi_disjoint_observers() {
         matches!(&a11y_cmds[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:root"),
         "expected +view app:root, got: {a11y_msg}"
     );
-    assert!(matches!(&a11y_cmds[1], Command::Push));
+    assert!(matches!(&a11y_cmds[1], Command::Push { .. }));
     assert!(
         matches!(&a11y_cmds[2], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:child"),
         "expected +view app:child, got: {a11y_msg}"
@@ -189,7 +189,7 @@ async fn unobserved_wraps_under_ancestor() {
         matches!(&cmds1[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:root"),
         "expected +view app:root, got: {s1}"
     );
-    assert!(matches!(&cmds1[1], Command::Push));
+    assert!(matches!(&cmds1[1], Command::Push { .. }));
     assert!(
         matches!(
             &cmds1[2],
@@ -222,7 +222,7 @@ async fn unobserved_wraps_under_ancestor() {
         matches!(&cmds2[0], Command::Patch { kind, id, .. } if *kind == "view" && *id == "app:root"),
         "expected @view app:root, got: {s2}"
     );
-    assert!(matches!(&cmds2[1], Command::Push));
+    assert!(matches!(&cmds2[1], Command::Push { .. }));
     assert!(
         matches!(&cmds2[2], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:child2"),
         "expected +view app:child2, got: {s2}"

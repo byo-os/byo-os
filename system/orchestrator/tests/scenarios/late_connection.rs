@@ -183,7 +183,7 @@ async fn additional_observe_resync() {
 
     // Verify tree structure: text should be nested under view (Push/Pop present).
     assert!(
-        cmds.iter().any(|c| matches!(c, Command::Push)),
+        cmds.iter().any(|c| matches!(c, Command::Push { .. })),
         "expected Push (children block) in resync, got: {s}"
     );
 

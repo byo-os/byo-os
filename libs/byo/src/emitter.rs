@@ -35,7 +35,7 @@ pub fn is_bare(value: &str) -> bool {
 ///
 /// When the value contains both single and double quotes, falls back to
 /// double-quoting with backslash escaping.
-pub fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
+pub fn write_value<W: io::Write + ?Sized>(w: &mut W, value: &str) -> io::Result<()> {
     if is_bare(value) {
         write!(w, "{value}")
     } else if !value.contains('"') {
@@ -60,27 +60,70 @@ pub fn write_value<W: io::Write>(w: &mut W, value: &str) -> io::Result<()> {
     }
 }
 
-/// Writes a slice of [`Prop`].
+/// Trait for types that can be written as BYO protocol props.
 ///
-/// [`Prop::Remove`] writes `~key` on the wire. In upsert/event context
-/// this is a no-op for the receiver, but we emit it unconditionally to
-/// keep the emitter simple.
-pub fn write_props<W: io::Write>(w: &mut W, props: &[Prop]) -> io::Result<()> {
-    for prop in props {
-        match prop {
-            Prop::Value { key, value } => {
-                write!(w, " {key}=")?;
-                write_value(w, value)?;
-            }
-            Prop::Boolean { key } => {
-                write!(w, " {key}")?;
-            }
-            Prop::Remove { key } => {
-                write!(w, " ~{key}")?;
+/// Implemented for `[Prop]` (wire form) and `IndexMap<String, PropValue>`
+/// (reduced/map form), allowing [`Emitter`] methods to accept either.
+pub trait EmitProps {
+    /// Write the props to the given writer as ` key=value` pairs.
+    fn emit_props(&self, w: &mut dyn io::Write) -> io::Result<()>;
+}
+
+impl<const N: usize> EmitProps for [Prop; N] {
+    fn emit_props(&self, w: &mut dyn io::Write) -> io::Result<()> {
+        self.as_slice().emit_props(w)
+    }
+}
+
+impl EmitProps for Vec<Prop> {
+    fn emit_props(&self, w: &mut dyn io::Write) -> io::Result<()> {
+        self.as_slice().emit_props(w)
+    }
+}
+
+impl EmitProps for [Prop] {
+    /// [`Prop::Remove`] writes `~key` on the wire. In upsert/event context
+    /// this is a no-op for the receiver, but we emit it unconditionally to
+    /// keep the emitter simple.
+    fn emit_props(&self, w: &mut dyn io::Write) -> io::Result<()> {
+        for prop in self {
+            match prop {
+                Prop::Value { key, value } => {
+                    write!(w, " {key}=")?;
+                    write_value(w, value)?;
+                }
+                Prop::Boolean { key } => {
+                    write!(w, " {key}")?;
+                }
+                Prop::Remove { key } => {
+                    write!(w, " ~{key}")?;
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+impl EmitProps for indexmap::IndexMap<String, crate::tree::PropValue> {
+    fn emit_props(&self, w: &mut dyn io::Write) -> io::Result<()> {
+        for (key, value) in self {
+            match value {
+                crate::tree::PropValue::Str(s) => {
+                    write!(w, " {key}=")?;
+                    write_value(w, s)?;
+                }
+                crate::tree::PropValue::Flag => {
+                    write!(w, " {key}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes props to a writer. Convenience wrapper around [`EmitProps::emit_props`].
+pub fn write_props(w: &mut dyn io::Write, props: &(impl EmitProps + ?Sized)) -> io::Result<()> {
+    props.emit_props(w)
 }
 
 /// Typed emitter for writing BYO/OS protocol commands.
@@ -220,9 +263,14 @@ impl<W: io::Write> Emitter<W> {
     // -- Object commands -----------------------------------------------------
 
     /// `+type id props...` — Create or full-replace an object.
-    pub fn upsert(&mut self, kind: &str, id: &str, props: &[Prop]) -> io::Result<()> {
+    pub fn upsert(
+        &mut self,
+        kind: &str,
+        id: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n+{kind} {id}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     /// `+type id props... { children }` — Upsert with children.
@@ -256,11 +304,11 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         id: &str,
-        props: &[Prop],
+        props: &(impl EmitProps + ?Sized),
         children: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n+{kind} {id}")?;
-        write_props(&mut self.writer, props)?;
+        props.emit_props(&mut self.writer)?;
         self.writer.write_all(b" {")?;
         children(self)?;
         self.writer.write_all(b"\n}")
@@ -272,9 +320,14 @@ impl<W: io::Write> Emitter<W> {
     }
 
     /// `@type id props...` — Patch props on an existing object.
-    pub fn patch(&mut self, kind: &str, id: &str, props: &[Prop]) -> io::Result<()> {
+    pub fn patch(
+        &mut self,
+        kind: &str,
+        id: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n@{kind} {id}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     /// `@type id props... { children }` — Patch with children.
@@ -282,28 +335,65 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         id: &str,
-        props: &[Prop],
+        props: &(impl EmitProps + ?Sized),
         children: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n@{kind} {id}")?;
-        write_props(&mut self.writer, props)?;
+        props.emit_props(&mut self.writer)?;
         self.writer.write_all(b" {")?;
         children(self)?;
         self.writer.write_all(b"\n}")
     }
 
+    /// `{name` — Begin a named slot children block.
+    ///
+    /// Used for content projection in daemon expansions. The slot name
+    /// is consumed by the orchestrator during rewrite.
+    pub fn slot_push(&mut self, name: &str) -> io::Result<()> {
+        write!(self.writer, " {{{name}")
+    }
+
+    /// `}` — End a children block (regular or slotted).
+    pub fn pop(&mut self) -> io::Result<()> {
+        self.writer.write_all(b"\n}")
+    }
+
+    /// ` kind={kind} props...` — Emit expand request props.
+    ///
+    /// Writes the type and all props as key=value pairs, suitable for
+    /// appending after a `?expand {seq} {qid}` prefix.
+    pub fn expand_props(
+        &mut self,
+        kind: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
+        write!(self.writer, " kind={kind}")?;
+        props.emit_props(&mut self.writer)
+    }
+
     // -- Events --------------------------------------------------------------
 
     /// `!kind seq id props...` — Emit an event.
-    pub fn event(&mut self, kind: &str, seq: u64, id: &str, props: &[Prop]) -> io::Result<()> {
+    pub fn event(
+        &mut self,
+        kind: &str,
+        seq: u64,
+        id: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n!{kind} {seq} {id}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     /// `!ack kind seq props...` — Acknowledge a received event.
-    pub fn ack(&mut self, kind: &str, seq: u64, props: &[Prop]) -> io::Result<()> {
+    pub fn ack(
+        &mut self,
+        kind: &str,
+        seq: u64,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n!ack {kind} {seq}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     // -- Pragmas (#) ---------------------------------------------------------
@@ -389,9 +479,14 @@ impl<W: io::Write> Emitter<W> {
     // -- Requests/Responses ---------------------------------------------------
 
     /// `?expand seq id props...` — Request daemon expansion.
-    pub fn expand(&mut self, seq: u64, id: &str, props: &[Prop]) -> io::Result<()> {
+    pub fn expand(
+        &mut self,
+        seq: u64,
+        id: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n?expand {seq} {id}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     /// `.expand seq { body }` — Expansion response (closure-based).
@@ -411,10 +506,10 @@ impl<W: io::Write> Emitter<W> {
         kind: &str,
         seq: u64,
         target: &str,
-        props: &[Prop],
+        props: &(impl EmitProps + ?Sized),
     ) -> io::Result<()> {
         write!(self.writer, "\n?{kind} {seq} {target}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     /// `.kind seq props... { body }` — Generic response with body (closure-based).
@@ -422,20 +517,25 @@ impl<W: io::Write> Emitter<W> {
         &mut self,
         kind: &str,
         seq: u64,
-        props: &[Prop],
+        props: &(impl EmitProps + ?Sized),
         body: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<()> {
         write!(self.writer, "\n.{kind} {seq}")?;
-        write_props(&mut self.writer, props)?;
+        props.emit_props(&mut self.writer)?;
         self.writer.write_all(b" {")?;
         body(self)?;
         self.writer.write_all(b"\n}")
     }
 
     /// `.kind seq props...` — Generic response without body.
-    pub fn response(&mut self, kind: &str, seq: u64, props: &[Prop]) -> io::Result<()> {
+    pub fn response(
+        &mut self,
+        kind: &str,
+        seq: u64,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
         write!(self.writer, "\n.{kind} {seq}")?;
-        write_props(&mut self.writer, props)
+        props.emit_props(&mut self.writer)
     }
 
     // -- Bulk emission --------------------------------------------------------
@@ -467,20 +567,21 @@ impl<W: io::Write> Emitter<W> {
             match cmd {
                 Command::Upsert { kind, id, props } => {
                     write!(self.writer, "\n+{kind} {id}")?;
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                 }
                 Command::Destroy { kind, id } => {
                     write!(self.writer, "\n-{kind} {id}")?;
                 }
-                Command::Push => {
-                    self.writer.write_all(b" {")?;
-                }
+                Command::Push { slot } => match slot {
+                    Some(name) => write!(self.writer, " {{{name}")?,
+                    None => self.writer.write_all(b" {")?,
+                },
                 Command::Pop => {
                     self.writer.write_all(b"\n}")?;
                 }
                 Command::Patch { kind, id, props } => {
                     write!(self.writer, "\n@{kind} {id}")?;
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                 }
                 Command::Event {
                     kind,
@@ -489,11 +590,11 @@ impl<W: io::Write> Emitter<W> {
                     props,
                 } => {
                     write!(self.writer, "\n!{} {seq} {id}", kind.as_str())?;
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                 }
                 Command::Ack { kind, seq, props } => {
                     write!(self.writer, "\n!ack {} {seq}", kind.as_str())?;
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                 }
                 Command::Pragma { kind, targets } => {
                     write!(self.writer, "\n#{}", kind.as_str())?;
@@ -538,7 +639,7 @@ impl<W: io::Write> Emitter<W> {
                     if let Some(target) = targets.first() {
                         write!(self.writer, " {target}")?;
                     }
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                 }
                 Command::Response {
                     kind,
@@ -547,7 +648,7 @@ impl<W: io::Write> Emitter<W> {
                     body,
                 } => {
                     write!(self.writer, "\n.{} {seq}", kind.as_str())?;
-                    write_props(&mut self.writer, props)?;
+                    props.emit_props(&mut self.writer)?;
                     if let Some(body) = body {
                         self.writer.write_all(b" {")?;
                         self.commands(body)?;
@@ -1138,6 +1239,77 @@ mod tests {
                 ));
             }
             _ => panic!("expected Upsert"),
+        }
+    }
+
+    // -- Slot push tests ---------------------------------------------------
+
+    #[test]
+    fn slot_push_output() {
+        let out = emit(|em| {
+            em.upsert("view", "root", &[])?;
+            em.slot_push("header")?;
+            em.upsert("text", "t", &[])?;
+            em.pop()
+        });
+        assert!(out.contains("{header"));
+        assert!(out.contains("+text t"));
+    }
+
+    #[test]
+    fn commands_slotted_push() {
+        use crate::parser::parse;
+        use crate::protocol::Command;
+
+        let out = emit(|em| {
+            em.commands(&[
+                Command::Upsert {
+                    kind: "view".into(),
+                    id: "root".into(),
+                    props: vec![],
+                },
+                Command::Push {
+                    slot: Some("header".into()),
+                },
+                Command::Upsert {
+                    kind: "text".into(),
+                    id: "t".into(),
+                    props: vec![],
+                },
+                Command::Pop,
+            ])
+        });
+
+        let payload = crate::protocol::strip_apc(&out);
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 4);
+        match &cmds[1] {
+            Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
+            other => panic!("expected slotted Push, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trip_slot_push() {
+        use crate::parser::parse;
+        use crate::protocol::Command;
+
+        // Parse → emit → parse and compare
+        let original = parse("+view r {header +text t }").unwrap();
+        let out = emit(|em| em.commands(&original));
+        let payload = crate::protocol::strip_apc(&out);
+        let round_tripped = parse(payload).unwrap();
+
+        assert_eq!(original.len(), round_tripped.len());
+        for (a, b) in original.iter().zip(round_tripped.iter()) {
+            match (a, b) {
+                (Command::Push { slot: sa }, Command::Push { slot: sb }) => assert_eq!(sa, sb),
+                (Command::Pop, Command::Pop) => {}
+                (Command::Upsert { id: ia, .. }, Command::Upsert { id: ib, .. }) => {
+                    assert_eq!(ia, ib)
+                }
+                _ => panic!("command mismatch: {a:?} vs {b:?}"),
+            }
         }
     }
 }

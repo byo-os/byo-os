@@ -308,7 +308,7 @@ async fn children_preserved_replay() {
 
     // Should have tree structure (Push/Pop for children).
     assert!(
-        cmds.iter().any(|c| matches!(c, Command::Push)),
+        cmds.iter().any(|c| matches!(c, Command::Push { .. })),
         "expected Push (children block) in resync, got: {s}"
     );
 

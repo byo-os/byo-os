@@ -163,6 +163,16 @@ impl Codegen {
                     }
                 }
             }
+            IrCommand::SlotBlock { name, children } => {
+                let (name_binds, name_expr) = self.gen_str_value(name);
+                let child_code = self.gen_commands(children, em_ident);
+                quote! {
+                    #name_binds
+                    #em_ident.slot_push(#name_expr)?;
+                    #child_code
+                    #em_ident.pop()?;
+                }
+            }
             IrCommand::Match { expr, arms } => {
                 let arm_code: Vec<TokenStream> = arms
                     .iter()

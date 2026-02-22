@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use byo::emitter::Emitter;
 use byo::parser::parse;
 use byo::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
-use byo::tree::{PropValue, props_to_map, props_to_patch};
+use byo::tree::{ObjectKind, PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch, write_props};
 use crate::id::QualifiedId;
@@ -334,7 +334,7 @@ impl Router {
                         let expand_seq = self.next_expand_seq(subscriber);
                         let mut expand_buf = Vec::new();
                         let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
-                        if self.state.write_reduced_expand_props(&qid, &mut expand_buf) {
+                        if crate::state::write_expand_props(&self.state, &qid, &mut expand_buf) {
                             expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
                         }
                     }
@@ -396,7 +396,7 @@ impl Router {
                     }
                     let qid = QualifiedId::new(client, id);
                     let map = props_to_map(props);
-                    self.state.upsert(kind, &qid, &map, owner);
+                    self.state.upsert(kind.as_ref().into(), &qid, &map, owner);
                     if let Some(parent) = parent_stack.last() {
                         self.state.set_parent(&qid, parent);
                     }
@@ -411,8 +411,18 @@ impl Router {
                     let qid = QualifiedId::new(client, id);
                     self.state.destroy(&qid);
                 }
-                Command::Push => {
-                    if let Some(ref qid) = last_qid {
+                Command::Push { slot } => {
+                    if let Some(name) = slot {
+                        // Slot push — create a slot node in the state tree.
+                        let slot_qid = QualifiedId::new(client, name);
+                        self.state
+                            .upsert(ObjectKind::Slot, &slot_qid, &IndexMap::new(), owner);
+                        if let Some(parent) = parent_stack.last() {
+                            self.state.set_parent(&slot_qid, parent);
+                        }
+                        parent_stack.push(slot_qid.clone());
+                        last_qid = Some(slot_qid);
+                    } else if let Some(ref qid) = last_qid {
                         parent_stack.push(qid.clone());
                     }
                 }
@@ -616,7 +626,7 @@ impl Router {
         // Find "root disconnect objects": owned by the disconnecting process,
         // whose parent (if any) is NOT owned by the same process. These are the
         // top-level objects to destroy — children cascade automatically.
-        let owned_roots: Vec<(QualifiedId, String)> = self
+        let owned_roots: Vec<(QualifiedId, ObjectKind)> = self
             .state
             .values()
             .filter(|o| o.data == process)
@@ -745,17 +755,38 @@ impl Router {
             .collect();
 
         if !objects.is_empty() {
-            // Create a synthetic replay batch to track the expansion responses.
-            // Empty commands signals this is a replay batch (no original app batch
-            // to rewrite — the expansion results just need to be stored in the
-            // state tree and forwarded to observers).
-            let mut batch = PendingBatch::new(from, client.to_owned(), Vec::new());
+            // Synthesize replay commands from the state tree. These include
+            // the original app objects with their slot children, so that the
+            // batch rewriter can perform slot substitution during expansion.
+            let mut replay_cmds_buf = Vec::new();
+            for (qid, _kind) in &objects {
+                let mut obj_buf = Vec::new();
+                crate::state::write_reduced_upsert(&self.state, qid, &mut obj_buf);
+
+                // Include any children (with slot nodes) so the rewriter
+                // can reconstruct slot contents for substitution.
+                if self.state.has_children(qid) {
+                    obj_buf.extend_from_slice(b" {");
+                    crate::state::write_children(&self.state, qid, &mut obj_buf);
+                    obj_buf.extend_from_slice(b"\n}");
+                }
+                replay_cmds_buf.extend_from_slice(&obj_buf);
+            }
+
+            let replay_cmds = if replay_cmds_buf.is_empty() {
+                Vec::new()
+            } else {
+                byo::parser::parse_bytes(bytes::Bytes::from(replay_cmds_buf)).unwrap_or_default()
+            };
+
+            let mut batch = PendingBatch::new(from, client.to_owned(), replay_cmds);
+            batch.is_replay = true;
 
             for (qid, _kind) in &objects {
                 let expand_seq = self.next_expand_seq(from);
                 let mut expand_buf = Vec::new();
                 let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
-                if self.state.write_reduced_expand_props(qid, &mut expand_buf) {
+                if crate::state::write_expand_props(&self.state, qid, &mut expand_buf) {
                     batch.add_pending_expand(from, expand_seq, qid.clone(), 0);
                     self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)));
                 }
@@ -1200,7 +1231,8 @@ impl Router {
                             QualifiedId::new("", id)
                         };
                         let map = props_to_map(props);
-                        self.state.upsert(kind, &qid, &map, *daemon_pid);
+                        self.state
+                            .upsert(kind.as_ref().into(), &qid, &map, *daemon_pid);
 
                         // Parent: root-level expansion objects → source object,
                         // nested → their push parent within the expansion.
@@ -1212,8 +1244,29 @@ impl Router {
 
                         last_qid = Some(qid);
                     }
-                    Command::Push => {
-                        if let Some(ref qid) = last_qid {
+                    Command::Push { slot } => {
+                        if let Some(name) = slot {
+                            // Slot push — create a slot node in the state tree.
+                            let slot_qid = if name.contains(':') {
+                                QualifiedId::parse(name)
+                                    .unwrap_or_else(|| QualifiedId::new("", name))
+                            } else {
+                                QualifiedId::new("", name)
+                            };
+                            self.state.upsert(
+                                ObjectKind::Slot,
+                                &slot_qid,
+                                &IndexMap::new(),
+                                *daemon_pid,
+                            );
+                            if let Some(parent) = parent_stack.last() {
+                                self.state.set_parent(&slot_qid, parent);
+                            } else {
+                                self.state.set_parent(&slot_qid, &source_qid);
+                            }
+                            parent_stack.push(slot_qid.clone());
+                            last_qid = Some(slot_qid);
+                        } else if let Some(ref qid) = last_qid {
                             parent_stack.push(qid.clone());
                         }
                     }
@@ -1260,7 +1313,7 @@ impl Router {
             .filter_map(|(qid, _, _)| self.state.get(qid).map(|o| (qid.clone(), o.props.clone())))
             .collect();
 
-        let old_kinds: HashMap<QualifiedId, String> = descendants
+        let old_kinds: HashMap<QualifiedId, ObjectKind> = descendants
             .iter()
             .map(|(qid, kind, _)| (qid.clone(), kind.clone()))
             .collect();
@@ -1325,7 +1378,8 @@ impl Router {
                     }
 
                     // Update state tree.
-                    self.state.upsert(kind, &qid, &new_props, daemon_pid);
+                    self.state
+                        .upsert(kind.as_ref().into(), &qid, &new_props, daemon_pid);
                     if let Some(parent) = parent_stack.last() {
                         self.state.set_parent(&qid, parent);
                     } else {
@@ -1334,8 +1388,29 @@ impl Router {
 
                     last_qid = Some(qid);
                 }
-                Command::Push => {
-                    if let Some(ref qid) = last_qid {
+                Command::Push { slot } => {
+                    if let Some(name) = slot {
+                        // Slot push — create/update slot node in state tree.
+                        let slot_qid = if name.contains(':') {
+                            QualifiedId::parse(name).unwrap_or_else(|| QualifiedId::new("", name))
+                        } else {
+                            QualifiedId::new("", name)
+                        };
+                        seen_qids.insert(slot_qid.clone());
+                        self.state.upsert(
+                            ObjectKind::Slot,
+                            &slot_qid,
+                            &IndexMap::new(),
+                            daemon_pid,
+                        );
+                        if let Some(parent) = parent_stack.last() {
+                            self.state.set_parent(&slot_qid, parent);
+                        } else {
+                            self.state.set_parent(&slot_qid, source_qid);
+                        }
+                        parent_stack.push(slot_qid.clone());
+                        last_qid = Some(slot_qid);
+                    } else if let Some(ref qid) = last_qid {
                         parent_stack.push(qid.clone());
                     }
                 }
@@ -1428,7 +1503,7 @@ impl Router {
 
         if batch.is_ready() {
             let batch = self.pending_batches.remove(idx);
-            let is_replay = batch.commands.is_empty();
+            let is_replay = batch.is_replay;
 
             // Reconcile re-expansions using the per-expansion flag.
             let mut reconciliation_buf = Vec::new();
@@ -1619,7 +1694,8 @@ fn project_at_level(
                 let is_observed = observed_types.contains(&**kind);
                 *i += 1;
 
-                let has_children = *i < commands.len() && matches!(commands[*i], Command::Push);
+                let has_children =
+                    *i < commands.len() && matches!(commands[*i], Command::Push { .. });
 
                 if has_children {
                     *i += 1; // consume Push
@@ -1660,7 +1736,8 @@ fn project_at_level(
                 let is_observed = observed_types.contains(&**kind);
                 *i += 1;
 
-                let has_children = *i < commands.len() && matches!(commands[*i], Command::Push);
+                let has_children =
+                    *i < commands.len() && matches!(commands[*i], Command::Push { .. });
 
                 if has_children {
                     *i += 1; // consume Push
@@ -1731,9 +1808,8 @@ fn project_under_ancestor(
         if !child_buf.is_empty() {
             let ancestor_str = ancestor_qid.to_string();
             let mut em = Emitter::new(&mut *buf);
-            let _ = em.patch_with(&ancestor_obj.kind, &ancestor_str, &[], |em| {
-                em.raw(&child_buf)
-            });
+            let ancestor_kind = ancestor_obj.kind.as_type().unwrap_or("_slot");
+            let _ = em.patch_with(ancestor_kind, &ancestor_str, &[], |em| em.raw(&child_buf));
         }
     } else {
         // No observed ancestor — emit children at top level.
@@ -1756,10 +1832,12 @@ fn emit_observed_descendant_destroys(
     // descendants_info returns pre-order (parent before child).
     // Reverse to get deepest-first for destroy ordering.
     for (desc_qid, kind, _owner) in descendants.iter().rev() {
-        if observed_types.contains(kind) {
+        if let Some(kind_str) = kind.as_type()
+            && observed_types.contains(kind_str)
+        {
             let desc_str = desc_qid.to_string();
             let mut em = Emitter::new(&mut *buf);
-            let _ = em.destroy(kind, &desc_str);
+            let _ = em.destroy(kind_str, &desc_str);
         }
     }
 }
@@ -1869,8 +1947,13 @@ mod tests {
         let mut state = ObjectTree::new();
         let root_qid = QualifiedId::new("app", "root");
         let container_qid = QualifiedId::new("app", "container");
-        state.upsert("view", &root_qid, &IndexMap::new(), ProcessId(1));
-        state.upsert("panel", &container_qid, &IndexMap::new(), ProcessId(1));
+        state.upsert("view".into(), &root_qid, &IndexMap::new(), ProcessId(1));
+        state.upsert(
+            "panel".into(),
+            &container_qid,
+            &IndexMap::new(),
+            ProcessId(1),
+        );
         state.set_parent(&container_qid, &root_qid);
 
         let commands = parse("@panel app:container { +view app:child class=inner }").unwrap();
@@ -1890,9 +1973,9 @@ mod tests {
         let container = QualifiedId::new("app", "container");
         let child = QualifiedId::new("app", "child");
         let label = QualifiedId::new("app", "label");
-        state.upsert("panel", &container, &IndexMap::new(), ProcessId(1));
-        state.upsert("view", &child, &IndexMap::new(), ProcessId(1));
-        state.upsert("text", &label, &IndexMap::new(), ProcessId(1));
+        state.upsert("panel".into(), &container, &IndexMap::new(), ProcessId(1));
+        state.upsert("view".into(), &child, &IndexMap::new(), ProcessId(1));
+        state.upsert("text".into(), &label, &IndexMap::new(), ProcessId(1));
         state.set_parent(&child, &container);
         state.set_parent(&label, &child);
 

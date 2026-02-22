@@ -101,7 +101,10 @@ async fn basic_expansion() {
         ),
         "expected +view controls:save-root, got: {s}"
     );
-    assert!(matches!(&cmds[1], Command::Push), "expected Push, got: {s}");
+    assert!(
+        matches!(&cmds[1], Command::Push { .. }),
+        "expected Push, got: {s}"
+    );
     assert!(
         matches!(
             &cmds[2],
@@ -189,7 +192,7 @@ async fn expansion_with_native_siblings() {
         matches!(&cmds[0], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:root"),
         "expected +view app:root, got: {s}"
     );
-    assert!(matches!(&cmds[1], Command::Push));
+    assert!(matches!(&cmds[1], Command::Push { .. }));
     assert!(
         matches!(&cmds[2], Command::Upsert { kind, id, .. } if *kind == "view" && *id == "app:child1"),
         "expected +view app:child1, got: {s}"

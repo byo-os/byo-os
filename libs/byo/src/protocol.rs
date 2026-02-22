@@ -135,7 +135,7 @@ impl Prop {
 /// |-----------|-----------------------|--------------------------------------|
 /// | `Upsert`  | `+type id props...`   | Create or full-replace (idempotent)  |
 /// | `Destroy` | `-type id`            | Remove object and its children       |
-/// | `Push`    | `{`                   | Begin children of preceding `+`/`@`  |
+/// | `Push`    | `{` / `{name`         | Begin children (optionally slotted)  |
 /// | `Pop`     | `}`                   | End children block                   |
 /// | `Patch`   | `@type id props...`   | Update specific props on an object   |
 /// | `Event`   | `!type seq id props`  | Input or system event                |
@@ -154,8 +154,15 @@ pub enum Command {
     },
     /// `-type id` — Destroy an object and its children.
     Destroy { kind: ByteStr, id: ByteStr },
-    /// `{` — Push (begin children of the preceding `+`/`@` target).
-    Push,
+    /// `{` / `{name` — Push (begin children of the preceding `+`/`@` target).
+    ///
+    /// When `slot` is `Some(name)`, this is a **slot push** (`{name`) — a
+    /// tagged children block used for content projection during daemon
+    /// expansion. Slot names are consumed by the orchestrator during
+    /// rewrite and never reach the compositor. `{_}` is the default slot.
+    ///
+    /// When `slot` is `None`, this is a regular push (`{`).
+    Push { slot: Option<ByteStr> },
     /// `}` — Pop (end children context).
     Pop,
     /// `@type id props...` — Patch props and/or set context on an existing object.
