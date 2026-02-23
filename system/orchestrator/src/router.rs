@@ -771,6 +771,65 @@ impl Router {
         tracing::info!("{client} claims type '{target_type}'");
         self.claims.insert(target_type.to_owned(), from);
 
+        // Retroactively wrap bare children of claimed objects in synthetic
+        // SlotContent nodes. When the app batch arrived before this daemon
+        // claimed the type, `update_state` didn't know it was claimed, so
+        // bare `{ ... }` children were stored as direct children instead of
+        // under a `::_` SlotContent node. Fix that now so slot substitution
+        // works during replay expansion.
+        {
+            let objs: Vec<_> = self
+                .state
+                .objects_of_type(target_type)
+                .into_iter()
+                .map(|o| (o.id.clone(), o.data))
+                .collect();
+
+            for (qid, owner) in &objs {
+                let Some(obj) = self.state.get(qid) else {
+                    continue;
+                };
+                // Check if there are any non-slot children (bare children
+                // that should be wrapped in a default SlotContent).
+                let bare_children: Vec<_> = obj
+                    .children
+                    .iter()
+                    .filter(|c| {
+                        self.state
+                            .get(c)
+                            .is_some_and(|o| matches!(o.kind, ObjectKind::Type(_)))
+                    })
+                    .cloned()
+                    .collect();
+
+                if bare_children.is_empty() {
+                    continue;
+                }
+
+                // Check that a `::_` SlotContent doesn't already exist.
+                let has_default_slot = obj.children.iter().any(|c| {
+                    self.state
+                        .get(c)
+                        .is_some_and(|o| matches!(o.kind, ObjectKind::SlotContent))
+                        && c.local_id().ends_with("::_")
+                });
+                if has_default_slot {
+                    continue;
+                }
+
+                // Create synthetic SlotContent node for `::_`.
+                let slot_qid = QualifiedId::new(qid.client(), &format!("{}::_", qid.local_id()));
+                self.state
+                    .upsert(ObjectKind::SlotContent, &slot_qid, &IndexMap::new(), *owner);
+                self.state.set_parent(&slot_qid, qid);
+
+                // Reparent bare children under the SlotContent node.
+                for child_qid in &bare_children {
+                    self.state.set_parent(child_qid, &slot_qid);
+                }
+            }
+        }
+
         // Replay reduced state for all objects of this type.
         let objects: Vec<_> = self
             .state

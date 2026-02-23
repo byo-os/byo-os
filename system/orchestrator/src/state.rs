@@ -79,9 +79,25 @@ fn project_subtree(
     };
 
     let Some(kind) = obj.kind.as_type() else {
-        // Slot nodes are never observed — skip and recurse into children.
-        for child in &obj.children {
-            project_subtree(tree, child, observed_types, buf);
+        // Slot or SlotContent node.
+        match &obj.kind {
+            ObjectKind::SlotContent => {
+                // App-side slot content — skip here. Children will be
+                // emitted at the expansion-side Slot's location via
+                // slot_ref when the Slot node is encountered.
+            }
+            ObjectKind::Slot => {
+                // Expansion-side slot placeholder — emit children of the
+                // linked SlotContent (the app's content for this slot).
+                if let Some(ref content_qid) = obj.slot_ref
+                    && let Some(content_obj) = tree.get(content_qid)
+                {
+                    for child in &content_obj.children {
+                        project_subtree(tree, child, observed_types, buf);
+                    }
+                }
+            }
+            _ => {}
         }
         return;
     };
@@ -107,6 +123,8 @@ fn project_subtree(
 }
 
 /// Returns true if `qid` has any descendants whose type is in `observed_types`.
+/// Follows slot_ref links so that Slot nodes check the linked SlotContent's
+/// children for observed types.
 fn has_observed_descendants(
     tree: &ObjectTree,
     qid: &QualifiedId,
@@ -116,16 +134,29 @@ fn has_observed_descendants(
         return false;
     };
     for child in &obj.children {
-        if let Some(child_obj) = tree.get(child)
-            && child_obj
-                .kind
-                .as_type()
-                .is_some_and(|k| observed_types.contains(k))
-        {
-            return true;
-        }
-        if has_observed_descendants(tree, child, observed_types) {
-            return true;
+        let Some(child_obj) = tree.get(child) else {
+            continue;
+        };
+        match &child_obj.kind {
+            ObjectKind::SlotContent => {
+                // Skip — content will be checked at the Slot's location.
+            }
+            ObjectKind::Slot => {
+                // Check the linked SlotContent's children.
+                if let Some(ref content_qid) = child_obj.slot_ref
+                    && has_observed_descendants(tree, content_qid, observed_types)
+                {
+                    return true;
+                }
+            }
+            ObjectKind::Type(k) => {
+                if observed_types.contains(k.as_str()) {
+                    return true;
+                }
+                if has_observed_descendants(tree, child, observed_types) {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -637,5 +668,243 @@ mod tests {
         let mut buf = Vec::new();
         assert!(write_children(&tree, &qid("app", "root"), &mut buf));
         assert_eq_bytes(&buf, "+view app:child class=p-4 { +text app:label }");
+    }
+
+    // ---------------------------------------------------------------
+    // Slot-aware projection tests
+    // ---------------------------------------------------------------
+
+    /// Build a tree that mimics a scroll-view expansion:
+    ///
+    /// app:parent (view)
+    ///   app:sv (scroll-view, NOT observed)
+    ///     app:sv::_ (SlotContent) ← linked to controls:vp::_
+    ///       app:content (view)
+    ///         app:item (text)
+    ///     controls:root (view)
+    ///       controls:vp (view)
+    ///         controls:vp::_ (Slot) ← linked to app:sv::_
+    fn build_slot_tree() -> ObjectTree {
+        let mut tree = ObjectTree::new();
+
+        // App-side tree
+        tree.upsert(
+            "view".into(),
+            &qid("app", "parent"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.upsert(
+            "scroll-view".into(),
+            &qid("app", "sv"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "sv"), &qid("app", "parent"));
+
+        // SlotContent node (app's bare children wrapped retroactively)
+        tree.upsert(
+            ObjectKind::SlotContent,
+            &qid("app", "sv::_"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "sv::_"), &qid("app", "sv"));
+
+        // App content inside the slot
+        tree.upsert(
+            "view".into(),
+            &qid("app", "content"),
+            &props(&[("class", "p-2")]),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "content"), &qid("app", "sv::_"));
+
+        tree.upsert(
+            "text".into(),
+            &qid("app", "item"),
+            &props(&[("content", "Hello")]),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "item"), &qid("app", "content"));
+
+        // Expansion-side tree (daemon output)
+        tree.upsert(
+            "view".into(),
+            &qid("controls", "root"),
+            &props(&[("class", "relative")]),
+            pid(2),
+        );
+        tree.set_parent(&qid("controls", "root"), &qid("app", "sv"));
+
+        tree.upsert(
+            "view".into(),
+            &qid("controls", "vp"),
+            &props(&[("overflow-y", "scroll")]),
+            pid(2),
+        );
+        tree.set_parent(&qid("controls", "vp"), &qid("controls", "root"));
+
+        // Expansion-side Slot placeholder
+        tree.upsert(
+            ObjectKind::Slot,
+            &qid("controls", "vp::_"),
+            &IndexMap::new(),
+            pid(2),
+        );
+        tree.set_parent(&qid("controls", "vp::_"), &qid("controls", "vp"));
+
+        // Link slot_ref bidirectionally
+        tree.set_slot_ref(&qid("app", "sv::_"), &qid("controls", "vp::_"));
+        tree.set_slot_ref(&qid("controls", "vp::_"), &qid("app", "sv::_"));
+
+        tree
+    }
+
+    #[test]
+    fn project_slot_content_inside_expansion_viewport() {
+        let tree = build_slot_tree();
+        let observed = types(&["view", "text"]);
+        let result = project_tree(&tree, &observed);
+        let s = String::from_utf8(result).unwrap();
+
+        // App content should appear INSIDE the viewport, not as a sibling.
+        assert!(
+            s.contains("controls:vp"),
+            "expected viewport in output: {s}"
+        );
+        assert!(
+            s.contains("app:content"),
+            "expected app content in output: {s}"
+        );
+
+        // Verify correct nesting: content is inside viewport's { }
+        // Parse and check that content appears after vp's opening brace.
+        let vp_pos = s.find("controls:vp").unwrap();
+        let content_pos = s.find("app:content").unwrap();
+        assert!(
+            content_pos > vp_pos,
+            "app:content should appear after controls:vp"
+        );
+
+        // Verify it's nested inside viewport (between its { and })
+        let vp_brace = s[vp_pos..].find('{').map(|i| i + vp_pos).unwrap();
+        assert!(
+            content_pos > vp_brace,
+            "app:content should be inside viewport's braces"
+        );
+    }
+
+    #[test]
+    fn project_slot_content_not_emitted_at_slot_content_location() {
+        let tree = build_slot_tree();
+        let observed = types(&["view", "text"]);
+        let result = project_tree(&tree, &observed);
+        let s = String::from_utf8(result).unwrap();
+
+        // app:content should NOT appear as a sibling of controls:root
+        // (i.e. directly under app:parent). It should only appear inside
+        // the viewport via the slot_ref link.
+        let parent_brace = s.find("app:parent").unwrap();
+        let parent_brace_open = s[parent_brace..]
+            .find('{')
+            .map(|i| i + parent_brace)
+            .unwrap();
+
+        // Find all occurrences of app:content — should be exactly one.
+        let count = s.matches("app:content").count();
+        assert_eq!(count, 1, "app:content should appear exactly once: {s}");
+
+        // The single occurrence must be inside controls:vp's braces.
+        let root_pos = s.find("controls:root").unwrap();
+        let content_pos = s.find("app:content").unwrap();
+        assert!(
+            content_pos > root_pos,
+            "app:content must be inside expansion, not before it: {s}"
+        );
+    }
+
+    #[test]
+    fn project_slot_unlinked_slot_emits_nothing() {
+        // If a Slot has no linked SlotContent, it should emit nothing.
+        let mut tree = ObjectTree::new();
+        tree.upsert("view".into(), &qid("app", "root"), &IndexMap::new(), pid(1));
+        tree.upsert(
+            "view".into(),
+            &qid("controls", "vp"),
+            &IndexMap::new(),
+            pid(2),
+        );
+        tree.set_parent(&qid("controls", "vp"), &qid("app", "root"));
+
+        // Slot with no slot_ref
+        tree.upsert(
+            ObjectKind::Slot,
+            &qid("controls", "vp::_"),
+            &IndexMap::new(),
+            pid(2),
+        );
+        tree.set_parent(&qid("controls", "vp::_"), &qid("controls", "vp"));
+
+        let observed = types(&["view"]);
+        let result = project_tree(&tree, &observed);
+        // Viewport should exist but have no children (empty slot).
+        assert_eq_bytes(&result, "+view app:root { +view controls:vp }");
+    }
+
+    #[test]
+    fn has_observed_descendants_follows_slot_ref() {
+        let tree = build_slot_tree();
+        let observed = types(&["view", "text"]);
+
+        // The viewport has a Slot child whose linked SlotContent has
+        // observed descendants → should return true.
+        assert!(has_observed_descendants(
+            &tree,
+            &qid("controls", "vp"),
+            &observed
+        ));
+    }
+
+    #[test]
+    fn has_observed_descendants_skips_slot_content() {
+        // SlotContent's children should NOT count at the SlotContent's
+        // location — they're emitted at the Slot's location instead.
+        let mut tree = ObjectTree::new();
+        tree.upsert("view".into(), &qid("app", "root"), &IndexMap::new(), pid(1));
+        tree.upsert(
+            "scroll-view".into(),
+            &qid("app", "sv"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "sv"), &qid("app", "root"));
+
+        tree.upsert(
+            ObjectKind::SlotContent,
+            &qid("app", "sv::_"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "sv::_"), &qid("app", "sv"));
+
+        tree.upsert(
+            "view".into(),
+            &qid("app", "child"),
+            &IndexMap::new(),
+            pid(1),
+        );
+        tree.set_parent(&qid("app", "child"), &qid("app", "sv::_"));
+
+        let observed = types(&["view"]);
+
+        // scroll-view (non-observed) has SlotContent with an observed child,
+        // but SlotContent children should be skipped at this location.
+        // Only an expansion-side Slot with a matching link would count.
+        assert!(!has_observed_descendants(
+            &tree,
+            &qid("app", "sv"),
+            &observed
+        ));
     }
 }

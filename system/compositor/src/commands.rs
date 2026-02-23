@@ -92,6 +92,16 @@ pub fn process_commands(
                             }
                             _ => {}
                         }
+
+                        // Reparent if the upsert context implies a different
+                        // parent (e.g. after daemon expansion replay).
+                        let new_parent = parent_stack.last().copied();
+                        if let Some(p) = new_parent {
+                            commands.entity(existing).insert(ChildOf(p));
+                        } else {
+                            commands.entity(existing).remove::<ChildOf>();
+                        }
+
                         existing
                     } else {
                         let parent = parent_stack.last().copied();
