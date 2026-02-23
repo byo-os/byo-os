@@ -63,6 +63,7 @@ to all types:
 | `{` | `{`           | Push (begin children of last `+`/`@`)                 |
 | `}` | `}`           | Pop (end children context)                            |
 | `@` | `@type id`    | Patch props / set context                             |
+| `::` | `::name { }` | Slot block (content projection, inside `{` `}` only)  |
 
 Type and ID are positional. Props follow as `key=value` pairs.
 Use `_` as the ID for anonymous objects (cannot be updated, deleted,
@@ -90,6 +91,56 @@ prescribe any specific prop names — interpretation is up to the receiver
 on types the compositor handles directly (e.g. `class` on views).
 Daemon-owned types like controls use semantic props (e.g. `label`,
 `variant`) — the daemon decides how they look.
+
+#### Slot blocks (content projection)
+
+Slot blocks use CSS pseudo-element syntax (`::name { ... }`) to
+partition children for content projection in daemon expansions:
+
+```
++dialog d {
+  ::header { +text title content="Settings" }
+  ::_ { +button ok label="OK" }
+}
+```
+
+- `::name` — named slot (e.g. `::header`, `::footer`)
+- `::_` — default slot (receives bare unslotted children)
+- Slot blocks can only appear inside `{ }` children blocks
+- Both `+` and `@` support slot blocks in their children
+- Slot blocks are consumed by the orchestrator during expansion
+  rewriting and never reach the compositor
+
+**Expansion side** — daemons declare slots in their `.expand` response:
+
+```
+.expand 0 {
+  +view d-root class="dialog" {
+    ::header { +text hdr content="Default Header" }
+    ::_ {}
+  }
+}
+```
+
+The orchestrator matches app-side `::header` content to the daemon's
+`::header` slot. If the app provides content, it replaces the daemon's
+fallback. If not, the daemon's fallback content is used. `::_ {}`
+with no fallback produces nothing when the app provides no bare children.
+
+**Patch semantics**: `@` on daemon-owned types has additive slot
+semantics — mentioned slots are updated, unmentioned slots are
+preserved from the state tree. An explicitly empty `::name {}` clears
+the slot (reverts to daemon fallback). Bare children update the
+default `::_` slot.
+
+**Conditional slots**: If a daemon's expansion conditionally omits
+slots based on props (e.g. no `::header` when `variant=compact`),
+app-provided content for those slots is dropped. Switching back
+to a prop value that re-introduces the slot will use the daemon's
+fallback, not the app's original content — the app must re-provide it.
+
+**State tree**: Slot nodes use qualified IDs with `::` separator
+(e.g. `app:dialog::header`, `controls:d-root::_`).
 
 #### Events
 

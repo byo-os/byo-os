@@ -9,9 +9,10 @@
 //! specializes it for the orchestrator (keyed on [`QualifiedId`], data is
 //! [`ProcessId`]) and adds orchestrator-specific operations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use byo::emitter::Emitter;
+use byo::protocol::Command;
 use byo::tree::{self, ObjectKind};
 
 use crate::id::QualifiedId;
@@ -183,6 +184,51 @@ pub fn write_children(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) -
     true
 }
 
+/// Extract prior slot contents from the state tree for a source object.
+///
+/// Finds all `SlotContent` children of the given object, serializes their
+/// children as BYO commands, and returns a map of slot name → commands.
+/// Used to provide prior slot state for `@` (Patch) re-expansions.
+pub fn collect_prior_slots(tree: &ObjectTree, qid: &QualifiedId) -> HashMap<String, Vec<Command>> {
+    let Some(obj) = tree.get(qid) else {
+        return HashMap::new();
+    };
+    let mut result = HashMap::new();
+    for child_id in &obj.children {
+        let Some(child_obj) = tree.get(child_id) else {
+            continue;
+        };
+        if !matches!(child_obj.kind, ObjectKind::SlotContent) {
+            continue;
+        }
+        debug_assert!(
+            child_obj.slot_ref.is_some(),
+            "SlotContent {} has no linked Slot — link_slot_refs not called?",
+            child_id,
+        );
+
+        // Extract slot name from QID (e.g. `app:d::header` → `header`)
+        let local = child_obj.id.local_id();
+        let Some(sep_pos) = local.rfind("::") else {
+            continue;
+        };
+        let name = &local[sep_pos + 2..];
+
+        // Serialize the slot's children as commands
+        let mut buf = Vec::new();
+        for grandchild_id in &child_obj.children {
+            write_child_node(tree, grandchild_id, &mut buf);
+        }
+
+        if !buf.is_empty()
+            && let Ok(cmds) = byo::parser::parse_bytes(buf.into())
+        {
+            result.insert(name.to_string(), cmds);
+        }
+    }
+    result
+}
+
 /// Write a single child node (slot or regular type) into `buf`.
 fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
     let Some(obj) = tree.get(qid) else {
@@ -190,10 +236,10 @@ fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
     };
     match &obj.kind {
         ObjectKind::SlotContent => {
-            // Slot QIDs use `parent{name` format (e.g. `app:d{header`).
-            // Extract the bare slot name after `{` for the wire.
+            // Slot QIDs use `parent::name` format (e.g. `app:d::header`).
+            // Extract the bare slot name after `::` for the wire.
             let local = obj.id.local_id();
-            let slot_name = local.rfind('{').map(|i| &local[i + 1..]).unwrap_or(local);
+            let slot_name = local.rfind("::").map(|i| &local[i + 2..]).unwrap_or(local);
             let mut em = Emitter::new(&mut *buf);
             let _ = em.slot_push(slot_name);
             for child_id in &obj.children {
@@ -466,14 +512,14 @@ mod tests {
         let mut tree = ObjectTree::new();
         tree.upsert(
             ObjectKind::SlotContent,
-            &qid("app", "d{header"),
+            &qid("app", "d::header"),
             &IndexMap::new(),
             pid(1),
         );
         let mut buf = Vec::new();
         assert!(!write_reduced_upsert(
             &tree,
-            &qid("app", "d{header"),
+            &qid("app", "d::header"),
             &mut buf
         ));
         assert!(buf.is_empty());
@@ -485,14 +531,14 @@ mod tests {
         let mut tree = ObjectTree::new();
         tree.upsert(
             ObjectKind::Slot,
-            &qid("controls", "hdr-wrap{header"),
+            &qid("controls", "hdr-wrap::header"),
             &IndexMap::new(),
             pid(2),
         );
         let mut buf = Vec::new();
         assert!(!write_reduced_upsert(
             &tree,
-            &qid("controls", "hdr-wrap{header"),
+            &qid("controls", "hdr-wrap::header"),
             &mut buf
         ));
         assert!(buf.is_empty());
@@ -526,14 +572,14 @@ mod tests {
             pid(1),
         );
 
-        // SlotContent node for "header" — QID: app:dialog{header
+        // SlotContent node for "header" — QID: app:dialog::header
         tree.upsert(
             ObjectKind::SlotContent,
-            &qid("app", "dialog{header"),
+            &qid("app", "dialog::header"),
             &IndexMap::new(),
             pid(1),
         );
-        tree.set_parent(&qid("app", "dialog{header"), &qid("app", "dialog"));
+        tree.set_parent(&qid("app", "dialog::header"), &qid("app", "dialog"));
 
         // Child inside the header slot
         tree.upsert(
@@ -542,30 +588,30 @@ mod tests {
             &props(&[("content", "Hello")]),
             pid(1),
         );
-        tree.set_parent(&qid("app", "title"), &qid("app", "dialog{header"));
+        tree.set_parent(&qid("app", "title"), &qid("app", "dialog::header"));
 
-        // SlotContent node for default "_" — QID: app:dialog{_
+        // SlotContent node for default "_" — QID: app:dialog::_
         tree.upsert(
             ObjectKind::SlotContent,
-            &qid("app", "dialog{_"),
+            &qid("app", "dialog::_"),
             &IndexMap::new(),
             pid(1),
         );
-        tree.set_parent(&qid("app", "dialog{_"), &qid("app", "dialog"));
+        tree.set_parent(&qid("app", "dialog::_"), &qid("app", "dialog"));
 
         // Child inside default slot
         tree.upsert("view".into(), &qid("app", "body"), &IndexMap::new(), pid(1));
-        tree.set_parent(&qid("app", "body"), &qid("app", "dialog{_"));
+        tree.set_parent(&qid("app", "body"), &qid("app", "dialog::_"));
 
         let mut buf = Vec::new();
         assert!(write_children(&tree, &qid("app", "dialog"), &mut buf));
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("{header"), "expected {{header in: {s}");
+        assert!(s.contains("::header {"), "expected ::header {{ in: {s}");
         assert!(
             s.contains("+text app:title content=Hello"),
             "expected title in: {s}"
         );
-        assert!(s.contains("{_"), "expected {{_ in: {s}");
+        assert!(s.contains("::_ {"), "expected ::_ {{ in: {s}");
         assert!(s.contains("+view app:body"), "expected body in: {s}");
     }
 

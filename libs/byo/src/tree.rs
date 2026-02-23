@@ -185,6 +185,26 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
             parent.children.retain(|c| c != id);
         }
 
+        // Clear reciprocal slot_ref pointers before removing objects.
+        let mut to_clear = Vec::new();
+        if let Some(obj) = self.objects.get(id)
+            && let Some(ref target) = obj.slot_ref
+        {
+            to_clear.push(target.clone());
+        }
+        for desc in &descendants {
+            if let Some(obj) = self.objects.get(desc)
+                && let Some(ref target) = obj.slot_ref
+            {
+                to_clear.push(target.clone());
+            }
+        }
+        for target in to_clear {
+            if let Some(obj) = self.objects.get_mut(&target) {
+                obj.slot_ref = None;
+            }
+        }
+
         // Remove the object and all descendants.
         for desc in &descendants {
             self.objects.remove(desc);
@@ -273,6 +293,17 @@ impl<K: Eq + Hash + Clone + Display, D: Clone> ObjectTree<K, D> {
             .filter(|o| predicate(o))
             .map(|o| o.id.clone())
             .collect();
+
+        // Clear reciprocal slot_ref pointers before removing.
+        let to_clear: Vec<K> = matching
+            .iter()
+            .filter_map(|id| self.objects.get(id).and_then(|o| o.slot_ref.clone()))
+            .collect();
+        for target in to_clear {
+            if let Some(obj) = self.objects.get_mut(&target) {
+                obj.slot_ref = None;
+            }
+        }
 
         for id in &matching {
             // Remove from parent's children list.
@@ -866,7 +897,7 @@ mod tests {
     #[test]
     fn apply_with_slot_push() {
         let mut tree = TestTree::new();
-        let commands = crate::parser::parse("+view dialog { {header +text title} }").unwrap();
+        let commands = crate::parser::parse("+view dialog { ::header { +text title } }").unwrap();
         tree.apply(&commands, |id| id.to_string(), |_, _| 0);
 
         // dialog, header (slot), title
@@ -884,5 +915,60 @@ mod tests {
         let title = tree.get(&key("title")).unwrap();
         assert_eq!(title.kind, ObjectKind::Type("text".into()));
         assert_eq!(title.parent, Some(key("header")));
+    }
+
+    #[test]
+    fn destroy_clears_reciprocal_slot_ref() {
+        let mut tree = TestTree::new();
+        tree.upsert(
+            ObjectKind::Type("view".into()),
+            &key("source"),
+            &IndexMap::new(),
+            0,
+        );
+
+        // App-side slot content
+        tree.upsert(
+            ObjectKind::SlotContent,
+            &key("app-slot"),
+            &IndexMap::new(),
+            0,
+        );
+        tree.set_parent(&key("app-slot"), &key("source"));
+
+        // Expansion-side slot placeholder
+        tree.upsert(ObjectKind::Slot, &key("exp-slot"), &IndexMap::new(), 1);
+        tree.set_parent(&key("exp-slot"), &key("source"));
+
+        // Wire cross-references
+        tree.set_slot_ref(&key("app-slot"), &key("exp-slot"));
+        tree.set_slot_ref(&key("exp-slot"), &key("app-slot"));
+
+        assert!(tree.get(&key("app-slot")).unwrap().slot_ref.is_some());
+        assert!(tree.get(&key("exp-slot")).unwrap().slot_ref.is_some());
+
+        // Destroy the expansion slot — should clear the app slot's ref.
+        tree.destroy(&key("exp-slot"));
+        assert!(tree.get(&key("exp-slot")).is_none());
+        assert_eq!(tree.get(&key("app-slot")).unwrap().slot_ref, None);
+    }
+
+    #[test]
+    fn remove_where_clears_reciprocal_slot_ref() {
+        let mut tree = TestTree::new();
+        tree.upsert(
+            ObjectKind::SlotContent,
+            &key("content"),
+            &IndexMap::new(),
+            1,
+        );
+        tree.upsert(ObjectKind::Slot, &key("slot"), &IndexMap::new(), 2);
+        tree.set_slot_ref(&key("content"), &key("slot"));
+        tree.set_slot_ref(&key("slot"), &key("content"));
+
+        // Remove all daemon-owned objects (data == 2).
+        tree.remove_where(|obj| obj.data == 2);
+        assert!(tree.get(&key("slot")).is_none());
+        assert_eq!(tree.get(&key("content")).unwrap().slot_ref, None);
     }
 }

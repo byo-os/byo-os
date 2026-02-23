@@ -639,23 +639,13 @@ impl Parser {
             return self.parse_response_command();
         }
 
-        // `{name ...}` — slot block (brace group whose first token is an ident
-        // that isn't a control keyword)
-        if let Some(TokenTree::Group(g)) = self.peek()
-            && g.delimiter() == Delimiter::Brace
-        {
-            let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-            if let Some(TokenTree::Ident(id)) = inner.first()
-                && !matches!(id.to_string().as_str(), "if" | "for" | "match")
-            {
-                let stream = g.stream();
-                self.pos += 1;
-                return self.parse_slot_block(stream);
-            }
+        // `::name { ... }` — slot block (two colons + ident + brace group)
+        if self.peek_double_colon() {
+            return self.parse_slot_block_new();
         }
 
         Err(format!(
-            "expected command (+, -, @, !, #, ?, ., if, for, match), found {:?}",
+            "expected command (+, -, @, !, #, ?, ., ::, if, for, match), found {:?}",
             self.peek()
         ))
     }
@@ -796,13 +786,34 @@ impl Parser {
         }
     }
 
-    /// Parse a slot block: `{name cmd... }`. The brace group has already been
-    /// consumed; `stream` is its inner token stream. The first token is the
-    /// slot name (an ident), followed by commands.
-    fn parse_slot_block(&mut self, stream: TokenStream) -> Result<IrCommand, String> {
-        let mut inner = Parser::new(stream, self.real_spans);
-        let name = inner.parse_name_in("slot name", &[':', '-'])?;
-        let children = inner.parse_commands()?;
+    /// Check if the next two tokens are `::` (two adjacent colon punctuation).
+    fn peek_double_colon(&self) -> bool {
+        matches!(
+            (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)),
+            (Some(TokenTree::Punct(p1)), Some(TokenTree::Punct(p2)))
+                if p1.as_char() == ':' && p2.as_char() == ':'
+        )
+    }
+
+    /// Parse a `::name { ... }` slot block. The `::` has NOT been consumed yet.
+    fn parse_slot_block_new(&mut self) -> Result<IrCommand, String> {
+        self.pos += 2; // consume ::
+
+        // Expect an identifier (the slot name)
+        let name = match self.next() {
+            Some(TokenTree::Ident(id)) => IrValue::Literal(id.to_string()),
+            other => return Err(format!("expected slot name after '::', found {:?}", other)),
+        };
+
+        // Expect a brace group for children
+        let children = match self.next() {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                let mut inner = Parser::new(g.stream(), self.real_spans);
+                inner.parse_commands()?
+            }
+            other => return Err(format!("expected '{{' after slot name, found {:?}", other)),
+        };
+
         Ok(IrCommand::SlotBlock { name, children })
     }
 
@@ -1481,10 +1492,10 @@ mod tests {
 
     #[test]
     fn parse_slot_block() {
-        // {header +text t} inside children
+        // ::header { +text t } inside children
         let input = quote! {
             +view root {
-                {header +text t}
+                ::header { +text t }
             }
         };
         let cmds = parse(input, false).unwrap();
@@ -1512,10 +1523,10 @@ mod tests {
 
     #[test]
     fn parse_default_slot_block() {
-        // {_ +view v} — default slot
+        // ::_ { +view v } — default slot
         let input = quote! {
             +view root {
-                {_ +view content}
+                ::_ { +view content }
             }
         };
         let cmds = parse(input, false).unwrap();

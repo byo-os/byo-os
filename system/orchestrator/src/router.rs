@@ -387,6 +387,7 @@ impl Router {
     fn update_state(&mut self, commands: &[Command], owner: ProcessId, client: &str) {
         let mut parent_stack: Vec<QualifiedId> = Vec::new();
         let mut last_qid: Option<QualifiedId> = None;
+        let mut last_was_claimed = false;
 
         for cmd in commands {
             match cmd {
@@ -400,6 +401,7 @@ impl Router {
                     if let Some(parent) = parent_stack.last() {
                         self.state.set_parent(&qid, parent);
                     }
+                    last_was_claimed = self.claims.contains_key(&**kind) && *id != "_";
                     last_qid = Some(qid);
                 }
                 Command::Destroy { kind, id } => {
@@ -414,9 +416,25 @@ impl Router {
                 Command::Push { slot } => {
                     if let Some(name) = slot {
                         // Slot push — create a SlotContent node in the state tree.
-                        // QID format: client:parent{name (e.g. app:d{header).
+                        // QID format: client:parent::name (e.g. app:d::header).
                         let parent_local = last_qid.as_ref().map(|q| q.local_id()).unwrap_or("");
-                        let slot_qid = QualifiedId::new(client, &format!("{parent_local}{{{name}"));
+                        let slot_qid = QualifiedId::new(client, &format!("{parent_local}::{name}"));
+                        self.state.upsert(
+                            ObjectKind::SlotContent,
+                            &slot_qid,
+                            &IndexMap::new(),
+                            owner,
+                        );
+                        if let Some(parent) = parent_stack.last() {
+                            self.state.set_parent(&slot_qid, parent);
+                        }
+                        parent_stack.push(slot_qid.clone());
+                        last_qid = Some(slot_qid);
+                    } else if last_was_claimed {
+                        // Bare children of a claimed type → synthetic default
+                        // SlotContent node with name "_".
+                        let parent_local = last_qid.as_ref().map(|q| q.local_id()).unwrap_or("");
+                        let slot_qid = QualifiedId::new(client, &format!("{parent_local}::_"));
                         self.state.upsert(
                             ObjectKind::SlotContent,
                             &slot_qid,
@@ -431,6 +449,7 @@ impl Router {
                     } else if let Some(ref qid) = last_qid {
                         parent_stack.push(qid.clone());
                     }
+                    last_was_claimed = false;
                 }
                 Command::Pop => {
                     parent_stack.pop();
@@ -1253,12 +1272,12 @@ impl Router {
                     Command::Push { slot } => {
                         if let Some(name) = slot {
                             // Expansion-side Slot node in the state tree.
-                            // QID format: client:parent_local{name.
+                            // QID format: client:parent_local::name.
                             let (parent_client, parent_local) = last_qid
                                 .as_ref()
                                 .map(|q| (q.client().to_owned(), q.local_id().to_owned()))
                                 .unwrap_or_default();
-                            let slot_local = format!("{parent_local}{{{name}");
+                            let slot_local = format!("{parent_local}::{name}");
                             let slot_qid = QualifiedId::new(&parent_client, &slot_local);
                             self.state.upsert(
                                 ObjectKind::Slot,
@@ -1325,6 +1344,11 @@ impl Router {
             .map(|(qid, kind, _)| (qid.clone(), kind.clone()))
             .collect();
 
+        let old_parents: HashMap<QualifiedId, Option<QualifiedId>> = descendants
+            .iter()
+            .filter_map(|(qid, _, _)| self.state.get(qid).map(|o| (qid.clone(), o.parent.clone())))
+            .collect();
+
         let mut delta = Vec::new();
         let mut seen_qids: std::collections::HashSet<QualifiedId> =
             std::collections::HashSet::new();
@@ -1347,37 +1371,50 @@ impl Router {
                     let new_props = props_to_map(props);
 
                     if let Some(old_props) = old_objects.get(&qid) {
-                        // Existing object — compute delta.
-                        let mut delta_props: Vec<u8> = Vec::new();
-                        let mut has_changes = false;
+                        // Determine the new parent for this object.
+                        let new_parent = parent_stack
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| source_qid.clone());
+                        let old_parent = old_parents.get(&qid).and_then(|p| p.clone());
+                        let parent_changed = old_parent.as_ref() != Some(&new_parent);
 
-                        // Check for changed/added props.
-                        for (key, new_val) in &new_props {
-                            if old_props.get(key) != Some(new_val) {
-                                has_changes = true;
-                                match new_val {
-                                    PropValue::Str(s) => {
-                                        let _ = write!(delta_props, " {key}=");
-                                        crate::batch::write_value(&mut delta_props, s);
-                                    }
-                                    PropValue::Flag => {
-                                        let _ = write!(delta_props, " {key}");
+                        if parent_changed {
+                            // Parent changed — emit destroy+create (compositor
+                            // can't reparent via patch).
+                            let _ = write!(delta, "\n-{kind} {qid}");
+                            crate::batch::write_upsert(&mut delta, kind, &qid.to_string(), props);
+                        } else {
+                            // Same parent — compute prop delta.
+                            let mut delta_props: Vec<u8> = Vec::new();
+                            let mut has_changes = false;
+
+                            for (key, new_val) in &new_props {
+                                if old_props.get(key) != Some(new_val) {
+                                    has_changes = true;
+                                    match new_val {
+                                        PropValue::Str(s) => {
+                                            let _ = write!(delta_props, " {key}=");
+                                            crate::batch::write_value(&mut delta_props, s);
+                                        }
+                                        PropValue::Flag => {
+                                            let _ = write!(delta_props, " {key}");
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        // Check for removed props.
-                        for key in old_props.keys() {
-                            if !new_props.contains_key(key) {
-                                has_changes = true;
-                                let _ = write!(delta_props, " ~{key}");
+                            for key in old_props.keys() {
+                                if !new_props.contains_key(key) {
+                                    has_changes = true;
+                                    let _ = write!(delta_props, " ~{key}");
+                                }
                             }
-                        }
 
-                        if has_changes {
-                            let _ = write!(delta, "\n@{kind} {qid}");
-                            delta.extend_from_slice(&delta_props);
+                            if has_changes {
+                                let _ = write!(delta, "\n@{kind} {qid}");
+                                delta.extend_from_slice(&delta_props);
+                            }
                         }
                     } else {
                         // New object — emit create.
@@ -1398,12 +1435,12 @@ impl Router {
                 Command::Push { slot } => {
                     if let Some(name) = slot {
                         // Expansion-side Slot node in state tree.
-                        // QID format: client:parent_local{name.
+                        // QID format: client:parent_local::name.
                         let (parent_client, parent_local) = last_qid
                             .as_ref()
                             .map(|q| (q.client().to_owned(), q.local_id().to_owned()))
                             .unwrap_or_default();
-                        let slot_local = format!("{parent_local}{{{name}");
+                        let slot_local = format!("{parent_local}::{name}");
                         let slot_qid = QualifiedId::new(&parent_client, &slot_local);
                         seen_qids.insert(slot_qid.clone());
                         self.state.upsert(
@@ -1442,6 +1479,52 @@ impl Router {
         }
 
         delta
+    }
+
+    /// Link `SlotContent` ↔ `Slot` cross-references for a source object.
+    ///
+    /// After expansion state is written, this finds `SlotContent` children
+    /// (app-side) and `Slot` descendants (expansion-side) of the source
+    /// object and sets `slot_ref` on each to point to its counterpart.
+    /// Matching is by bare slot name (the part after `::` in the local ID).
+    fn link_slot_refs(&mut self, source_qid: &QualifiedId) {
+        let descendants = self.state.descendants_info(source_qid);
+
+        // Collect SlotContent and Slot QIDs, extracting slot names.
+        let mut content_by_name: HashMap<&str, QualifiedId> = HashMap::new();
+        let mut slot_by_name: HashMap<&str, QualifiedId> = HashMap::new();
+
+        // We need stable references to the QIDs, so collect into a vec first.
+        let slot_qids: Vec<(QualifiedId, ObjectKind)> = descendants
+            .iter()
+            .filter(|(_, kind, _)| matches!(kind, ObjectKind::SlotContent | ObjectKind::Slot))
+            .map(|(qid, kind, _)| (qid.clone(), kind.clone()))
+            .collect();
+
+        for (qid, kind) in &slot_qids {
+            let local = qid.local_id();
+            let Some(sep_pos) = local.rfind("::") else {
+                continue;
+            };
+            let name = &local[sep_pos + 2..];
+            match kind {
+                ObjectKind::SlotContent => {
+                    content_by_name.insert(name, qid.clone());
+                }
+                ObjectKind::Slot => {
+                    slot_by_name.insert(name, qid.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // Set bidirectional slot_ref for matching pairs.
+        for (name, content_qid) in &content_by_name {
+            if let Some(slot_qid) = slot_by_name.get(name) {
+                self.state.set_slot_ref(content_qid, slot_qid);
+                self.state.set_slot_ref(slot_qid, content_qid);
+            }
+        }
     }
 
     /// Handle cascade destroys for claimed-type objects.
@@ -1515,10 +1598,24 @@ impl Router {
             let is_replay = batch.is_replay;
 
             // Reconcile re-expansions using the per-expansion flag.
+            // For re-expansions, substitute slot contents (batch + prior state)
+            // into the daemon's expansion before reconciling.
             let mut reconciliation_buf = Vec::new();
             for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand)) in &batch.expansions {
                 if *is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
-                    let delta = self.reconcile_expansion(&source_qid, *daemon_pid, expansion_cmds);
+                    // Collect slot contents from the batch's @ children
+                    let batch_slots = batch.collect_patch_slots(source_qid_str);
+                    // Collect prior slot contents from the state tree
+                    let prior_slots = crate::state::collect_prior_slots(&self.state, &source_qid);
+                    // Merge: batch overrides prior, unmentioned fall back to prior
+                    let merged = crate::batch::merge_slots(batch_slots, Some(prior_slots));
+                    // Substitute slots into the expansion
+                    let effective_cmds = if merged.is_empty() {
+                        expansion_cmds.clone()
+                    } else {
+                        crate::batch::substitute_slots(expansion_cmds, &merged)
+                    };
+                    let delta = self.reconcile_expansion(&source_qid, *daemon_pid, &effective_cmds);
                     reconciliation_buf.extend_from_slice(&delta);
                 }
             }
@@ -1532,6 +1629,13 @@ impl Router {
 
             // Update state tree with expansion nodes (for initial expansions).
             self.update_expansion_state(&batch);
+
+            // Link SlotContent ↔ Slot cross-references for all expansions.
+            for source_qid_str in batch.expansions.keys() {
+                if let Some(source_qid) = QualifiedId::parse(source_qid_str) {
+                    self.link_slot_refs(&source_qid);
+                }
+            }
 
             // Append reconciliation output.
             rewritten.extend_from_slice(&reconciliation_buf);

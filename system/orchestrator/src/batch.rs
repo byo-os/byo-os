@@ -115,6 +115,36 @@ impl PendingBatch {
             .insert(qid.to_string(), (owner, expansion_cmds, is_re_expand));
     }
 
+    /// Extract slot contents from the batch for a specific qualified ID.
+    ///
+    /// Scans the batch commands for a Patch targeting the given QID,
+    /// and if it has children, collects slot contents from them.
+    /// Returns qualified slot contents (IDs prefixed with client name).
+    pub fn collect_patch_slots(&self, target_qid: &str) -> HashMap<String, Vec<Command>> {
+        let mut qid_buf = String::new();
+        let mut i = 0;
+        while i < self.commands.len() {
+            if let Command::Patch { id, .. } = &self.commands[i] {
+                qualify_into(&mut qid_buf, &self.client_name, id);
+                if qid_buf == target_qid {
+                    // Found the Patch. Check if next command is Push (children).
+                    if i + 1 < self.commands.len()
+                        && matches!(self.commands[i + 1], Command::Push { slot: None })
+                    {
+                        let (slot_map, _) = collect_slot_contents(&self.commands, i + 1);
+                        return slot_map
+                            .into_iter()
+                            .map(|(k, v)| (k, qualify_commands(&v, &self.client_name)))
+                            .collect();
+                    }
+                    return HashMap::new();
+                }
+            }
+            i += 1;
+        }
+        HashMap::new()
+    }
+
     /// Rewrite the batch: splice expansions and qualify all IDs.
     /// Returns the rewritten payload bytes.
     ///
@@ -126,6 +156,11 @@ impl PendingBatch {
     /// Rewrite result: the rewritten payload bytes plus any claimed-type
     /// destroys that need cascade handling by the router.
     pub fn rewrite(&self, claims: &HashMap<String, ProcessId>) -> (Vec<u8>, Vec<QualifiedId>) {
+        debug_assert!(
+            self.is_ready(),
+            "rewrite called before all expansions received ({} pending)",
+            self.pending_expands.len(),
+        );
         let mut buf = Vec::new();
         let mut claimed_destroys = Vec::new();
         self.rewrite_commands(
@@ -318,8 +353,9 @@ impl PendingBatch {
                 byo::Command::Patch { kind, id, props } => {
                     if claims.contains_key(&**kind) && *id != "_" {
                         // Claimed type: don't emit patch to compositor.
-                        // Re-expansion is handled by the router.
-                        // If next command is Push (children), skip them.
+                        // Re-expansion is handled by the router via reconciliation.
+                        // If next command is Push (children), skip them — the router
+                        // will collect slot contents from the state tree.
                         skip_next_children = Some(SkipMode::Skip);
                     } else {
                         qualify_into(&mut qid_buf, client, id);
@@ -480,19 +516,26 @@ fn collect_slot_contents(
 ) -> (HashMap<String, Vec<byo::Command>>, usize) {
     use byo::Command;
 
+    debug_assert!(
+        matches!(commands.get(start_idx), Some(Command::Push { slot: None })),
+        "collect_slot_contents: expected Push {{ slot: None }} at start_idx {start_idx}",
+    );
+
     let mut slots: HashMap<String, Vec<Command>> = HashMap::new();
     let mut default_cmds: Vec<Command> = Vec::new();
     let mut i = start_idx + 1; // skip the outer Push
-    let outer_depth: usize = 1; // we're inside the outer Push
 
-    while i < commands.len() && outer_depth > 0 {
+    // The outer loop only sees top-level children. Nested content
+    // (inside slot blocks or non-slotted pushes) is consumed by
+    // inner loops in each arm.
+    while i < commands.len() {
         match &commands[i] {
-            Command::Pop if outer_depth == 1 => {
+            Command::Pop => {
                 // Matching Pop for the outer block
                 i += 1;
                 break;
             }
-            Command::Push { slot: Some(name) } if outer_depth == 1 => {
+            Command::Push { slot: Some(name) } => {
                 // Named slot block at the top level of children
                 let slot_name = name.to_string();
                 let mut slot_cmds = Vec::new();
@@ -564,6 +607,98 @@ fn collect_slot_contents(
     }
 
     (slots, i)
+}
+
+/// Merge batch-collected slot contents with prior slot state.
+///
+/// - Slots present in `batch_slots` override prior state.
+/// - Slots absent from `batch_slots` fall back to `prior_slots`.
+/// - An explicitly empty slot in `batch_slots` (empty Vec) means "clear" —
+///   it is NOT filled from prior state (the daemon's fallback will be used).
+pub fn merge_slots(
+    batch_slots: HashMap<String, Vec<byo::Command>>,
+    prior_slots: Option<HashMap<String, Vec<byo::Command>>>,
+) -> HashMap<String, Vec<byo::Command>> {
+    let Some(mut prior) = prior_slots else {
+        return batch_slots;
+    };
+    if batch_slots.is_empty() {
+        // No batch children at all — use all prior slots
+        return prior;
+    }
+    // Start with batch slots, fill in unmentioned from prior
+    let mut merged = HashMap::new();
+    // Track which prior slots are mentioned in the batch
+    for (name, cmds) in batch_slots {
+        prior.remove(&name); // consumed — don't fall back
+        if !cmds.is_empty() {
+            merged.insert(name, cmds);
+        }
+        // else: explicitly cleared — omit so daemon fallback is used
+    }
+    // Unmentioned prior slots are preserved
+    merged.extend(prior);
+    merged
+}
+
+/// Substitute slot contents into expansion commands.
+///
+/// Walks the expansion commands. When encountering a slotted Push (`::name`),
+/// replaces it with the corresponding slot content (if available) or uses
+/// the fallback content from the expansion. Produces new commands with
+/// all slot pushes resolved.
+pub fn substitute_slots(
+    expansion_cmds: &[byo::Command],
+    slot_contents: &HashMap<String, Vec<byo::Command>>,
+) -> Vec<byo::Command> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < expansion_cmds.len() {
+        match &expansion_cmds[i] {
+            byo::Command::Push { slot: Some(name) } => {
+                let slot_key = name.to_string();
+                let has_content = slot_contents.get(&slot_key).is_some_and(|c| !c.is_empty());
+
+                // Find the matching Pop (skip fallback content range)
+                let fallback_start = i + 1;
+                let mut scan = fallback_start;
+                let mut scan_depth: usize = 1;
+                while scan < expansion_cmds.len() && scan_depth > 0 {
+                    match &expansion_cmds[scan] {
+                        byo::Command::Push { .. } => scan_depth += 1,
+                        byo::Command::Pop => scan_depth -= 1,
+                        _ => {}
+                    }
+                    scan += 1;
+                }
+                let fallback_end = scan - 1; // the matching Pop
+
+                if has_content {
+                    // Splice app-provided content (already qualified)
+                    result.extend_from_slice(&slot_contents[&slot_key]);
+                } else {
+                    // Use fallback content from the expansion
+                    let fallback = &expansion_cmds[fallback_start..fallback_end];
+                    result.extend_from_slice(fallback);
+                }
+                i = scan;
+            }
+            other => {
+                result.push(other.clone());
+                i += 1;
+            }
+        }
+    }
+
+    debug_assert!(
+        !result
+            .iter()
+            .any(|c| matches!(c, byo::Command::Push { slot: Some(_) })),
+        "substitute_slots: output still contains slotted Push — slot not consumed",
+    );
+
+    result
 }
 
 /// Maximum nesting depth for recursive daemon expansion.
@@ -833,8 +968,8 @@ mod tests {
 
     #[test]
     fn collect_slot_contents_basic() {
-        // +dialog d { {header +text t} {footer +view f} }
-        let commands = cmds("+dialog d { {header +text t} {footer +view f} }");
+        // +dialog d { ::header { +text t } ::footer { +view f } }
+        let commands = cmds("+dialog d { ::header { +text t } ::footer { +view f } }");
         // Push{None} is at index 1
         let (slots, end_idx) = collect_slot_contents(&commands, 1);
         assert_eq!(slots.len(), 2);
@@ -862,8 +997,8 @@ mod tests {
 
     #[test]
     fn collect_slot_contents_mixed() {
-        // +dialog d { {header +text h} +view bare }
-        let commands = cmds("+dialog d { {header +text h} +view bare }");
+        // +dialog d { ::header { +text h } +view bare }
+        let commands = cmds("+dialog d { ::header { +text h } +view bare }");
         let (slots, _) = collect_slot_contents(&commands, 1);
         assert_eq!(slots.len(), 2);
         assert!(slots.contains_key("header"));
@@ -875,7 +1010,7 @@ mod tests {
     #[test]
     fn rewrite_with_default_slot() {
         // App: +dialog d { +button ok label=OK }
-        // Dialog daemon expansion has a default slot: +view controls:d-root { {_ +text controls:fallback} }
+        // Dialog daemon expansion has a default slot: +view controls:d-root { ::_ { +text controls:fallback } }
         let mut batch = PendingBatch::new(
             pid(1),
             "app".into(),
@@ -891,7 +1026,7 @@ mod tests {
             "app:d".to_string(),
             (
                 pid(2),
-                cmds("+view controls:d-root { {_ +text controls:fallback} }"),
+                cmds("+view controls:d-root { ::_ { +text controls:fallback } }"),
                 false,
             ),
         );
@@ -912,12 +1047,12 @@ mod tests {
 
     #[test]
     fn rewrite_with_named_slots() {
-        // App: +dialog d { {header +text title content=Hi} {footer +view actions} }
-        // Dialog expansion: +view controls:d-root { {header +text controls:hdr} {footer} }
+        // App: +dialog d { ::header { +text title content=Hi } ::footer { +view actions } }
+        // Dialog expansion: +view controls:d-root { ::header { +text controls:hdr } ::footer {} }
         let mut batch = PendingBatch::new(
             pid(1),
             "app".into(),
-            cmds("+dialog d { {header +text title content=Hi} {footer +view actions} }"),
+            cmds("+dialog d { ::header { +text title content=Hi } ::footer { +view actions } }"),
         );
 
         let mut claims = HashMap::new();
@@ -927,7 +1062,7 @@ mod tests {
             "app:d".to_string(),
             (
                 pid(2),
-                cmds("+view controls:d-root { {header +text controls:hdr} {footer} }"),
+                cmds("+view controls:d-root { ::header { +text controls:hdr } ::footer {} }"),
                 false,
             ),
         );
@@ -944,7 +1079,7 @@ mod tests {
     #[test]
     fn rewrite_with_slot_fallback() {
         // App: +dialog d (no children — no slot content)
-        // Dialog expansion with fallback: +view controls:d-root { {_ +text controls:empty} }
+        // Dialog expansion with fallback: +view controls:d-root { ::_ { +text controls:empty } }
         let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+dialog d"));
 
         let mut claims = HashMap::new();
@@ -954,7 +1089,7 @@ mod tests {
             "app:d".to_string(),
             (
                 pid(2),
-                cmds("+view controls:d-root { {_ +text controls:empty} }"),
+                cmds("+view controls:d-root { ::_ { +text controls:empty } }"),
                 false,
             ),
         );
@@ -967,7 +1102,7 @@ mod tests {
     #[test]
     fn rewrite_with_no_fallback_no_content() {
         // App: +dialog d (no children)
-        // Dialog expansion: +view controls:d-root { {_} }
+        // Dialog expansion: +view controls:d-root { ::_ {} }
         let mut batch = PendingBatch::new(pid(1), "app".into(), cmds("+dialog d"));
 
         let mut claims = HashMap::new();
@@ -975,11 +1110,236 @@ mod tests {
 
         batch.expansions.insert(
             "app:d".to_string(),
-            (pid(2), cmds("+view controls:d-root { {_} }"), false),
+            (pid(2), cmds("+view controls:d-root { ::_ {} }"), false),
         );
 
         let (result, _) = batch.rewrite(&claims);
         // Empty slot produces nothing — just the empty push/pop
         assert_eq_bytes(&result, "+view controls:d-root { }");
+    }
+
+    // -- merge_slots tests -------------------------------------------------------
+
+    #[test]
+    fn merge_slots_batch_overrides_prior() {
+        let batch = HashMap::from([("header".to_string(), cmds("+text app:title content=Bye"))]);
+        let prior = Some(HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("footer".to_string(), cmds("+view app:actions")),
+        ]));
+        let merged = merge_slots(batch, prior);
+        // Header: from batch (override)
+        assert_eq!(merged["header"], cmds("+text app:title content=Bye"));
+        // Footer: from prior (unmentioned)
+        assert_eq!(merged["footer"], cmds("+view app:actions"));
+    }
+
+    #[test]
+    fn merge_slots_empty_batch_preserves_all_prior() {
+        let prior = Some(HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("_".to_string(), cmds("+view app:body")),
+        ]));
+        let merged = merge_slots(HashMap::new(), prior);
+        assert_eq!(merged["header"], cmds("+text app:title content=Hi"));
+        assert_eq!(merged["_"], cmds("+view app:body"));
+    }
+
+    #[test]
+    fn merge_slots_explicit_clear_removes_prior() {
+        // An empty Vec in batch_slots means "clear this slot"
+        let batch = HashMap::from([("header".to_string(), Vec::new())]);
+        let prior = Some(HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("_".to_string(), cmds("+view app:body")),
+        ]));
+        let merged = merge_slots(batch, prior);
+        // Header: explicitly cleared — not in merged
+        assert!(!merged.contains_key("header"));
+        // Default: preserved from prior
+        assert_eq!(merged["_"], cmds("+view app:body"));
+    }
+
+    #[test]
+    fn merge_slots_no_prior() {
+        let batch = HashMap::from([("header".to_string(), cmds("+text app:title"))]);
+        let merged = merge_slots(batch, None);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged["header"], cmds("+text app:title"));
+    }
+
+    // -- substitute_slots tests --------------------------------------------------
+
+    #[test]
+    fn substitute_slots_replaces_with_content() {
+        let expansion = cmds("+view root { ::header { +text fallback } ::footer { +text ftr } }");
+        let slots = HashMap::from([("header".to_string(), cmds("+text app:title content=Hi"))]);
+        let result = substitute_slots(&expansion, &slots);
+        // Header: replaced with app content. Footer: fallback.
+        assert_eq!(
+            result,
+            cmds("+view root { +text app:title content=Hi +text ftr }")
+        );
+    }
+
+    #[test]
+    fn substitute_slots_empty_slot_uses_fallback() {
+        let expansion = cmds("+view root { ::header { +text fallback } }");
+        let slots = HashMap::new();
+        let result = substitute_slots(&expansion, &slots);
+        // No slot content → fallback used
+        assert_eq!(result, cmds("+view root { +text fallback }"));
+    }
+
+    #[test]
+    fn substitute_slots_empty_slot_content_strips_slot() {
+        // Empty slot with no fallback produces nothing
+        let expansion = cmds("+view root { ::_ {} }");
+        let slots = HashMap::new();
+        let result = substitute_slots(&expansion, &slots);
+        assert_eq!(result, cmds("+view root { }"));
+    }
+
+    // -- collect_patch_slots tests -----------------------------------------------
+
+    #[test]
+    fn collect_patch_slots_extracts_from_batch() {
+        let batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("@dialog d { ::header { +text title content=Bye } }"),
+        );
+        let slots = batch.collect_patch_slots("app:d");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots["header"], cmds("+text app:title content=Bye"));
+    }
+
+    #[test]
+    fn collect_patch_slots_no_children() {
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("@dialog d label=Updated"));
+        let slots = batch.collect_patch_slots("app:d");
+        assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn collect_patch_slots_empty_slot_block() {
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("@dialog d { ::header {} }"));
+        let slots = batch.collect_patch_slots("app:d");
+        // Empty slot block produces an entry with empty commands
+        assert_eq!(slots.len(), 1);
+        assert!(slots["header"].is_empty());
+    }
+
+    #[test]
+    fn collect_patch_slots_bare_children_go_to_default() {
+        // Bare children (no ::slot) become the default "_" slot
+        let batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("@dialog d { +button ok label=OK }"),
+        );
+        let slots = batch.collect_patch_slots("app:d");
+        assert_eq!(slots.len(), 1);
+        assert!(slots.contains_key("_"));
+        assert_eq!(slots["_"], cmds("+button app:ok label=OK"));
+    }
+
+    // -- End-to-end substitute + merge for Patch re-expansion --------------------
+
+    #[test]
+    fn patch_slot_substitution_updates_mentioned_keeps_others() {
+        // Simulates the full pipeline the router uses for @ re-expansions:
+        // 1. collect_patch_slots from batch
+        // 2. merge_slots with prior state
+        // 3. substitute_slots into expansion
+        let batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("@dialog d { ::header { +text title content=Bye } }"),
+        );
+
+        let expansion = cmds(
+            "+view controls:d-root { ::header { +text controls:hdr } ::footer { +text controls:ftr } }",
+        );
+
+        // Batch provides header; prior provides footer
+        let batch_slots = batch.collect_patch_slots("app:d");
+        let prior = HashMap::from([("footer".to_string(), cmds("+view app:actions"))]);
+        let merged = merge_slots(batch_slots, Some(prior));
+        let result = substitute_slots(&expansion, &merged);
+
+        assert_eq!(
+            result,
+            cmds("+view controls:d-root { +text app:title content=Bye +view app:actions }"),
+        );
+    }
+
+    #[test]
+    fn patch_slot_substitution_no_children_preserves_all() {
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("@dialog d label=Updated"));
+
+        let expansion = cmds("+view controls:d-root { ::header { +text controls:hdr } ::_ {} }");
+
+        let batch_slots = batch.collect_patch_slots("app:d");
+        let prior = HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("_".to_string(), cmds("+view app:body")),
+        ]);
+        let merged = merge_slots(batch_slots, Some(prior));
+        let result = substitute_slots(&expansion, &merged);
+
+        assert_eq!(
+            result,
+            cmds("+view controls:d-root { +text app:title content=Hi +view app:body }"),
+        );
+    }
+
+    #[test]
+    fn patch_slot_substitution_clears_with_empty_block() {
+        let batch = PendingBatch::new(pid(1), "app".into(), cmds("@dialog d { ::header {} }"));
+
+        let expansion = cmds("+view controls:d-root { ::header { +text controls:hdr } ::_ {} }");
+
+        let batch_slots = batch.collect_patch_slots("app:d");
+        let prior = HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("_".to_string(), cmds("+view app:body")),
+        ]);
+        let merged = merge_slots(batch_slots, Some(prior));
+        let result = substitute_slots(&expansion, &merged);
+
+        // Header: cleared → falls back to daemon fallback
+        // Default: preserved from prior
+        assert_eq!(
+            result,
+            cmds("+view controls:d-root { +text controls:hdr +view app:body }"),
+        );
+    }
+
+    #[test]
+    fn patch_slot_substitution_bare_children_update_default_slot() {
+        // @dialog d { +button ok label=OK } — bare children go to default slot
+        let batch = PendingBatch::new(
+            pid(1),
+            "app".into(),
+            cmds("@dialog d { +button ok label=OK }"),
+        );
+
+        let expansion = cmds("+view controls:d-root { ::header { +text controls:hdr } ::_ {} }");
+
+        let batch_slots = batch.collect_patch_slots("app:d");
+        let prior = HashMap::from([
+            ("header".to_string(), cmds("+text app:title content=Hi")),
+            ("_".to_string(), cmds("+view app:old-body")),
+        ]);
+        let merged = merge_slots(batch_slots, Some(prior));
+        let result = substitute_slots(&expansion, &merged);
+
+        // Header: preserved from prior (unmentioned)
+        // Default: updated with bare children from batch
+        assert_eq!(
+            result,
+            cmds("+view controls:d-root { +text app:title content=Hi +button app:ok label=OK }"),
+        );
     }
 }

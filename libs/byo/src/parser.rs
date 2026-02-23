@@ -477,15 +477,14 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                     ) {
                         break;
                     }
-                    // `{` inside a response body is a slot declaration
-                    if matches!(
-                        self.peek(),
-                        Some(Spanned {
-                            token: Token::LBrace,
-                            ..
-                        })
-                    ) {
-                        self.parse_children(cmds)?;
+                    // `::name { ... }` — slot declaration inside a response body
+                    if let Some(Spanned {
+                        token: Token::Word(w),
+                        ..
+                    }) = self.peek()
+                        && w.starts_with("::")
+                    {
+                        self.parse_slot_block(cmds)?;
                         continue;
                     }
                     self.parse_command(cmds)?;
@@ -522,23 +521,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             })
         ) {
             let open_span = self.advance().span; // consume {
-            // Check for slot name: `{name` requires adjacency (no whitespace
-            // between `{` and identifier). Validated via span adjacency.
-            let slot = if let Some(Spanned {
-                token: Token::Word(w),
-                span: word_span,
-            }) = self.peek()
-                && open_span.end == word_span.start
-                && is_valid_slot_name(w)
-            {
-                let name = self.byte_str_at(*word_span);
-                self.advance();
-                Some(name)
-            } else {
-                None
-            };
 
-            cmds.push(Command::Push { slot });
+            cmds.push(Command::Push { slot: None });
 
             while !self.at_end() {
                 if matches!(
@@ -550,16 +534,14 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 ) {
                     break;
                 }
-                // `{` inside a children block is a nested slot push
-                // (e.g. `+dialog { {header +text t} {_ +button ok} }`)
-                if matches!(
-                    self.peek(),
-                    Some(Spanned {
-                        token: Token::LBrace,
-                        ..
-                    })
-                ) {
-                    self.parse_children(cmds)?;
+                // `::name { ... }` — slot block inside a children block
+                if let Some(Spanned {
+                    token: Token::Word(w),
+                    ..
+                }) = self.peek()
+                    && w.starts_with("::")
+                {
+                    self.parse_slot_block(cmds)?;
                     continue;
                 }
                 self.parse_command(cmds)?;
@@ -576,6 +558,88 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             cmds.push(Command::Pop);
         }
         Ok(())
+    }
+
+    /// Parse a `::name { ... }` slot block.
+    ///
+    /// The slot name is extracted from a `::name` Word token. The `{` `}`
+    /// delimiters wrap the slot's children (fallback content on the expansion
+    /// side, projected content on the app side).
+    fn parse_slot_block(&mut self, cmds: &mut Vec<Command>) -> Result<(), ParseError> {
+        let tok = self.advance(); // consume ::name
+        let span = tok.span;
+        let w = match &tok.token {
+            Token::Word(w) => *w,
+            _ => unreachable!("caller checked for Word"),
+        };
+        let name = &w[2..]; // strip `::`
+        if name.is_empty() || !is_valid_slot_name(name) {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "slot name after '::'",
+                    found: format!("{w:?}"),
+                },
+                span,
+            });
+        }
+        let slot_name = self.byte_str_at(Span {
+            start: span.start + 2,
+            end: span.end,
+        });
+        cmds.push(Command::Push {
+            slot: Some(slot_name),
+        });
+
+        // Expect `{`
+        match self.peek() {
+            Some(Spanned {
+                token: Token::LBrace,
+                ..
+            }) => {
+                let open_span = self.advance().span; // consume {
+
+                while !self.at_end() {
+                    if matches!(
+                        self.peek(),
+                        Some(Spanned {
+                            token: Token::RBrace,
+                            ..
+                        })
+                    ) {
+                        break;
+                    }
+                    // Nested `::name { ... }` inside a slot block
+                    if let Some(Spanned {
+                        token: Token::Word(w),
+                        ..
+                    }) = self.peek()
+                        && w.starts_with("::")
+                    {
+                        self.parse_slot_block(cmds)?;
+                        continue;
+                    }
+                    self.parse_command(cmds)?;
+                }
+
+                if self.at_end() {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnclosedBrace,
+                        span: open_span,
+                    });
+                }
+
+                self.advance(); // consume }
+                cmds.push(Command::Pop);
+                Ok(())
+            }
+            _ => Err(self.error(ParseErrorKind::Expected {
+                expected: "'{' after slot name",
+                found: match self.peek() {
+                    Some(tok) => self.describe_token(tok),
+                    None => "end of input".into(),
+                },
+            })),
+        }
     }
 
     // -- Props ----------------------------------------------------------------
@@ -1453,41 +1517,37 @@ mod tests {
         assert_eq!(cmds.len(), 11);
     }
 
-    // -- Slot pushes ----------------------------------------------------------
+    // -- Slot blocks ----------------------------------------------------------
 
     #[test]
-    fn slot_push_named() {
-        let cmds = parse("+view r {header +text t }").unwrap();
-        assert_eq!(cmds.len(), 4); // Upsert, Push{slot:header}, Upsert, Pop
+    fn slot_block_named() {
+        let cmds = parse("+view r { ::header { +text t } }").unwrap();
+        // Upsert, Push{None}, Push{header}, Upsert, Pop, Pop
+        assert_eq!(cmds.len(), 6);
         assert!(matches!(&cmds[0], Command::Upsert { id, .. } if id == "r"));
-        match &cmds[1] {
+        assert!(matches!(&cmds[1], Command::Push { slot: None }));
+        match &cmds[2] {
             Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
             other => panic!("expected slotted Push, got: {other:?}"),
         }
-        assert!(matches!(&cmds[2], Command::Upsert { id, .. } if id == "t"));
-        assert!(matches!(&cmds[3], Command::Pop));
+        assert!(matches!(&cmds[3], Command::Upsert { id, .. } if id == "t"));
+        assert!(matches!(&cmds[4], Command::Pop));
+        assert!(matches!(&cmds[5], Command::Pop));
     }
 
     #[test]
-    fn slot_push_space_is_not_slot() {
-        // `{ header` (space) — header should parse as next command, not a slot name
-        let err = parse("+view r { header }");
-        // "header" is not a valid command, so this should error
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn slot_push_default() {
-        let cmds = parse("+view r {_ +text t }").unwrap();
-        assert_eq!(cmds.len(), 4);
-        match &cmds[1] {
+    fn slot_block_default() {
+        let cmds = parse("+view r { ::_ { +text t } }").unwrap();
+        // Upsert, Push{None}, Push{_}, Upsert, Pop, Pop
+        assert_eq!(cmds.len(), 6);
+        match &cmds[2] {
             Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "_"),
             other => panic!("expected default slot Push, got: {other:?}"),
         }
     }
 
     #[test]
-    fn slot_push_empty_children() {
+    fn slot_block_empty_children() {
         let cmds = parse("+view r {}").unwrap();
         assert_eq!(cmds.len(), 3); // Upsert, Push{slot:None}, Pop
         match &cmds[1] {
@@ -1497,10 +1557,10 @@ mod tests {
     }
 
     #[test]
-    fn slot_push_nested() {
-        // Free-standing slot pushes inside a children block:
-        //   +dialog { {header +text t} {_ +button ok} }
-        let cmds = parse("+dialog d { {header +text t} {_ +button ok} }").unwrap();
+    fn slot_block_multiple() {
+        // Multiple slot blocks inside a children block:
+        //   +dialog d { ::header { +text t } ::_ { +button ok } }
+        let cmds = parse("+dialog d { ::header { +text t } ::_ { +button ok } }").unwrap();
         // Upsert d, Push{None}
         //   Push{header}, Upsert t, Pop
         //   Push{_}, Upsert ok, Pop
@@ -1524,10 +1584,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_push_on_upsert() {
-        let cmds = parse("+view r {header}").unwrap();
-        assert_eq!(cmds.len(), 3); // Upsert, Push{header}, Pop
-        match &cmds[1] {
+    fn slot_block_empty() {
+        let cmds = parse("+view r { ::header {} }").unwrap();
+        // Upsert, Push{None}, Push{header}, Pop, Pop
+        assert_eq!(cmds.len(), 5);
+        match &cmds[2] {
             Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
             other => panic!("expected slotted Push, got: {other:?}"),
         }
@@ -1545,7 +1606,7 @@ mod tests {
     #[test]
     fn slot_in_expand_response() {
         // .expand responses can contain slot declarations
-        let cmds = parse(".expand 0 { +view root { {_ +text fallback} } }").unwrap();
+        let cmds = parse(".expand 0 { +view root { ::_ { +text fallback } } }").unwrap();
         // Response body: Upsert root, Push{None}, Push{_}, Upsert fallback, Pop, Pop
         match &cmds[0] {
             Command::Response {
@@ -1564,6 +1625,34 @@ mod tests {
             }
             other => panic!("expected Response, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn slot_block_missing_brace() {
+        // ::header without { should be an error
+        let err = parse("+view r { ::header }");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn slot_block_at_top_level_is_error() {
+        // ::foo {} at the top level (not inside a children block) is a parse error
+        let err = parse("::header { +text t }");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn slot_block_in_upsert_children() {
+        // +foo id { ::slot {} } works
+        let cmds = parse("+view r { ::header { +text t } }").unwrap();
+        assert!(matches!(&cmds[2], Command::Push { slot: Some(name) } if name == "header"));
+    }
+
+    #[test]
+    fn slot_block_in_patch_children() {
+        // @foo id { ::slot {} } works
+        let cmds = parse("@view r { ::header { +text t } }").unwrap();
+        assert!(matches!(&cmds[2], Command::Push { slot: Some(name) } if name == "header"));
     }
 
     // -- Error cases ----------------------------------------------------------

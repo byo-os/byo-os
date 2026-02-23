@@ -345,12 +345,12 @@ impl<W: io::Write> Emitter<W> {
         self.writer.write_all(b"\n}")
     }
 
-    /// `{name` — Begin a named slot children block.
+    /// `::name {` — Begin a named slot children block.
     ///
     /// Used for content projection in daemon expansions. The slot name
     /// is consumed by the orchestrator during rewrite.
     pub fn slot_push(&mut self, name: &str) -> io::Result<()> {
-        write!(self.writer, " {{{name}")
+        write!(self.writer, "\n::{name} {{")
     }
 
     /// `}` — End a children block (regular or slotted).
@@ -573,7 +573,7 @@ impl<W: io::Write> Emitter<W> {
                     write!(self.writer, "\n-{kind} {id}")?;
                 }
                 Command::Push { slot } => match slot {
-                    Some(name) => write!(self.writer, " {{{name}")?,
+                    Some(name) => write!(self.writer, "\n::{name} {{")?,
                     None => self.writer.write_all(b" {")?,
                 },
                 Command::Pop => {
@@ -1252,7 +1252,7 @@ mod tests {
             em.upsert("text", "t", &[])?;
             em.pop()
         });
-        assert!(out.contains("{header"));
+        assert!(out.contains("::header {"));
         assert!(out.contains("+text t"));
     }
 
@@ -1268,6 +1268,7 @@ mod tests {
                     id: "root".into(),
                     props: vec![],
                 },
+                Command::Push { slot: None },
                 Command::Push {
                     slot: Some("header".into()),
                 },
@@ -1277,13 +1278,14 @@ mod tests {
                     props: vec![],
                 },
                 Command::Pop,
+                Command::Pop,
             ])
         });
 
         let payload = crate::protocol::strip_apc(&out);
         let cmds = parse(payload).unwrap();
-        assert_eq!(cmds.len(), 4);
-        match &cmds[1] {
+        assert_eq!(cmds.len(), 6);
+        match &cmds[2] {
             Command::Push { slot: Some(name) } => assert_eq!(name.as_ref(), "header"),
             other => panic!("expected slotted Push, got: {other:?}"),
         }
@@ -1295,7 +1297,7 @@ mod tests {
         use crate::protocol::Command;
 
         // Parse → emit → parse and compare
-        let original = parse("+view r {header +text t }").unwrap();
+        let original = parse("+view r { ::header { +text t } }").unwrap();
         let out = emit(|em| em.commands(&original));
         let payload = crate::protocol::strip_apc(&out);
         let round_tripped = parse(payload).unwrap();

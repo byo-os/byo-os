@@ -21,8 +21,8 @@ block-comment = '/*' (block-comment / [^*] / '*' [^/])* '*/'
 upsert     = '+' type id prop* children?
 destroy    = '-' type id
 patch      = '@' type id prop* children?
-children   = '{' slot_name? whitespace? (slot_block | command whitespace?)* '}'
-slot_block = '{' slot_name whitespace? (slot_block | command whitespace?)* '}'
+children   = '{' whitespace? (slot_block | command whitespace?)* '}'
+slot_block = '::' slot_name whitespace? '{' whitespace? (slot_block | command whitespace?)* '}'
 slot_name  = [a-zA-Z_][a-zA-Z0-9_:-]*
 
 # -- Events --
@@ -101,20 +101,14 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
   enforcing balanced `{`/`}`. The parser emits flat `Push`/`Pop`
   commands in the output stream.
 
-- **Slot pushes.** `{name` (identifier immediately adjacent to `{`,
-  no whitespace) is a "slot push" — a tagged children block used for
-  content projection. `{ name` (space after `{`) is a regular push
-  where `name` is parsed as the next command (likely a parse error).
-  `{_}` is the default slot declaration (receives bare unslotted
-  children). `{}` is empty children (not a slot). Slot names support
-  `:` for qualified names in orchestrator context (e.g. `app:header`).
-  Slot pushes are consumed by the orchestrator during expansion
+- **Slot blocks.** `::name { ... }` (CSS pseudo-element syntax) is a
+  "slot block" — a tagged children section used for content projection
+  in daemon expansions. The `::` must be immediately followed by the
+  slot name (no whitespace). `::_` is the default slot (receives bare
+  unslotted children). Slot blocks can appear inside any children
+  block: `+dialog d { ::header { +text t } ::_ { +button ok } }`.
+  Slot blocks are consumed by the orchestrator during expansion
   rewriting and never reach the compositor.
-
-- **Free-standing slot blocks.** `slot_block` allows slot pushes to
-  appear directly inside a children block without a preceding `+`/`@`
-  command: `+dialog { {header +text t} {_ +button ok} }`. These
-  partition the children by slot name for content projection.
 
 - **Children targets.** `upsert` (`+`), `patch` (`@`), and
   `response` (`.`) can have children blocks.
