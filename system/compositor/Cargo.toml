@@ -10,5 +10,6 @@ bytes.workspace = true
 alacritty_terminal = { version = "0.25", default-features = false }
 serde.workspace = true
 toml.workspace = true
+winit = { version = "0.30", default-features = false }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }

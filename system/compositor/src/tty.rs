@@ -535,6 +535,7 @@ pub fn setup_root_tty(mut commands: Commands, mut id_map: ResMut<IdMap>) {
                 align_items: AlignItems::Start,
                 ..default()
             },
+            GlobalZIndex(i32::MIN),
         ))
         .id();
     id_map.insert("/".to_string(), entity);

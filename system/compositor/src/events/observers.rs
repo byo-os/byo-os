@@ -4,10 +4,11 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::input::keyboard::KeyCode;
-use bevy::input::mouse::MouseButton;
+use bevy::input::mouse::{MouseButton, MouseScrollUnit};
+use bevy::picking::events::Scroll;
 use bevy::picking::pointer::{Location, PointerId};
 use bevy::prelude::*;
-use bevy::ui::UiGlobalTransform;
+use bevy::ui::{OverflowAxis, ScrollPosition, UiGlobalTransform};
 use bevy::window::{CursorLeft, CursorMoved};
 
 use crate::components::{ByoLayer, ByoText, ByoView, ByoWindow};
@@ -46,7 +47,8 @@ pub fn register_observers(app: &mut App) {
         .add_observer(on_pointer_up)
         .add_observer(on_pointer_move)
         .add_observer(on_pointer_over)
-        .add_observer(on_pointer_out);
+        .add_observer(on_pointer_out)
+        .add_observer(on_pointer_scroll);
 }
 
 /// Build the propagation spine from a hit entity up to the root.
@@ -301,7 +303,7 @@ fn make_pointer_data(
 
 #[allow(clippy::too_many_arguments)]
 fn on_pointer_down(
-    event: On<Pointer<Press>>,
+    mut event: On<Pointer<Press>>,
     engine: Res<EngineHandle>,
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -311,6 +313,7 @@ fn on_pointer_down(
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
+    event.propagate(false);
     let btn = bevy_button(event.button);
     let modifiers = read_modifiers(&keys);
     let target = resolve_target_id(event.entity, &id_map, &parent_query);
@@ -351,7 +354,7 @@ fn on_pointer_down(
 
 #[allow(clippy::too_many_arguments)]
 fn on_pointer_up(
-    event: On<Pointer<Release>>,
+    mut event: On<Pointer<Release>>,
     engine: Res<EngineHandle>,
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -362,6 +365,8 @@ fn on_pointer_up(
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
+    event.propagate(false);
+
     // During active capture, handle_captured_pointer synthesizes PointerUp
     let pid = pointer_id_to_i64(&event.pointer_id);
     if capture_state.get(pid).is_some() {
@@ -408,7 +413,7 @@ fn on_pointer_up(
 
 #[allow(clippy::too_many_arguments)]
 fn on_pointer_move(
-    event: On<Pointer<Move>>,
+    mut event: On<Pointer<Move>>,
     engine: Res<EngineHandle>,
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -419,6 +424,8 @@ fn on_pointer_move(
     node_query: Query<&ComputedNode>,
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
+    event.propagate(false);
+
     // During active capture, handle_captured_pointer synthesizes PointerMove
     let pid = pointer_id_to_i64(&event.pointer_id);
     if capture_state.get(pid).is_some() {
@@ -652,6 +659,218 @@ fn on_pointer_out(
     // follows), handle_cursor_left cleans up the chain.
 }
 
+/// Pixels per discrete scroll line (matches browser convention).
+const SCROLL_LINE_HEIGHT: f32 = 20.0;
+
+#[allow(clippy::too_many_arguments)]
+fn on_pointer_scroll(
+    mut event: On<Pointer<Scroll>>,
+    engine: Res<EngineHandle>,
+    id_map: Res<IdMap>,
+    keys: Res<ButtonInput<KeyCode>>,
+    parent_query: Query<&ChildOf>,
+    children_query: Query<&Children>,
+    subs_query: Query<&EventSubscriptions>,
+    byo_entities: Query<(), ByoEntityFilter>,
+    node_query: Query<&ComputedNode>,
+    style_node_query: Query<&Node>,
+    ui_transforms: Query<&UiGlobalTransform>,
+    scroll_pos_query: Query<&ScrollPosition>,
+    mut scroll_physics: ResMut<crate::scroll::ScrollPhysics>,
+    time: Res<Time>,
+) {
+    // Stop bubbling — Bevy fires this observer for every entity in the
+    // hit chain (deepest → root). We handle the event once on the first
+    // (deepest) entity and prevent duplicate processing on ancestors.
+    event.propagate(false);
+
+    // Filter out native OS momentum events — we generate our own synthetic
+    // momentum with consistent physics across all platforms.
+    if scroll_physics.is_native_momentum() {
+        return;
+    }
+
+    let modifiers = read_modifiers(&keys);
+    let target = resolve_target_id(event.entity, &id_map, &parent_query);
+    let (tw, th) = compute_element_size(event.entity, &node_query);
+
+    // Convert scroll deltas to logical pixels
+    let (delta_x, delta_y) = match event.unit {
+        MouseScrollUnit::Pixel => (event.x as f64, event.y as f64),
+        MouseScrollUnit::Line => (
+            event.x as f64 * SCROLL_LINE_HEIGHT as f64,
+            event.y as f64 * SCROLL_LINE_HEIGHT as f64,
+        ),
+    };
+
+    debug!(
+        "raw_scroll: hit={} entity={:?} unit={:?} raw=({:.4},{:.4}) delta=({delta_x:.4},{delta_y:.4})",
+        target, event.entity, event.unit, event.x, event.y
+    );
+
+    // Find the nearest ancestor with a scroll event subscription (the root
+    // container). The root stays in place even when the viewport is translated
+    // by overscroll, so pointer events always reach it.
+    let Some(event_target) =
+        find_scroll_event_target(event.entity, &parent_query, &subs_query)
+    else {
+        return;
+    };
+
+    // From the event target, find the actual scrollable viewport child
+    // (the one with overflow:scroll) for dimensions and ScrollPosition.
+    // The viewport is a direct child of the event target (root container).
+    let scroll_entity = find_scrollable_child(event_target, &children_query, &style_node_query)
+        .unwrap_or(event_target);
+
+    let scroll_byo_id = id_map.get_id(scroll_entity).unwrap_or_default();
+    debug!(
+        "raw_scroll: event_target={:?} scroll_entity={:?} byo_id={} (hit={:?})",
+        event_target, scroll_entity, scroll_byo_id, event.entity
+    );
+
+    // Compute content/viewport dimensions from the scrollable viewport
+    let (content_width, content_height, viewport_width, viewport_height) =
+        if let Ok(computed) = node_query.get(scroll_entity) {
+            let isf = computed.inverse_scale_factor as f64;
+            let size = computed.size();
+            let content = computed.content_size();
+            (
+                content.x as f64 * isf,
+                content.y as f64 * isf,
+                size.x as f64 * isf,
+                size.y as f64 * isf,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+
+    // Read the current scroll position from Bevy so physics state starts
+    // at the correct offset (not 0) when freshly created.
+    let (cur_scroll_x, cur_scroll_y) = scroll_pos_query
+        .get(scroll_entity)
+        .map(|sp| (sp.x as f64, sp.y as f64))
+        .unwrap_or((0.0, 0.0));
+
+    // Determine which axes are scrollable from the viewport's overflow config.
+    // Only axes with OverflowAxis::Scroll allow scrolling/overscrolling.
+    let (scroll_x_enabled, scroll_y_enabled) = style_node_query
+        .get(scroll_entity)
+        .map(|node| (
+            node.overflow.x == OverflowAxis::Scroll,
+            node.overflow.y == OverflowAxis::Scroll,
+        ))
+        .unwrap_or((false, false));
+
+    // Feed into scroll physics keyed by the viewport entity
+    scroll_physics.on_raw_scroll(
+        scroll_entity,
+        delta_x,
+        delta_y,
+        time.elapsed_secs_f64(),
+        content_width,
+        content_height,
+        viewport_width,
+        viewport_height,
+        cur_scroll_x,
+        cur_scroll_y,
+        scroll_x_enabled,
+        scroll_y_enabled,
+    );
+
+    // Read authoritative clamped position and overflow from scroll physics
+    let (scroll_x, scroll_y) = scroll_physics.clamped_position(scroll_entity);
+    let (overflow_x, overflow_y) = scroll_physics.overflow(scroll_entity);
+
+    let mut pointer = make_pointer_data(
+        &event.pointer_id,
+        &event.pointer_location,
+        -1,
+        0,
+        0.0,
+        true,
+        modifiers,
+        target,
+        tw,
+        th,
+    );
+    pointer.scroll_delta_x = delta_x;
+    pointer.scroll_delta_y = delta_y;
+    pointer.content_width = content_width;
+    pointer.content_height = content_height;
+    pointer.viewport_width = viewport_width;
+    pointer.viewport_height = viewport_height;
+    pointer.scroll_x = scroll_x;
+    pointer.scroll_y = scroll_y;
+    pointer.scroll_overflow_x = overflow_x;
+    pointer.scroll_overflow_y = overflow_y;
+
+    // Build spine from the event target (root container), which has the
+    // scroll event subscription. The root stays in place even during
+    // overscroll, ensuring events always reach the daemon.
+    let spine = build_spine(
+        event_target,
+        &EventKind::Scroll,
+        &pointer,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
+    );
+
+    if !spine.is_empty() {
+        engine.send(EngineInput::NewEvent {
+            kind: EventKind::Scroll,
+            pointer,
+            spine,
+        });
+    }
+}
+
+/// Walk up from `entity` to find the nearest ancestor with a Scroll event
+/// subscription. This targets the non-moving container (e.g. scroll-view root)
+/// rather than the viewport, which may be translated by overscroll.
+pub(crate) fn find_scroll_event_target(
+    entity: Entity,
+    parent_query: &Query<&ChildOf>,
+    subs_query: &Query<&EventSubscriptions>,
+) -> Option<Entity> {
+    let mut current = Some(entity);
+    while let Some(e) = current {
+        if subs_query
+            .get(e)
+            .is_ok_and(|s| s.get(&EventKind::Scroll).is_some())
+        {
+            return Some(e);
+        }
+        current = parent_query.get(e).ok().map(|c| c.parent());
+    }
+    None
+}
+
+/// Among direct children of `entity`, find the one with `OverflowAxis::Scroll`.
+/// Used to locate the scrollable viewport inside a scroll-view container.
+fn find_scrollable_child(
+    entity: Entity,
+    children_query: &Query<&Children>,
+    node_query: &Query<&Node>,
+) -> Option<Entity> {
+    let Ok(children) = children_query.get(entity) else {
+        return None;
+    };
+    for child in children.iter() {
+        if let Ok(node) = node_query.get(child)
+            && (node.overflow.x == OverflowAxis::Scroll
+                || node.overflow.y == OverflowAxis::Scroll)
+        {
+            return Some(child);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Window-level capture pointer synthesis
 // ---------------------------------------------------------------------------
@@ -691,9 +910,40 @@ pub fn handle_captured_pointer(
     // Prefer last CursorMoved position, fall back to window cursor position
     let position =
         last_move_pos.or_else(|| windows.iter().next().and_then(|w| w.cursor_position()));
-    let Some(pos) = position else { return };
 
     let modifiers = read_modifiers(&keys);
+
+    // No cursor position (cursor outside window). If the button was released,
+    // still synthesize PointerUp so the engine calls release_capture. Without
+    // this, dragging outside the window and releasing leaks the capture forever.
+    let Some(pos) = position else {
+        if button_released {
+            for (pointer_id, byo_id) in capture_state.snapshot() {
+                let mut pointer = PointerData::mouse(0.0, 0.0, true);
+                pointer.pointer_id = pointer_id;
+                pointer.button = Button::Primary.wire_value();
+                pointer.buttons = 0;
+                pointer.pressure = 0.0;
+                pointer.modifiers = modifiers;
+                pointer.target = byo_id.clone();
+                engine.send(EngineInput::NewEvent {
+                    kind: EventKind::PointerUp,
+                    pointer,
+                    spine: vec![SpineNode {
+                        byo_id,
+                        phase: super::config::Phase::Bubble,
+                        passive: false,
+                        verbose: false,
+                        local_x: 0.0,
+                        local_y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    }],
+                });
+            }
+        }
+        return;
+    };
 
     // Compute buttons bitmask from current mouse state
     let mut buttons: u16 = 0;

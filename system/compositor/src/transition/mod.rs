@@ -3,3 +3,5 @@
 pub mod config;
 pub mod state;
 pub mod systems;
+#[allow(dead_code)]
+pub mod velocity;

@@ -8,6 +8,8 @@ mod kitty_gfx;
 mod plugin;
 mod props;
 mod render;
+mod resize;
+mod scroll;
 mod style;
 mod transition;
 mod tty;

@@ -12,6 +12,8 @@ pub enum ControlKind {
     Button,
     Checkbox,
     Slider,
+    Scrollbar,
+    ScrollView,
 }
 
 /// State for a single control instance.
@@ -36,6 +38,26 @@ pub struct ControlState {
     pub value: Option<f64>,
     /// Whether the control is disabled.
     pub disabled: bool,
+    /// Current scroll position (scroll-view).
+    pub scroll_x: f64,
+    pub scroll_y: f64,
+    /// Scrollbar thumb hover/press state.
+    pub thumb_hover: bool,
+    pub thumb_pressed: bool,
+    /// Track hover state.
+    pub track_hover: bool,
+    /// Drag start position and scroll offset (for thumb drag).
+    /// `drag_start_pos` uses viewport-relative (client-x/y) coordinates.
+    pub drag_start_pos: f64,
+    pub drag_start_scroll: f64,
+    /// Track pixel size at drag start (derived from thumb pixel size / thumb_pct).
+    pub drag_track_size: f64,
+    /// Content and viewport dimensions (scroll-view, scrollbar).
+    pub content_size: f64,
+    pub viewport_size: f64,
+    /// Overscroll overflow amount (negative = past start, positive = past end).
+    /// Used for scrollbar thumb squeeze effect during overscroll.
+    pub scroll_overflow: f64,
 }
 
 impl ControlState {
@@ -79,6 +101,23 @@ impl ControlState {
             None
         };
 
+        let scroll_x = props
+            .get("scroll-x")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let scroll_y = props
+            .get("scroll-y")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let content_size = props
+            .get("content-size")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let viewport_size = props
+            .get("viewport-size")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+
         Self {
             kind,
             source_qid: source_qid.to_owned(),
@@ -90,7 +129,68 @@ impl ControlState {
             checked,
             value,
             disabled,
+            scroll_x,
+            scroll_y,
+            thumb_hover: false,
+            thumb_pressed: false,
+            track_hover: false,
+            drag_start_pos: 0.0,
+            drag_start_scroll: 0.0,
+            drag_track_size: 0.0,
+            content_size,
+            viewport_size,
+            scroll_overflow: 0.0,
         }
+    }
+
+    /// Update props and prop-derived fields for a re-expansion.
+    ///
+    /// Preserves interaction state (hover, pressed, thumb states, drag state)
+    /// and any internal state that isn't directly derived from props (scroll
+    /// position, content/viewport sizes — which may have been updated by
+    /// resize events since the last expansion).
+    pub fn update_props(&mut self, new_props: &HashMap<String, String>) {
+        // Refresh prop-derived fields
+        self.app_events = new_props
+            .get("events")
+            .map(|e| EventSubscriptionSet::parse(e))
+            .unwrap_or_default();
+        self.disabled = new_props.contains_key("disabled");
+
+        // Controlled checkbox: update checked from prop
+        if new_props.contains_key("checked") {
+            self.checked = Some(new_props.get("checked").is_none_or(|v| v != "false"));
+        }
+        // (Uncontrolled checkbox: keep existing internal checked state)
+
+        // Controlled slider: update value from prop
+        if self.kind == ControlKind::Slider && new_props.contains_key("value") {
+            self.value = new_props.get("value").and_then(|v| v.parse().ok());
+        }
+        // (Uncontrolled slider: keep existing internal value)
+
+        // Scrollbar: update content/viewport sizes and scroll position from props
+        // (these arrive via reduced state from the orchestrator)
+        if self.kind == ControlKind::Scrollbar {
+            if let Some(v) = new_props.get("content-size").and_then(|v| v.parse().ok()) {
+                self.content_size = v;
+            }
+            if let Some(v) = new_props.get("viewport-size").and_then(|v| v.parse().ok()) {
+                self.viewport_size = v;
+            }
+        }
+
+        // Scroll-view: update scroll position from props
+        if self.kind == ControlKind::ScrollView {
+            if let Some(v) = new_props.get("scroll-x").and_then(|v| v.parse().ok()) {
+                self.scroll_x = v;
+            }
+            if let Some(v) = new_props.get("scroll-y").and_then(|v| v.parse().ok()) {
+                self.scroll_y = v;
+            }
+        }
+
+        self.props = new_props.clone();
     }
 
     fn default_slider_value(props: &HashMap<String, String>) -> f64 {
@@ -123,6 +223,8 @@ impl ControlState {
                 ControlKind::Button => *kind == EventKind::Press,
                 ControlKind::Checkbox => *kind == EventKind::Change,
                 ControlKind::Slider => *kind == EventKind::Change || *kind == EventKind::Input,
+                ControlKind::ScrollView => *kind == EventKind::Scroll || *kind == EventKind::Resize,
+                ControlKind::Scrollbar => false,
             };
         }
         self.app_events.contains(kind)
@@ -204,6 +306,8 @@ impl Daemon {
             ControlKind::Button => vec!["root", "label"],
             ControlKind::Checkbox => vec!["root", "box", "check", "label"],
             ControlKind::Slider => vec!["root", "track", "fill", "header", "label", "value"],
+            ControlKind::Scrollbar => vec!["root", "track", "thumb"],
+            ControlKind::ScrollView => vec!["root", "viewport", "scrollbar-y", "scrollbar-x"],
         };
 
         for suffix in suffixes {
@@ -237,6 +341,10 @@ impl Daemon {
                 ControlKind::Checkbox => vec!["root", "box", "check", "label"],
                 ControlKind::Slider => {
                     vec!["root", "track", "fill", "header", "label", "value"]
+                }
+                ControlKind::Scrollbar => vec!["root", "track", "thumb"],
+                ControlKind::ScrollView => {
+                    vec!["root", "viewport", "scrollbar-y", "scrollbar-x"]
                 }
             };
             for suffix in suffixes {

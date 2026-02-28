@@ -321,7 +321,11 @@ impl EventKind {
     pub fn bubbles(&self) -> bool {
         !matches!(
             self,
-            EventKind::PointerEnter | EventKind::PointerLeave | EventKind::Focus | EventKind::Blur
+            EventKind::PointerEnter
+                | EventKind::PointerLeave
+                | EventKind::Focus
+                | EventKind::Blur
+                | EventKind::Resize
         )
     }
 
@@ -336,6 +340,7 @@ impl EventKind {
                 | EventKind::LostPointerCapture
                 | EventKind::Focus
                 | EventKind::Blur
+                | EventKind::Resize
         )
     }
 }

@@ -1275,6 +1275,10 @@ impl Router {
 
             if let Some(idx) = batch_idx {
                 for (subscriber, qid, expand_seq, expand_buf) in nested_expands {
+                    tracing::trace!(
+                        "nested expansion: {qid} (seq={expand_seq}, depth={})",
+                        current_depth + 1
+                    );
                     self.pending_batches[idx].add_pending_expand(
                         subscriber,
                         expand_seq,
@@ -1283,6 +1287,10 @@ impl Router {
                     );
                     self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
                 }
+            } else {
+                tracing::warn!(
+                    "nested expansion: batch not found for ({from:?}, seq={seq})"
+                );
             }
         }
     }
@@ -1294,7 +1302,13 @@ impl Router {
     /// up all expansion objects, and the tree relationship itself encodes the
     /// expansion link (no `expanded_from` field needed).
     fn update_expansion_state(&mut self, batch: &PendingBatch) {
-        for (source_qid_str, (daemon_pid, expansion_cmds, _is_re_expand)) in &batch.expansions {
+        // Sort expansions by depth so parent expansions are processed before
+        // nested child expansions. This ensures parent nodes exist in the state
+        // tree before set_parent is called for child expansion objects.
+        let mut sorted: Vec<_> = batch.expansions.iter().collect();
+        sorted.sort_by_key(|(_, (_, _, _, depth))| *depth);
+
+        for (source_qid_str, (daemon_pid, expansion_cmds, _is_re_expand, _depth)) in sorted {
             let Some(source_qid) = QualifiedId::parse(source_qid_str) else {
                 continue;
             };
@@ -1656,11 +1670,18 @@ impl Router {
             let batch = self.pending_batches.remove(idx);
             let is_replay = batch.is_replay;
 
+            // Debug: log expansion keys before rewrite
+            tracing::trace!(
+                "batch ready — {} expansions: [{}]",
+                batch.expansions.len(),
+                batch.expansions.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+
             // Reconcile re-expansions using the per-expansion flag.
             // For re-expansions, substitute slot contents (batch + prior state)
             // into the daemon's expansion before reconciling.
             let mut reconciliation_buf = Vec::new();
-            for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand)) in &batch.expansions {
+            for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand, _depth)) in &batch.expansions {
                 if *is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
                     // Collect slot contents from the batch's @ children
                     let batch_slots = batch.collect_patch_slots(source_qid_str);
@@ -1733,15 +1754,16 @@ impl Router {
             .find(|b| b.has_pending_expand(from, seq));
 
         if let Some(batch) = batch {
-            // Find the QID and is_re_expand flag associated with this (from, seq) pair.
+            // Find the QID, is_re_expand flag, and depth associated with this (from, seq) pair.
             let expand_info = batch
                 .pending_expands
                 .iter()
                 .find(|e| e.subscriber == from && e.seq == seq)
-                .map(|e| (e.qid.clone(), e.is_re_expand));
+                .map(|e| (e.qid.clone(), e.is_re_expand, e.depth));
 
-            if let Some((ref qid, is_re_expand)) = expand_info {
-                batch.record_expansion(qid, from, commands, is_re_expand);
+            if let Some((ref qid, is_re_expand, depth)) = expand_info {
+                tracing::trace!("recording expansion for {qid} (re_expand={is_re_expand}, depth={depth})");
+                batch.record_expansion(qid, from, commands, is_re_expand, depth);
             }
         }
     }

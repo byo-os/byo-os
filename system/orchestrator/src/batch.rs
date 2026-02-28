@@ -35,8 +35,8 @@ pub struct PendingBatch {
     pub commands: Vec<Command>,
     /// Outstanding `!expand` requests.
     pub pending_expands: Vec<PendingExpand>,
-    /// QID → (daemon PID, qualified expansion commands, is_re_expand) from daemons.
-    pub expansions: HashMap<String, (ProcessId, Vec<Command>, bool)>,
+    /// QID → (daemon PID, qualified expansion commands, is_re_expand, depth) from daemons.
+    pub expansions: HashMap<String, (ProcessId, Vec<Command>, bool, u32)>,
     /// True if this is a replay batch (from `#claim` — daemon restart recovery).
     pub is_replay: bool,
 }
@@ -110,9 +110,10 @@ impl PendingBatch {
         owner: ProcessId,
         expansion_cmds: Vec<Command>,
         is_re_expand: bool,
+        depth: u32,
     ) {
         self.expansions
-            .insert(qid.to_string(), (owner, expansion_cmds, is_re_expand));
+            .insert(qid.to_string(), (owner, expansion_cmds, is_re_expand, depth));
     }
 
     /// Extract slot contents from the batch for a specific qualified ID.
@@ -268,7 +269,8 @@ impl PendingBatch {
 
                     if *id != "_" && self.expansions.contains_key(&*qid_buf) {
                         // Splice in the daemon expansion.
-                        let (_, expansion_cmds, _) = &self.expansions[&*qid_buf];
+                        let (_, expansion_cmds, _, _) = &self.expansions[&*qid_buf];
+                        tracing::trace!("rewrite: splicing expansion for {qid_buf} ({} cmds)", expansion_cmds.len());
                         // Defer rewriting until we know if there are children (for slots).
                         skip_next_children = Some(SkipMode::CollectSlots {
                             expansion_cmds: expansion_cmds.clone(),
@@ -277,6 +279,7 @@ impl PendingBatch {
                     } else if claims.contains_key(&**kind) && *id != "_" {
                         // Daemon-owned but no expansion (shouldn't happen
                         // if pending == 0, but handle gracefully).
+                        tracing::warn!("rewrite: SKIPPING claimed +{kind} {qid_buf} — no expansion found!");
                         skip_next_children = Some(SkipMode::Skip);
                     } else {
                         write_upsert(buf, kind, &qid_buf, props);
@@ -785,7 +788,7 @@ mod tests {
         assert!(!batch.is_ready());
 
         let id = batch.complete_expand(pid(2), 0).unwrap();
-        batch.record_expansion(&id, pid(2), cmds("+view save-root class=btn"), false);
+        batch.record_expansion(&id, pid(2), cmds("+view save-root class=btn"), false, 0);
         assert!(batch.is_ready());
     }
 
@@ -835,7 +838,7 @@ mod tests {
 
         batch.expansions.insert(
             "app:save".to_string(),
-            (pid(2), cmds("+view controls:save-root class=btn"), false),
+            (pid(2), cmds("+view controls:save-root class=btn"), false, 0),
         );
 
         let (result, _) = batch.rewrite(&subs);
@@ -921,13 +924,14 @@ mod tests {
                 pid(2),
                 cmds("+view controls:save-root { +icon controls:save-icon name=check }"),
                 false,
+                0,
             ),
         );
 
         // Icon daemon expansion for controls:save-icon (already qualified).
         batch.expansions.insert(
             "controls:save-icon".to_string(),
-            (pid(3), cmds("+image icons:check-img src=check.png"), false),
+            (pid(3), cmds("+image icons:check-img src=check.png"), false, 0),
         );
 
         let (result, _) = batch.rewrite(&claims);
@@ -1028,13 +1032,14 @@ mod tests {
                 pid(2),
                 cmds("+view controls:d-root { ::_ { +text controls:fallback } }"),
                 false,
+                0,
             ),
         );
 
         // Button expansion (nested inside slot content)
         batch.expansions.insert(
             "app:ok".to_string(),
-            (pid(3), cmds("+view buttons:ok-root class=btn"), false),
+            (pid(3), cmds("+view buttons:ok-root class=btn"), false, 0),
         );
 
         let (result, _) = batch.rewrite(&claims);
@@ -1064,6 +1069,7 @@ mod tests {
                 pid(2),
                 cmds("+view controls:d-root { ::header { +text controls:hdr } ::footer {} }"),
                 false,
+                0,
             ),
         );
 
@@ -1091,6 +1097,7 @@ mod tests {
                 pid(2),
                 cmds("+view controls:d-root { ::_ { +text controls:empty } }"),
                 false,
+                0,
             ),
         );
 
@@ -1110,7 +1117,7 @@ mod tests {
 
         batch.expansions.insert(
             "app:d".to_string(),
-            (pid(2), cmds("+view controls:d-root { ::_ {} }"), false),
+            (pid(2), cmds("+view controls:d-root { ::_ {} }"), false, 0),
         );
 
         let (result, _) = batch.rewrite(&claims);

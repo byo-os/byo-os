@@ -552,6 +552,50 @@ fn apply_class(props: &mut ViewProps, class: &str) {
             return;
         }
 
+        // Per-axis overflow
+        "overflow-x-hidden" => {
+            props.overflow_x = Some(ByoOverflow::Hidden);
+            return;
+        }
+        "overflow-x-visible" => {
+            props.overflow_x = Some(ByoOverflow::Visible);
+            return;
+        }
+        "overflow-x-scroll" => {
+            props.overflow_x = Some(ByoOverflow::Scroll);
+            return;
+        }
+        "overflow-x-clip" => {
+            props.overflow_x = Some(ByoOverflow::Clip);
+            return;
+        }
+        "overflow-y-hidden" => {
+            props.overflow_y = Some(ByoOverflow::Hidden);
+            return;
+        }
+        "overflow-y-visible" => {
+            props.overflow_y = Some(ByoOverflow::Visible);
+            return;
+        }
+        "overflow-y-scroll" => {
+            props.overflow_y = Some(ByoOverflow::Scroll);
+            return;
+        }
+        "overflow-y-clip" => {
+            props.overflow_y = Some(ByoOverflow::Clip);
+            return;
+        }
+
+        // Pointer events
+        "pointer-events-none" => {
+            props.pointer_events = Some(ByoPointerEvents::None);
+            return;
+        }
+        "pointer-events-auto" => {
+            props.pointer_events = Some(ByoPointerEvents::Auto);
+            return;
+        }
+
         // Border (bare) — 1px all sides
         "border" => {
             props.border_width = Some(ByoRect(UiRect::all(Val::Px(1.0))));

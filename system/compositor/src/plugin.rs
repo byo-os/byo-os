@@ -9,6 +9,8 @@ use crate::font;
 use crate::id_map::IdMap;
 use crate::io::{self, ByoBatch};
 use crate::kitty_gfx;
+use crate::resize;
+use crate::scroll;
 use crate::style;
 use crate::transition;
 use crate::tty;
@@ -26,6 +28,8 @@ impl Plugin for ByoPlugin {
             .init_resource::<events::observers::PointerEnterState>()
             .init_resource::<kitty_gfx::store::KittyGfxImageStore>()
             .init_resource::<io::DeferredTtyEvents>()
+            .init_resource::<scroll::ScrollPhysics>()
+            .init_resource::<resize::ResizeSeqCounter>()
             .add_message::<ByoBatch>()
             .add_systems(
                 Startup,
@@ -49,29 +53,40 @@ impl Plugin for ByoPlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    transition::systems::handle_view_transitions,
-                    transition::systems::handle_window_transitions,
-                    transition::systems::handle_layer_transitions,
-                    transition::systems::handle_tty_transitions,
-                    style::reconcile_views,
-                    style::reconcile_view_images,
-                    style::reconcile_view_transforms,
-                    style::reconcile_text,
-                    style::reconcile_tty_style,
-                    style::reconcile_windows,
-                    style::reconcile_layers,
-                    style::reconcile_view_picking,
-                    style::reconcile_text_picking,
-                    style::reconcile_layer_picking,
-                    style::reconcile_window_picking,
-                    style::reorder_children,
-                    tty::resize_tty,
-                    tty::reconcile_tty,
-                    kitty_gfx::placement::reconcile_tty_placements,
-                    ApplyDeferred,
+                    (
+                        transition::systems::handle_view_transitions,
+                        transition::systems::handle_window_transitions,
+                        transition::systems::handle_layer_transitions,
+                        transition::systems::handle_tty_transitions,
+                    )
+                        .chain(),
+                    (
+                        style::reconcile_views,
+                        style::reconcile_view_images,
+                        style::reconcile_view_transforms,
+                        style::reconcile_text,
+                        style::reconcile_tty_style,
+                        style::reconcile_windows,
+                        style::reconcile_layers,
+                        style::reconcile_view_picking,
+                        style::reconcile_text_picking,
+                        style::reconcile_layer_picking,
+                        style::reconcile_window_picking,
+                        style::reorder_children,
+                        tty::resize_tty,
+                        tty::reconcile_tty,
+                        kitty_gfx::placement::reconcile_tty_placements,
+                        ApplyDeferred,
+                        style::apply_overscroll_offset,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .before(UiSystems::Prepare),
+            )
+            .add_systems(
+                PostUpdate,
+                resize::emit_resize_events.after(UiSystems::Prepare),
             )
             .add_systems(
                 Update,
@@ -80,6 +95,8 @@ impl Plugin for ByoPlugin {
                     transition::systems::tick_window_transitions,
                     transition::systems::tick_layer_transitions,
                     transition::systems::tick_tty_transitions,
+                    scroll::track_scroll_touch_phase,
+                    scroll::tick_scroll_physics,
                     events::observers::handle_cursor_left,
                     events::observers::handle_captured_pointer,
                 ),

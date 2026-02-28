@@ -120,6 +120,27 @@ pub struct PointerData {
     pub target_width: f64,
     /// Computed height of the hit element.
     pub target_height: f64,
+    /// Scroll delta X (logical pixels). Only set for Scroll events.
+    pub scroll_delta_x: f64,
+    /// Scroll delta Y (logical pixels). Only set for Scroll events.
+    pub scroll_delta_y: f64,
+    /// Content width (logical pixels) of the hit element's children. For Scroll events.
+    pub content_width: f64,
+    /// Content height (logical pixels) of the hit element's children. For Scroll events.
+    pub content_height: f64,
+    /// Viewport width (logical pixels) of the hit element. For Scroll events.
+    pub viewport_width: f64,
+    /// Viewport height (logical pixels) of the hit element. For Scroll events.
+    pub viewport_height: f64,
+    /// Current clamped scroll position X (logical pixels). For Scroll events.
+    /// Set by the compositor (authoritative source of scroll state).
+    pub scroll_x: f64,
+    /// Current clamped scroll position Y (logical pixels). For Scroll events.
+    pub scroll_y: f64,
+    /// Overscroll amount X (negative = past start, positive = past end).
+    pub scroll_overflow_x: f64,
+    /// Overscroll amount Y (negative = past start, positive = past end).
+    pub scroll_overflow_y: f64,
 }
 
 impl PointerData {
@@ -146,6 +167,16 @@ impl PointerData {
             target: String::new(),
             target_width: 0.0,
             target_height: 0.0,
+            scroll_delta_x: 0.0,
+            scroll_delta_y: 0.0,
+            content_width: 0.0,
+            content_height: 0.0,
+            viewport_width: 0.0,
+            viewport_height: 0.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            scroll_overflow_x: 0.0,
+            scroll_overflow_y: 0.0,
         }
     }
 }
@@ -186,6 +217,8 @@ pub enum EngineInput {
         handled: bool,
         capture: bool,
     },
+    /// An entity was destroyed — release any captures targeting it.
+    EntityDestroyed { byo_id: String },
     /// Shutdown the engine thread.
     #[allow(dead_code)]
     Shutdown,
@@ -493,26 +526,37 @@ impl Engine {
             return;
         };
 
-        // Handle pointer capture request
+        // Handle pointer capture request (idempotent — skip if already
+        // captured by the same target to avoid gotpointercapture floods).
         if capture {
             let spine_idx = prop.dispatch_order[prop.current_step];
             let node = &prop.spine[spine_idx];
-            self.captures
-                .insert(prop.pointer.pointer_id, node.byo_id.clone());
-            self.capture_state
-                .insert(prop.pointer.pointer_id, node.byo_id.clone());
+            let already_captured = self
+                .captures
+                .get(&prop.pointer.pointer_id)
+                .is_some_and(|id| *id == node.byo_id);
 
-            // Emit gotpointercapture
-            let cap_seq = self.seq.next(&EventKind::GotPointerCapture);
-            let id = node.byo_id.clone();
-            self.emitter.frame(|em| {
-                em.event(
-                    "gotpointercapture",
-                    cap_seq,
-                    &id,
-                    &[Prop::val("pointer-id", prop.pointer.pointer_id.to_string())],
-                )
-            });
+            if !already_captured {
+                self.captures
+                    .insert(prop.pointer.pointer_id, node.byo_id.clone());
+                self.capture_state
+                    .insert(prop.pointer.pointer_id, node.byo_id.clone());
+
+                // Emit gotpointercapture
+                let cap_seq = self.seq.next(&EventKind::GotPointerCapture);
+                let id = node.byo_id.clone();
+                self.emitter.frame(|em| {
+                    em.event(
+                        "gotpointercapture",
+                        cap_seq,
+                        &id,
+                        &[Prop::val(
+                            "pointer-id",
+                            prop.pointer.pointer_id.to_string(),
+                        )],
+                    )
+                });
+            }
         }
 
         if handled {
@@ -765,6 +809,51 @@ fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> 
         props.push(Prop::flag("mod-meta"));
     }
 
+    // Scroll-specific props (delta + content/viewport dimensions).
+    // Include when any scroll field is set (content/viewport dimensions are non-zero
+    // for scroll events even when deltas are near zero during momentum tail).
+    if pointer.content_width > 0.0
+        || pointer.content_height > 0.0
+        || pointer.scroll_delta_x.abs() > f64::EPSILON
+        || pointer.scroll_delta_y.abs() > f64::EPSILON
+    {
+        // Use full precision for deltas to avoid rounding small values to 0
+        props.push(Prop::val("delta-x", format!("{}", pointer.scroll_delta_x)));
+        props.push(Prop::val("delta-y", format!("{}", pointer.scroll_delta_y)));
+        props.push(Prop::val(
+            "content-width",
+            format!("{:.1}", pointer.content_width),
+        ));
+        props.push(Prop::val(
+            "content-height",
+            format!("{:.1}", pointer.content_height),
+        ));
+        props.push(Prop::val(
+            "viewport-width",
+            format!("{:.1}", pointer.viewport_width),
+        ));
+        props.push(Prop::val(
+            "viewport-height",
+            format!("{:.1}", pointer.viewport_height),
+        ));
+        props.push(Prop::val(
+            "scroll-x",
+            format!("{:.1}", pointer.scroll_x),
+        ));
+        props.push(Prop::val(
+            "scroll-y",
+            format!("{:.1}", pointer.scroll_y),
+        ));
+        props.push(Prop::val(
+            "scroll-overflow-x",
+            format!("{:.1}", pointer.scroll_overflow_x),
+        ));
+        props.push(Prop::val(
+            "scroll-overflow-y",
+            format!("{:.1}", pointer.scroll_overflow_y),
+        ));
+    }
+
     // Verbose: all pointer spec properties
     if verbose {
         props.push(Prop::val("pointer-id", pointer.pointer_id.to_string()));
@@ -841,6 +930,18 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                         capture,
                     }) => {
                         engine.handle_ack(kind, seq, handled, capture);
+                    }
+                    Ok(EngineInput::EntityDestroyed { byo_id }) => {
+                        // Release any captures targeting the destroyed entity.
+                        let stale: Vec<i64> = engine
+                            .captures
+                            .iter()
+                            .filter(|(_, id)| **id == byo_id)
+                            .map(|(&pid, _)| pid)
+                            .collect();
+                        for pid in stale {
+                            engine.release_capture(pid);
+                        }
                     }
                     Ok(EngineInput::Shutdown) => {
                         info!("propagation engine shutting down");

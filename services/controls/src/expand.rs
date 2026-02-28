@@ -311,6 +311,357 @@ pub fn patch_slider_state<W: io::Write>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Scrollbar
+// ---------------------------------------------------------------------------
+
+/// Minimum thumb size as a percentage of the track.
+const MIN_THUMB_PCT: f64 = 5.0;
+
+/// Minimum thumb size during overscroll squeeze, in logical pixels.
+const MIN_SQUEEZE_THUMB_PX: f64 = 20.0;
+
+/// Compute scrollbar thumb position and size as percentages.
+/// Returns (offset_pct, thumb_pct) accounting for overscroll squeeze.
+fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
+    let content_size = state.content_size;
+    let viewport_size = state.viewport_size;
+    let scroll_position = state
+        .props
+        .get("scroll-position")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let overflow = state.scroll_overflow;
+
+    if content_size <= viewport_size || content_size <= 0.0 {
+        // Content fits in viewport — full-size thumb
+        return (0.0, 100.0);
+    }
+
+    let thumb_pct = (viewport_size / content_size * 100.0).clamp(MIN_THUMB_PCT, 100.0);
+    let max_scroll = content_size - viewport_size;
+    let scroll_ratio = if max_scroll > 0.0 {
+        (scroll_position / max_scroll).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let offset_pct = scroll_ratio * (100.0 - thumb_pct);
+
+    // Overscroll squeeze: shrink thumb proportional to overflow relative to viewport
+    if overflow.abs() > 0.5 && viewport_size > 0.0 {
+        let min_squeeze_pct = MIN_SQUEEZE_THUMB_PX / viewport_size * 100.0;
+        let squeeze_ratio = (overflow.abs() / viewport_size).min(1.0);
+        let squeeze_pct = thumb_pct * squeeze_ratio;
+        let squeezed_thumb = (thumb_pct - squeeze_pct).max(min_squeeze_pct);
+
+        if overflow > 0.0 {
+            // Past end: thumb squeezes upward from the bottom
+            let bottom_edge = offset_pct + thumb_pct;
+            let squeezed_offset = bottom_edge - squeezed_thumb;
+            (squeezed_offset.clamp(0.0, 100.0 - squeezed_thumb), squeezed_thumb)
+        } else {
+            // Past start: thumb squeezes downward from the top
+            (offset_pct.clamp(0.0, 100.0 - squeezed_thumb), squeezed_thumb)
+        }
+    } else {
+        (offset_pct, thumb_pct)
+    }
+}
+
+/// Resolve the scrollbar style: "modern", "classic", or "auto" (defaults to "modern").
+fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
+    match state
+        .props
+        .get("style")
+        .map(|s| s.as_str())
+        .unwrap_or("auto")
+    {
+        "classic" => "classic",
+        "modern" => "modern",
+        // "auto" defaults to modern
+        _ => "modern",
+    }
+}
+
+/// Emit the expansion for a scrollbar.
+pub fn expand_scrollbar<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
+    let id = &state.local_id;
+    let direction = state
+        .props
+        .get("direction")
+        .map(|s| s.as_str())
+        .unwrap_or("vertical");
+    let is_vertical = direction != "horizontal";
+    let style = resolve_scrollbar_style(state);
+
+    let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
+
+    // Determine thumb visual state
+    let thumb_bg = if state.thumb_pressed {
+        "bg-white/60"
+    } else if state.thumb_hover {
+        "bg-white/50"
+    } else {
+        "bg-white/30"
+    };
+
+    // Style-dependent widths and track background
+    let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
+    let (bar_size, track_bg) = match style {
+        "classic" => ("w-4", " bg-zinc-800/50"),
+        _ => {
+            if hovered {
+                ("w-2", "")
+            } else {
+                ("w-1.5", "")
+            }
+        }
+    };
+    let (hbar_size, htrack_bg) = match style {
+        "classic" => ("h-4", " bg-zinc-800/50"),
+        _ => {
+            if hovered {
+                ("h-2", "")
+            } else {
+                ("h-1.5", "")
+            }
+        }
+    };
+
+    if is_vertical {
+        let root_class = format!(
+            "absolute right-0 top-0 bottom-0 {bar_size} pointer-events-none transition-all duration-150"
+        );
+        let track_class = format!("w-full h-full rounded-full{track_bg}");
+        let thumb_class =
+            format!("absolute w-full rounded-full {thumb_bg} transition-colors duration-100");
+
+        byo_write!(em,
+            +view {format!("{id}-root")} class={root_class} {
+                +view {format!("{id}-track")} class={track_class}
+                    events="pointerdown"
+                    pointer-events=auto
+                {
+                    +view {format!("{id}-thumb")} class={thumb_class}
+                        events="pointerdown,pointermove,pointerup,pointerenter,pointerleave"
+                        pointer-events=auto
+                        top={format!("{offset_pct:.2}%")}
+                        height={format!("{thumb_pct:.2}%")}
+                }
+            }
+        )
+    } else {
+        let root_class = format!(
+            "absolute bottom-0 left-0 right-0 {hbar_size} pointer-events-none transition-all duration-150"
+        );
+        let track_class = format!("h-full w-full rounded-full{htrack_bg}");
+        let thumb_class =
+            format!("absolute h-full rounded-full {thumb_bg} transition-colors duration-100");
+
+        byo_write!(em,
+            +view {format!("{id}-root")} class={root_class} {
+                +view {format!("{id}-track")} class={track_class}
+                    events="pointerdown"
+                    pointer-events=auto
+                {
+                    +view {format!("{id}-thumb")} class={thumb_class}
+                        events="pointerdown,pointermove,pointerup,pointerenter,pointerleave"
+                        pointer-events=auto
+                        left={format!("{offset_pct:.2}%")}
+                        width={format!("{thumb_pct:.2}%")}
+                }
+            }
+        )
+    }
+}
+
+/// Emit a patch for scrollbar visual state (thumb position/size, hover/press, style).
+pub fn patch_scrollbar_state<W: io::Write>(
+    em: &mut Emitter<W>,
+    state: &ControlState,
+) -> io::Result<()> {
+    let id = &state.local_id;
+    let direction = state
+        .props
+        .get("direction")
+        .map(|s| s.as_str())
+        .unwrap_or("vertical");
+    let is_vertical = direction != "horizontal";
+    let style = resolve_scrollbar_style(state);
+
+    let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
+
+    let thumb_bg = if state.thumb_pressed {
+        "bg-white/60"
+    } else if state.thumb_hover {
+        "bg-white/50"
+    } else {
+        "bg-white/30"
+    };
+
+    let thumb_class = format!(
+        "absolute {} rounded-full {thumb_bg} transition-colors duration-100",
+        if is_vertical { "w-full" } else { "h-full" }
+    );
+
+    // Root class changes for modern hover-thicken effect
+    let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
+    if is_vertical {
+        let (bar_size, track_bg) = match style {
+            "classic" => ("w-4", " bg-zinc-800/50"),
+            _ => {
+                if hovered {
+                    ("w-2", "")
+                } else {
+                    ("w-1.5", "")
+                }
+            }
+        };
+        let root_class = format!(
+            "absolute right-0 top-0 bottom-0 {bar_size} pointer-events-none transition-all duration-150"
+        );
+        let track_class = format!("w-full h-full rounded-full{track_bg}");
+        byo_write!(em,
+            @view {format!("{id}-root")} class={root_class}
+            @view {format!("{id}-track")} class={track_class}
+            @view {format!("{id}-thumb")} class={thumb_class}
+                top={format!("{offset_pct:.2}%")}
+                height={format!("{thumb_pct:.2}%")}
+        )
+    } else {
+        let (bar_size, track_bg) = match style {
+            "classic" => ("h-4", " bg-zinc-800/50"),
+            _ => {
+                if hovered {
+                    ("h-2", "")
+                } else {
+                    ("h-1.5", "")
+                }
+            }
+        };
+        let root_class = format!(
+            "absolute bottom-0 left-0 right-0 {bar_size} pointer-events-none transition-all duration-150"
+        );
+        let track_class = format!("h-full w-full rounded-full{track_bg}");
+        byo_write!(em,
+            @view {format!("{id}-root")} class={root_class}
+            @view {format!("{id}-track")} class={track_class}
+            @view {format!("{id}-thumb")} class={thumb_class}
+                left={format!("{offset_pct:.2}%")}
+                width={format!("{thumb_pct:.2}%")}
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scroll-view
+// ---------------------------------------------------------------------------
+
+/// Emit the expansion for a scroll-view.
+pub fn expand_scroll_view<W: io::Write>(
+    em: &mut Emitter<W>,
+    state: &ControlState,
+) -> io::Result<()> {
+    let id = &state.local_id;
+    let direction = state
+        .props
+        .get("direction")
+        .map(|s| s.as_str())
+        .unwrap_or("vertical");
+    let scrollbar_style = state
+        .props
+        .get("scrollbar")
+        .map(|s| s.as_str())
+        .unwrap_or("auto");
+
+    // Passthrough width/height/class from app props
+    let width = state.props.get("width").map(|s| s.as_str()).unwrap_or("");
+    let height = state.props.get("height").map(|s| s.as_str()).unwrap_or("");
+    let extra_class = state.props.get("class").map(|s| s.as_str()).unwrap_or("");
+
+    // Root uses flex-col so the viewport can fill remaining space via flex-1.
+    // relative is needed for absolutely-positioned scrollbar overlays.
+    let root_class = format!("relative flex flex-col overflow-clip {extra_class}");
+
+    // Determine which axes scroll
+    let scroll_y = direction == "vertical" || direction == "both";
+    let scroll_x = direction == "horizontal" || direction == "both";
+
+    let overflow_y = if scroll_y { "scroll" } else { "hidden" };
+    let overflow_x = if scroll_x { "scroll" } else { "hidden" };
+
+    let show_scrollbar = scrollbar_style != "none";
+    let show_y = show_scrollbar && scroll_y;
+    let show_x = show_scrollbar && scroll_x;
+
+    // Viewport uses flex-1 min-h-0 to fill the root's remaining space.
+    // min-h-0 prevents the default min-height:auto from expanding the viewport
+    // to fit its content, which is essential for overflow clipping to work.
+    // Classic scrollbars shrink the viewport via margin so they don't overlap content.
+    let is_classic = scrollbar_style == "classic";
+    let viewport_class = match (is_classic && show_y, is_classic && show_x) {
+        (true, true) => "flex-1 min-h-0 min-w-0 mr-4 mb-4",
+        (true, false) => "flex-1 min-h-0 min-w-0 mr-4",
+        (false, true) => "flex-1 min-h-0 min-w-0 mb-4",
+        (false, false) => "flex-1 min-h-0 min-w-0",
+    };
+
+    // Passthrough controlled / default scroll props from scroll-view to viewport
+    let scroll_x_prop = state.props.get("scroll-x");
+    let scroll_y_prop = state.props.get("scroll-y");
+    let default_scroll_x = state.props.get("default-scroll-x");
+    let default_scroll_y = state.props.get("default-scroll-y");
+
+    // Start root
+    byo_write!(em,
+        +view {format!("{id}-root")} class={root_class.as_str()}
+            events="scroll"
+            if !width.is_empty() { width={width} }
+            if !height.is_empty() { height={height} }
+        {
+            +view {format!("{id}-viewport")} class={viewport_class}
+                overflow-x={overflow_x}
+                overflow-y={overflow_y}
+                if let Some(v) = scroll_x_prop { scroll-x={v.as_str()} }
+                if let Some(v) = scroll_y_prop { scroll-y={v.as_str()} }
+                if let Some(v) = default_scroll_x { default-scroll-x={v.as_str()} }
+                if let Some(v) = default_scroll_y { default-scroll-y={v.as_str()} }
+                events="resize"
+            {
+                ::_ {}
+            }
+            if show_y {
+                +scrollbar {format!("{id}-scrollbar-y")}
+                    direction=vertical
+                    style={scrollbar_style}
+                    scroll-position={state.scroll_y.to_string()}
+                    content-size="0"
+                    viewport-size="0"
+            }
+            if show_x {
+                +scrollbar {format!("{id}-scrollbar-x")}
+                    direction=horizontal
+                    style={scrollbar_style}
+                    scroll-position={state.scroll_x.to_string()}
+                    content-size="0"
+                    viewport-size="0"
+            }
+        }
+    )
+}
+
+/// Emit a patch for scroll-view visual state.
+/// Scroll position is compositor-owned; we only patch visual props here.
+pub fn patch_scroll_view_state<W: io::Write>(
+    _em: &mut Emitter<W>,
+    _state: &ControlState,
+) -> io::Result<()> {
+    // No visual patches needed for scroll-view itself.
+    // Scroll position is managed via controlled props (scroll-x/scroll-y)
+    // on the viewport during thumb drag, and by the compositor otherwise.
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +753,266 @@ mod tests {
         let out = expand_to_string(|em| expand_slider(em, &state));
         assert!(out.contains("content=75"));
         assert!(out.contains("width=75.0%"));
+    }
+
+    // ── Scrollbar ──────────────────────────────────────────────────
+
+    #[test]
+    fn scrollbar_vertical_default() {
+        let props = make_props(&[
+            ("direction", "vertical"),
+            ("scroll-position", "0"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        assert!(out.contains("+view sb-root"));
+        assert!(out.contains("+view sb-track"));
+        assert!(out.contains("+view sb-thumb"));
+        assert!(out.contains("right-0 top-0 bottom-0"));
+        assert!(out.contains("w-1.5")); // modern default: thin
+        assert!(out.contains("height=50.00%"));
+        assert!(out.contains("top=0.00%"));
+    }
+
+    #[test]
+    fn scrollbar_vertical_scrolled() {
+        let props = make_props(&[
+            ("direction", "vertical"),
+            ("scroll-position", "250"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        // thumb is 50% size, at 50% scroll → offset = 0.5 * (100 - 50) = 25%
+        assert!(out.contains("top=25.00%"));
+        assert!(out.contains("height=50.00%"));
+    }
+
+    #[test]
+    fn scrollbar_horizontal() {
+        let props = make_props(&[
+            ("direction", "horizontal"),
+            ("scroll-position", "0"),
+            ("content-size", "2000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        assert!(out.contains("bottom-0 left-0 right-0"));
+        assert!(out.contains("h-1.5")); // modern default: thin
+        assert!(out.contains("width=25.00%"));
+        assert!(out.contains("left=0.00%"));
+    }
+
+    #[test]
+    fn scrollbar_content_fits() {
+        let props = make_props(&[
+            ("direction", "vertical"),
+            ("scroll-position", "0"),
+            ("content-size", "100"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        // When content fits, thumb should be 100%
+        assert!(out.contains("height=100.00%"));
+        assert!(out.contains("top=0.00%"));
+    }
+
+    // ── Scroll-view ────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_view_vertical_default() {
+        let props = make_props(&[("height", "400")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:content", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        eprintln!("=== SCROLL-VIEW EXPANSION ===\n{out}\n=== END ===");
+        assert!(out.contains("+view content-root"));
+        assert!(out.contains("+view content-viewport"));
+        assert!(out.contains("overflow-y=scroll"));
+        assert!(out.contains("overflow-x=hidden"));
+        // No scroll-y in output: uncontrolled mode (compositor owns scroll position)
+        assert!(!out.contains("scroll-y="));
+        // Scroll events on root container, resize on viewport (separate targets)
+        assert!(out.contains("events=scroll"));
+        assert!(out.contains("events=resize"));
+        assert!(out.contains("::_ {"));
+        assert!(out.contains("+scrollbar content-scrollbar-y"));
+        assert!(out.contains("direction=vertical"));
+    }
+
+    #[test]
+    fn scroll_view_horizontal() {
+        let props = make_props(&[("direction", "horizontal"), ("width", "600")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:hscroll", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        assert!(out.contains("overflow-x=scroll"));
+        assert!(out.contains("overflow-y=hidden"));
+        assert!(out.contains("+scrollbar hscroll-scrollbar-x"));
+        assert!(out.contains("direction=horizontal"));
+        // Should NOT have vertical scrollbar
+        assert!(!out.contains("+scrollbar hscroll-scrollbar-y"));
+    }
+
+    #[test]
+    fn scroll_view_both_axes() {
+        let props = make_props(&[("direction", "both"), ("width", "600"), ("height", "400")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:both", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        assert!(out.contains("overflow-x=scroll"));
+        assert!(out.contains("overflow-y=scroll"));
+        assert!(out.contains("+scrollbar both-scrollbar-y"));
+        assert!(out.contains("+scrollbar both-scrollbar-x"));
+    }
+
+    #[test]
+    fn scroll_view_no_scrollbar() {
+        let props = make_props(&[("scrollbar", "none"), ("height", "400")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:nosb", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        assert!(out.contains("+view nosb-viewport"));
+        assert!(!out.contains("+scrollbar"));
+    }
+
+    #[test]
+    fn scroll_view_passthrough_class() {
+        let props = make_props(&[("class", "bg-zinc-900"), ("height", "400")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:styled", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        assert!(out.contains("bg-zinc-900"));
+    }
+
+    // ── Scrollbar thumb geometry ───────────────────────────────────
+
+    #[test]
+    fn thumb_geometry_half_viewport() {
+        let props = make_props(&[
+            ("scroll-position", "0"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let (offset, size) = scrollbar_thumb_geometry(&state);
+        assert!((size - 50.0).abs() < 0.01);
+        assert!(offset.abs() < 0.01);
+    }
+
+    #[test]
+    fn thumb_geometry_fully_scrolled() {
+        let props = make_props(&[
+            ("scroll-position", "500"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let (offset, size) = scrollbar_thumb_geometry(&state);
+        assert!((size - 50.0).abs() < 0.01);
+        // offset should be 100 - 50 = 50%
+        assert!((offset - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn scrollbar_classic_style() {
+        let props = make_props(&[
+            ("direction", "vertical"),
+            ("style", "classic"),
+            ("scroll-position", "0"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        assert!(out.contains("w-4")); // classic: wider
+        assert!(out.contains("bg-zinc-800/50")); // classic: visible track bg
+    }
+
+    #[test]
+    fn scrollbar_modern_thickens_on_hover() {
+        let props = make_props(&[
+            ("direction", "vertical"),
+            ("style", "modern"),
+            ("scroll-position", "0"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let mut state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        // Not hovered — thin
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        assert!(out.contains("w-1.5"));
+
+        // Hovered — thickens
+        state.thumb_hover = true;
+        let out = expand_to_string(|em| expand_scrollbar(em, &state));
+        assert!(out.contains("w-2"));
+    }
+
+    #[test]
+    fn scroll_view_classic_scrollbar() {
+        let props = make_props(&[("scrollbar", "classic"), ("height", "400")]);
+        let state = ControlState::new(ControlKind::ScrollView, "app:content", &props);
+        let out = expand_to_string(|em| expand_scroll_view(em, &state));
+        // Classic style should still emit scrollbar
+        assert!(out.contains("+scrollbar content-scrollbar-y"));
+        assert!(out.contains("style=classic"));
+    }
+
+    #[test]
+    fn thumb_geometry_min_size() {
+        let props = make_props(&[
+            ("scroll-position", "0"),
+            ("content-size", "100000"),
+            ("viewport-size", "100"),
+        ]);
+        let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        let (_, size) = scrollbar_thumb_geometry(&state);
+        assert!((size - MIN_THUMB_PCT).abs() < 0.01);
+    }
+
+    #[test]
+    fn thumb_geometry_overscroll_squeeze_start() {
+        let props = make_props(&[
+            ("scroll-position", "0"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let mut state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        // No overflow — normal thumb
+        let (offset, size) = scrollbar_thumb_geometry(&state);
+        assert!((size - 50.0).abs() < 0.01);
+        assert!((offset - 0.0).abs() < 0.01);
+
+        // Overflow past start (negative) — thumb shrinks, stays at top
+        state.scroll_overflow = -50.0;
+        let (offset2, size2) = scrollbar_thumb_geometry(&state);
+        assert!(size2 < size, "thumb should shrink during overscroll");
+        let min_pct = MIN_SQUEEZE_THUMB_PX / 500.0 * 100.0; // 4%
+        assert!(size2 >= min_pct);
+        assert!((offset2 - 0.0).abs() < 0.01, "should stay near top");
+    }
+
+    #[test]
+    fn thumb_geometry_overscroll_squeeze_end() {
+        let props = make_props(&[
+            ("scroll-position", "500"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        let mut state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
+        // Fully scrolled, no overflow
+        let (offset, size) = scrollbar_thumb_geometry(&state);
+        assert!((size - 50.0).abs() < 0.01);
+        assert!((offset - 50.0).abs() < 0.01);
+
+        // Overflow past end (positive) — thumb shrinks, pushed toward bottom
+        state.scroll_overflow = 50.0;
+        let (offset2, size2) = scrollbar_thumb_geometry(&state);
+        assert!(size2 < size, "thumb should shrink during overscroll");
+        let min_pct = MIN_SQUEEZE_THUMB_PX / 500.0 * 100.0; // 4%
+        assert!(size2 >= min_pct);
+        // Bottom edge should remain roughly at 100%
+        assert!((offset2 + size2 - 100.0).abs() < 0.5);
     }
 }

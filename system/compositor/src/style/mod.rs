@@ -7,6 +7,7 @@ pub mod shadow;
 pub mod tailwind;
 
 use bevy::prelude::*;
+use bevy::ui::ScrollPosition;
 
 use crate::components::ByoOrder;
 use crate::components::ByoTty;
@@ -62,6 +63,12 @@ pub(crate) fn resolve_view_props(props: &ViewProps) -> ViewProps {
         justify_content,
         flex_wrap,
         overflow,
+        overflow_x,
+        overflow_y,
+        scroll_x,
+        scroll_y,
+        default_scroll_x,
+        default_scroll_y,
         position,
         left,
         right,
@@ -126,8 +133,10 @@ pub(crate) fn resolve_box_shadow(resolved: &ViewProps) -> Vec<ByoShadow> {
 /// Skips fields that have active transitions (those are driven by tick_view_transitions).
 #[allow(clippy::type_complexity)]
 pub fn reconcile_views(
+    mut commands: Commands,
     mut query: Query<
         (
+            Entity,
             &ViewProps,
             &mut Node,
             &mut BackgroundColor,
@@ -135,11 +144,12 @@ pub fn reconcile_views(
             &mut BoxShadow,
             Option<&mut Visibility>,
             Option<&ActiveTransitions>,
+            Option<&ScrollPosition>,
         ),
         Changed<ViewProps>,
     >,
 ) {
-    for (props, mut node, mut bg, mut border_color, mut box_shadow, visibility, active) in
+    for (entity, props, mut node, mut bg, mut border_color, mut box_shadow, visibility, active, existing_scroll) in
         &mut query
     {
         let resolved = resolve_view_props(props);
@@ -306,11 +316,54 @@ pub fn reconcile_views(
             .as_ref()
             .map_or(defaults.position_type, |p| p.to_bevy());
 
-        // Overflow
-        node.overflow = resolved.overflow.as_ref().map_or(defaults.overflow, |o| {
-            let axis = o.to_bevy();
-            Overflow { x: axis, y: axis }
-        });
+        // Overflow (per-axis overrides base)
+        {
+            let base = resolved.overflow.as_ref().map(|o| o.to_bevy());
+            let new_overflow = Overflow {
+                x: resolved
+                    .overflow_x
+                    .as_ref()
+                    .map(|o| o.to_bevy())
+                    .or(base)
+                    .unwrap_or(defaults.overflow.x),
+                y: resolved
+                    .overflow_y
+                    .as_ref()
+                    .map(|o| o.to_bevy())
+                    .or(base)
+                    .unwrap_or(defaults.overflow.y),
+            };
+            node.overflow = new_overflow;
+        }
+
+        // ScrollPosition — controlled vs uncontrolled scroll semantics.
+        // When scroll_x/scroll_y props are set, they "lock" that axis (controlled mode).
+        // When removed (~scroll-x/~scroll-y), physics resumes from current position.
+        // default-scroll-x/y only apply on initial insertion.
+        if existing_scroll.is_none() {
+            // Initial insertion: scroll_x > default_scroll_x > 0
+            let sx = resolved
+                .scroll_x
+                .or(resolved.default_scroll_x)
+                .unwrap_or(0.0);
+            let sy = resolved
+                .scroll_y
+                .or(resolved.default_scroll_y)
+                .unwrap_or(0.0);
+            if sx != 0.0 || sy != 0.0 {
+                commands
+                    .entity(entity)
+                    .insert(ScrollPosition(Vec2::new(sx, sy)));
+            }
+        } else if resolved.scroll_x.is_some() || resolved.scroll_y.is_some() {
+            // Controlled: write prop values, preserve other axis from existing SP
+            let sp = existing_scroll.unwrap();
+            let sx = resolved.scroll_x.unwrap_or(sp.x);
+            let sy = resolved.scroll_y.unwrap_or(sp.y);
+            commands
+                .entity(entity)
+                .insert(ScrollPosition(Vec2::new(sx, sy)));
+        }
 
         // Position
         if !has(AnimatableProp::Left) {
@@ -979,6 +1032,84 @@ pub fn reconcile_view_transforms(
             scale: Vec2::new(sx, sy),
             rotation: Rot2::radians(rot_rad),
         };
+    }
+}
+
+/// Apply overscroll visual offset and authoritative scroll position.
+///
+/// Runs in PostUpdate after `reconcile_views` (which may set `ScrollPosition`
+/// from daemon props). We override `ScrollPosition` with the clamped value
+/// from our physics (source of truth), and apply the overflow as a
+/// `UiTransform` translation for the rubberband visual effect.
+pub fn apply_overscroll_offset(
+    mut commands: Commands,
+    mut physics: ResMut<crate::scroll::ScrollPhysics>,
+    view_props_query: Query<(Entity, &ViewProps)>,
+    mut scroll_query: Query<&mut ScrollPosition>,
+    mut overscroll_query: Query<(
+        Entity,
+        &ViewProps,
+        &mut UiTransform,
+        &crate::scroll::OverscrollState,
+        Option<&ActiveTransitions>,
+    )>,
+) {
+    // Apply controlled scroll prop overrides to physics.
+    // When scroll-x/scroll-y props are set, they "lock" that axis —
+    // override the physics position and kill momentum.
+    for (entity, props) in &view_props_query {
+        let resolved = resolve_view_props(props);
+        if resolved.scroll_x.is_some() || resolved.scroll_y.is_some() {
+            physics.apply_controlled(entity, resolved.scroll_x, resolved.scroll_y);
+        }
+    }
+
+    // Write authoritative clamped scroll positions to Bevy (now
+    // incorporating any controlled overrides from above).
+    for update in physics.scroll_position_updates() {
+        if let Ok(mut sp) = scroll_query.get_mut(update.entity) {
+            sp.x = update.x as f32;
+            sp.y = update.y as f32;
+        }
+    }
+
+    // Apply visual overscroll offset (or reset to base when overscroll clears).
+    // We must NOT skip the (0,0) case — the UiTransform needs to be reset
+    // to the base value when overscroll transitions from non-zero to zero.
+    for (entity, props, mut ui_transform, overscroll, active) in &mut overscroll_query {
+        let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));
+        if has(AnimatableProp::TranslateX) || has(AnimatableProp::TranslateY) {
+            let cur_x = match ui_transform.translation.x {
+                Val::Px(v) => v,
+                _ => 0.0,
+            };
+            let cur_y = match ui_transform.translation.y {
+                Val::Px(v) => v,
+                _ => 0.0,
+            };
+            ui_transform.translation.x = Val::Px(cur_x + overscroll.offset_x);
+            ui_transform.translation.y = Val::Px(cur_y + overscroll.offset_y);
+        } else {
+            let resolved = resolve_view_props(props);
+            let base_x = resolved.translate_x.map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+            let base_y = resolved.translate_y.map_or(0.0, |v| match v.0 {
+                Val::Px(px) => px,
+                _ => 0.0,
+            });
+            ui_transform.translation.x = Val::Px(base_x + overscroll.offset_x);
+            ui_transform.translation.y = Val::Px(base_y + overscroll.offset_y);
+        }
+
+        // Once overscroll is zero and UiTransform has been reset to base,
+        // remove the component so we don't re-run this every frame.
+        if overscroll.offset_x == 0.0 && overscroll.offset_y == 0.0 {
+            commands
+                .entity(entity)
+                .remove::<crate::scroll::OverscrollState>();
+        }
     }
 }
 

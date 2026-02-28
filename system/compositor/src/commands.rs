@@ -134,6 +134,12 @@ pub fn process_commands(
                     let id_str = id.as_ref();
                     if let Some(entity) = id_map.remove_by_id(id_str) {
                         commands.entity(entity).despawn();
+                        // Release any pointer captures targeting this entity
+                        if let Some(ref engine) = engine {
+                            engine.send(EngineInput::EntityDestroyed {
+                                byo_id: id_str.to_string(),
+                            });
+                        }
                     }
                     last_entity = None;
                 }
