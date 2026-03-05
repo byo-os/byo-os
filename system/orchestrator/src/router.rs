@@ -18,7 +18,7 @@ use byo::tree::{ObjectKind, PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch, write_props};
 use crate::id::QualifiedId;
-use crate::process::{Process, ProcessId, WriteMsg};
+use crate::process::{Process, ProcessId, ProcessKind, WriteMsg};
 use crate::state::ObjectTree;
 
 /// Messages flowing from process reader tasks to the router.
@@ -156,9 +156,11 @@ impl Router {
         self.processes.insert(id, process);
     }
 
-    /// Returns true if the router has any connected processes.
+    /// Returns true if the router has any connected non-virtual processes.
     pub fn has_processes(&self) -> bool {
-        !self.processes.is_empty()
+        self.processes
+            .values()
+            .any(|p| p.kind == ProcessKind::Subprocess)
     }
 
     /// Get the client name for a process ID.
@@ -1288,9 +1290,7 @@ impl Router {
                     self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
                 }
             } else {
-                tracing::warn!(
-                    "nested expansion: batch not found for ({from:?}, seq={seq})"
-                );
+                tracing::warn!("nested expansion: batch not found for ({from:?}, seq={seq})");
             }
         }
     }
@@ -1674,14 +1674,21 @@ impl Router {
             tracing::trace!(
                 "batch ready — {} expansions: [{}]",
                 batch.expansions.len(),
-                batch.expansions.keys().cloned().collect::<Vec<_>>().join(", ")
+                batch
+                    .expansions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
 
             // Reconcile re-expansions using the per-expansion flag.
             // For re-expansions, substitute slot contents (batch + prior state)
             // into the daemon's expansion before reconciling.
             let mut reconciliation_buf = Vec::new();
-            for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand, _depth)) in &batch.expansions {
+            for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand, _depth)) in
+                &batch.expansions
+            {
                 if *is_re_expand && let Some(source_qid) = QualifiedId::parse(source_qid_str) {
                     // Collect slot contents from the batch's @ children
                     let batch_slots = batch.collect_patch_slots(source_qid_str);
@@ -1762,7 +1769,9 @@ impl Router {
                 .map(|e| (e.qid.clone(), e.is_re_expand, e.depth));
 
             if let Some((ref qid, is_re_expand, depth)) = expand_info {
-                tracing::trace!("recording expansion for {qid} (re_expand={is_re_expand}, depth={depth})");
+                tracing::trace!(
+                    "recording expansion for {qid} (re_expand={is_re_expand}, depth={depth})"
+                );
                 batch.record_expansion(qid, from, commands, is_re_expand, depth);
             }
         }

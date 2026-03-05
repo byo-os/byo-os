@@ -44,14 +44,14 @@ pub fn emit_resize_events(
     emitter: Res<StdoutEmitter>,
     id_map: Res<IdMap>,
     // Entities with resize subscription but no PreviousSize yet (first detection)
-    new_query: Query<
-        (Entity, &EventSubscriptions, &ComputedNode),
-        Without<PreviousSize>,
-    >,
+    new_query: Query<(Entity, &EventSubscriptions, &ComputedNode), Without<PreviousSize>>,
     // Entities with resize subscription AND PreviousSize (change detection)
-    mut existing_query: Query<
-        (Entity, &EventSubscriptions, &ComputedNode, &mut PreviousSize),
-    >,
+    mut existing_query: Query<(
+        Entity,
+        &EventSubscriptions,
+        &ComputedNode,
+        &mut PreviousSize,
+    )>,
 ) {
     // Collect events to emit (avoid holding borrows during emission)
     let mut events: Vec<(String, f64, f64, f64, f64)> = Vec::new();

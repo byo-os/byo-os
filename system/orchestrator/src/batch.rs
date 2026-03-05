@@ -112,8 +112,10 @@ impl PendingBatch {
         is_re_expand: bool,
         depth: u32,
     ) {
-        self.expansions
-            .insert(qid.to_string(), (owner, expansion_cmds, is_re_expand, depth));
+        self.expansions.insert(
+            qid.to_string(),
+            (owner, expansion_cmds, is_re_expand, depth),
+        );
     }
 
     /// Extract slot contents from the batch for a specific qualified ID.
@@ -270,7 +272,10 @@ impl PendingBatch {
                     if *id != "_" && self.expansions.contains_key(&*qid_buf) {
                         // Splice in the daemon expansion.
                         let (_, expansion_cmds, _, _) = &self.expansions[&*qid_buf];
-                        tracing::trace!("rewrite: splicing expansion for {qid_buf} ({} cmds)", expansion_cmds.len());
+                        tracing::trace!(
+                            "rewrite: splicing expansion for {qid_buf} ({} cmds)",
+                            expansion_cmds.len()
+                        );
                         // Defer rewriting until we know if there are children (for slots).
                         skip_next_children = Some(SkipMode::CollectSlots {
                             expansion_cmds: expansion_cmds.clone(),
@@ -279,7 +284,9 @@ impl PendingBatch {
                     } else if claims.contains_key(&**kind) && *id != "_" {
                         // Daemon-owned but no expansion (shouldn't happen
                         // if pending == 0, but handle gracefully).
-                        tracing::warn!("rewrite: SKIPPING claimed +{kind} {qid_buf} — no expansion found!");
+                        tracing::warn!(
+                            "rewrite: SKIPPING claimed +{kind} {qid_buf} — no expansion found!"
+                        );
                         skip_next_children = Some(SkipMode::Skip);
                     } else {
                         write_upsert(buf, kind, &qid_buf, props);
@@ -931,7 +938,12 @@ mod tests {
         // Icon daemon expansion for controls:save-icon (already qualified).
         batch.expansions.insert(
             "controls:save-icon".to_string(),
-            (pid(3), cmds("+image icons:check-img src=check.png"), false, 0),
+            (
+                pid(3),
+                cmds("+image icons:check-img src=check.png"),
+                false,
+                0,
+            ),
         );
 
         let (result, _) = batch.rewrite(&claims);

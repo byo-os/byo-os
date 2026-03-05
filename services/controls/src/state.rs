@@ -58,6 +58,8 @@ pub struct ControlState {
     /// Overscroll overflow amount (negative = past start, positive = past end).
     /// Used for scrollbar thumb squeeze effect during overscroll.
     pub scroll_overflow: f64,
+    /// Whether the scrollbar is currently faded in (modern style auto-hide).
+    pub fade_visible: bool,
 }
 
 impl ControlState {
@@ -140,6 +142,7 @@ impl ControlState {
             content_size,
             viewport_size,
             scroll_overflow: 0.0,
+            fade_visible: false,
         }
     }
 

@@ -27,6 +27,7 @@ fn mock_process(id: u32, name: &str) -> (Process, TrackedUnboundedReceiver<Write
     let process = Process {
         id: ProcessId(id),
         name: name.to_string(),
+        kind: byo_orchestrator::process::ProcessKind::Subprocess,
         tx,
     };
     (process, rx)

@@ -358,10 +358,16 @@ fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
             // Past end: thumb squeezes upward from the bottom
             let bottom_edge = offset_pct + thumb_pct;
             let squeezed_offset = bottom_edge - squeezed_thumb;
-            (squeezed_offset.clamp(0.0, 100.0 - squeezed_thumb), squeezed_thumb)
+            (
+                squeezed_offset.clamp(0.0, 100.0 - squeezed_thumb),
+                squeezed_thumb,
+            )
         } else {
             // Past start: thumb squeezes downward from the top
-            (offset_pct.clamp(0.0, 100.0 - squeezed_thumb), squeezed_thumb)
+            (
+                offset_pct.clamp(0.0, 100.0 - squeezed_thumb),
+                squeezed_thumb,
+            )
         }
     } else {
         (offset_pct, thumb_pct)
@@ -369,7 +375,7 @@ fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
 }
 
 /// Resolve the scrollbar style: "modern", "classic", or "auto" (defaults to "modern").
-fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
+pub fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
     match state
         .props
         .get("style")
@@ -380,6 +386,48 @@ fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
         "modern" => "modern",
         // "auto" defaults to modern
         _ => "modern",
+    }
+}
+
+/// Compute the thumb background color based on state, style, and fade visibility.
+fn scrollbar_thumb_bg(state: &ControlState, style: &str) -> &'static str {
+    match style {
+        "classic" => {
+            if state.thumb_pressed {
+                "bg-white/60"
+            } else if state.thumb_hover {
+                "bg-white/50"
+            } else {
+                "bg-white/30"
+            }
+        }
+        _ => {
+            // Modern: color-alpha encodes fade visibility
+            if !state.fade_visible {
+                "bg-white/0"
+            } else if state.thumb_pressed {
+                "bg-white/60"
+            } else if state.thumb_hover || state.track_hover {
+                "bg-white/50"
+            } else {
+                "bg-white/30"
+            }
+        }
+    }
+}
+
+/// Compute the `transition` wire prop for the scrollbar track.
+/// Modern scrollbars transition both color and size; classic returns empty (no transition).
+fn scrollbar_track_transition(style: &str, is_vertical: bool) -> &'static str {
+    match style {
+        "classic" => "",
+        _ => {
+            if is_vertical {
+                "background-color 300ms ease-out, width 300ms ease-out"
+            } else {
+                "background-color 300ms ease-out, height 300ms ease-out"
+            }
+        }
     }
 }
 
@@ -396,77 +444,48 @@ pub fn expand_scrollbar<W: io::Write>(em: &mut Emitter<W>, state: &ControlState)
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
 
-    // Determine thumb visual state
-    let thumb_bg = if state.thumb_pressed {
-        "bg-white/60"
-    } else if state.thumb_hover {
-        "bg-white/50"
-    } else {
-        "bg-white/30"
-    };
-
-    // Style-dependent widths and track background
+    let thumb_bg = scrollbar_thumb_bg(state, style);
     let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
-    let (bar_size, track_bg) = match style {
-        "classic" => ("w-4", " bg-zinc-800/50"),
-        _ => {
-            if hovered {
-                ("w-2", "")
-            } else {
-                ("w-1.5", "")
-            }
-        }
-    };
-    let (hbar_size, htrack_bg) = match style {
-        "classic" => ("h-4", " bg-zinc-800/50"),
-        _ => {
-            if hovered {
-                ("h-2", "")
-            } else {
-                ("h-1.5", "")
-            }
-        }
-    };
+
+    // Classic scrollbars are always interactive.
+    // Modern scrollbars are only interactive when faded in.
+    let interactive = style == "classic" || state.fade_visible;
+    let pe = if interactive { "auto" } else { "none" };
+
+    // Modern track transitions both color and size (width for vertical, height for horizontal).
+    let track_transition = scrollbar_track_transition(style, is_vertical);
 
     if is_vertical {
-        let root_class = format!(
-            "absolute right-0 top-0 bottom-0 {bar_size} pointer-events-none transition-all duration-150"
-        );
-        let track_class = format!("w-full h-full rounded-full{track_bg}");
-        let thumb_class =
-            format!("absolute w-full rounded-full {thumb_bg} transition-colors duration-100");
+        let (root_class, track_class, thumb_class) = scrollbar_classes_v(style, hovered, thumb_bg);
 
         byo_write!(em,
             +view {format!("{id}-root")} class={root_class} {
                 +view {format!("{id}-track")} class={track_class}
-                    events="pointerdown"
-                    pointer-events=auto
+                    events="pointerdown,pointerenter,pointerleave"
+                    pointer-events={pe}
+                    if !track_transition.is_empty() { transition={track_transition} }
                 {
                     +view {format!("{id}-thumb")} class={thumb_class}
                         events="pointerdown,pointermove,pointerup,pointerenter,pointerleave"
-                        pointer-events=auto
+                        pointer-events={pe}
                         top={format!("{offset_pct:.2}%")}
                         height={format!("{thumb_pct:.2}%")}
                 }
             }
         )
     } else {
-        let root_class = format!(
-            "absolute bottom-0 left-0 right-0 {hbar_size} pointer-events-none transition-all duration-150"
-        );
-        let track_class = format!("h-full w-full rounded-full{htrack_bg}");
-        let thumb_class =
-            format!("absolute h-full rounded-full {thumb_bg} transition-colors duration-100");
+        let (root_class, track_class, thumb_class) = scrollbar_classes_h(style, hovered, thumb_bg);
 
         byo_write!(em,
             +view {format!("{id}-root")} class={root_class} {
                 +view {format!("{id}-track")} class={track_class}
-                    events="pointerdown"
-                    pointer-events=auto
+                    events="pointerdown,pointerenter,pointerleave"
+                    pointer-events={pe}
+                    if !track_transition.is_empty() { transition={track_transition} }
                 {
                     +view {format!("{id}-thumb")} class={thumb_class}
                         events="pointerdown,pointermove,pointerup,pointerenter,pointerleave"
-                        pointer-events=auto
+                        pointer-events={pe}
                         left={format!("{offset_pct:.2}%")}
                         width={format!("{thumb_pct:.2}%")}
                 }
@@ -475,7 +494,73 @@ pub fn expand_scrollbar<W: io::Write>(em: &mut Emitter<W>, state: &ControlState)
     }
 }
 
-/// Emit a patch for scrollbar visual state (thumb position/size, hover/press, style).
+/// Modern track width classes (both px-based so the transition system interpolates smoothly).
+const MODERN_TRACK_THIN_CLASS: &str = "w-2";
+const MODERN_TRACK_FULL_CLASS: &str = "w-4";
+const MODERN_TRACK_THIN_CLASS_H: &str = "h-2";
+const MODERN_TRACK_FULL_CLASS_H: &str = "h-4";
+
+/// Compute vertical scrollbar CSS classes for root, track, and thumb.
+/// For modern style, also returns the track width as a percentage prop value.
+fn scrollbar_classes_v(style: &str, hovered: bool, thumb_bg: &str) -> (String, String, String) {
+    match style {
+        "classic" => {
+            let root = "absolute right-0 top-0 bottom-0 w-4 pointer-events-none".to_string();
+            let track = "w-full h-full rounded-full bg-zinc-800/50".to_string();
+            let thumb =
+                format!("absolute w-full rounded-full {thumb_bg} transition-colors duration-100");
+            (root, track, thumb)
+        }
+        _ => {
+            // Modern: w-4 root is a fixed invisible hit area.
+            // Track is right-aligned inside root, grows from w-2 to w-4 on hover.
+            // Both use px-based classes so the transition system can interpolate smoothly.
+            let root = "absolute right-0 top-0 bottom-0 w-4 pointer-events-none".to_string();
+            let track_w = if hovered {
+                MODERN_TRACK_FULL_CLASS
+            } else {
+                MODERN_TRACK_THIN_CLASS
+            };
+            let track_bg = if hovered { " bg-zinc-800/50" } else { "" };
+            let track = format!("absolute right-0 top-0 bottom-0 {track_w} rounded-full{track_bg}");
+            let thumb =
+                format!("absolute w-full rounded-full {thumb_bg} transition-colors duration-300");
+            (root, track, thumb)
+        }
+    }
+}
+
+/// Compute horizontal scrollbar CSS classes for root, track, and thumb.
+fn scrollbar_classes_h(style: &str, hovered: bool, thumb_bg: &str) -> (String, String, String) {
+    match style {
+        "classic" => {
+            let root = "absolute bottom-0 left-0 right-0 h-4 pointer-events-none".to_string();
+            let track = "h-full w-full rounded-full bg-zinc-800/50".to_string();
+            let thumb =
+                format!("absolute h-full rounded-full {thumb_bg} transition-colors duration-100");
+            (root, track, thumb)
+        }
+        _ => {
+            // Modern: h-4 root is a fixed invisible hit area.
+            // Track is bottom-aligned inside root, grows from h-2 to h-4 on hover.
+            // Both use px-based classes so the transition system can interpolate smoothly.
+            let root = "absolute bottom-0 left-0 right-0 h-4 pointer-events-none".to_string();
+            let track_h = if hovered {
+                MODERN_TRACK_FULL_CLASS_H
+            } else {
+                MODERN_TRACK_THIN_CLASS_H
+            };
+            let track_bg = if hovered { " bg-zinc-800/50" } else { "" };
+            let track =
+                format!("absolute bottom-0 left-0 right-0 {track_h} rounded-full{track_bg}");
+            let thumb =
+                format!("absolute h-full rounded-full {thumb_bg} transition-colors duration-300");
+            (root, track, thumb)
+        }
+    }
+}
+
+/// Emit a patch for scrollbar visual state (thumb position/size, hover/press, style, fade).
 pub fn patch_scrollbar_state<W: io::Write>(
     em: &mut Emitter<W>,
     state: &ControlState,
@@ -490,63 +575,30 @@ pub fn patch_scrollbar_state<W: io::Write>(
     let style = resolve_scrollbar_style(state);
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
-
-    let thumb_bg = if state.thumb_pressed {
-        "bg-white/60"
-    } else if state.thumb_hover {
-        "bg-white/50"
-    } else {
-        "bg-white/30"
-    };
-
-    let thumb_class = format!(
-        "absolute {} rounded-full {thumb_bg} transition-colors duration-100",
-        if is_vertical { "w-full" } else { "h-full" }
-    );
-
-    // Root class changes for modern hover-thicken effect
+    let thumb_bg = scrollbar_thumb_bg(state, style);
     let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
+
+    let interactive = style == "classic" || state.fade_visible;
+    let pe = if interactive { "auto" } else { "none" };
+    let track_transition = scrollbar_track_transition(style, is_vertical);
+
     if is_vertical {
-        let (bar_size, track_bg) = match style {
-            "classic" => ("w-4", " bg-zinc-800/50"),
-            _ => {
-                if hovered {
-                    ("w-2", "")
-                } else {
-                    ("w-1.5", "")
-                }
-            }
-        };
-        let root_class = format!(
-            "absolute right-0 top-0 bottom-0 {bar_size} pointer-events-none transition-all duration-150"
-        );
-        let track_class = format!("w-full h-full rounded-full{track_bg}");
+        let (root_class, track_class, thumb_class) = scrollbar_classes_v(style, hovered, thumb_bg);
         byo_write!(em,
             @view {format!("{id}-root")} class={root_class}
-            @view {format!("{id}-track")} class={track_class}
-            @view {format!("{id}-thumb")} class={thumb_class}
+            @view {format!("{id}-track")} class={track_class} pointer-events={pe}
+                if !track_transition.is_empty() { transition={track_transition} }
+            @view {format!("{id}-thumb")} class={thumb_class} pointer-events={pe}
                 top={format!("{offset_pct:.2}%")}
                 height={format!("{thumb_pct:.2}%")}
         )
     } else {
-        let (bar_size, track_bg) = match style {
-            "classic" => ("h-4", " bg-zinc-800/50"),
-            _ => {
-                if hovered {
-                    ("h-2", "")
-                } else {
-                    ("h-1.5", "")
-                }
-            }
-        };
-        let root_class = format!(
-            "absolute bottom-0 left-0 right-0 {bar_size} pointer-events-none transition-all duration-150"
-        );
-        let track_class = format!("h-full w-full rounded-full{track_bg}");
+        let (root_class, track_class, thumb_class) = scrollbar_classes_h(style, hovered, thumb_bg);
         byo_write!(em,
             @view {format!("{id}-root")} class={root_class}
-            @view {format!("{id}-track")} class={track_class}
-            @view {format!("{id}-thumb")} class={thumb_class}
+            @view {format!("{id}-track")} class={track_class} pointer-events={pe}
+                if !track_transition.is_empty() { transition={track_transition} }
+            @view {format!("{id}-thumb")} class={thumb_class} pointer-events={pe}
                 left={format!("{offset_pct:.2}%")}
                 width={format!("{thumb_pct:.2}%")}
         )
@@ -771,7 +823,7 @@ mod tests {
         assert!(out.contains("+view sb-track"));
         assert!(out.contains("+view sb-thumb"));
         assert!(out.contains("right-0 top-0 bottom-0"));
-        assert!(out.contains("w-1.5")); // modern default: thin
+        assert!(out.contains("w-2")); // modern default: thin track
         assert!(out.contains("height=50.00%"));
         assert!(out.contains("top=0.00%"));
     }
@@ -802,7 +854,7 @@ mod tests {
         let state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
         let out = expand_to_string(|em| expand_scrollbar(em, &state));
         assert!(out.contains("bottom-0 left-0 right-0"));
-        assert!(out.contains("h-1.5")); // modern default: thin
+        assert!(out.contains("h-2")); // modern default: thin track
         assert!(out.contains("width=25.00%"));
         assert!(out.contains("left=0.00%"));
     }
@@ -939,14 +991,18 @@ mod tests {
             ("viewport-size", "500"),
         ]);
         let mut state = ControlState::new(ControlKind::Scrollbar, "controls:sb", &props);
-        // Not hovered — thin
+        // Not hovered — thin track, root always w-4
         let out = expand_to_string(|em| expand_scrollbar(em, &state));
-        assert!(out.contains("w-1.5"));
+        assert!(out.contains("w-4")); // root is always w-4 for hover hit area
+        assert!(out.contains("w-2")); // track is thin
 
-        // Hovered — thickens
+        // Hovered — track expands to full width
         state.thumb_hover = true;
+        state.fade_visible = true;
         let out = expand_to_string(|em| expand_scrollbar(em, &state));
-        assert!(out.contains("w-2"));
+        // Both root and track are w-4 when hovered
+        assert!(out.contains("w-4"));
+        assert!(out.contains("bg-zinc-800/50")); // track bg visible on hover
     }
 
     #[test]

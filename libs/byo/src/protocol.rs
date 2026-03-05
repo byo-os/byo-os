@@ -250,6 +250,9 @@ pub enum EventKind {
     Change,
     Input,
 
+    // Timer events (synthesized by the timer virtual service)
+    Fire,
+
     /// Unknown or third-party event (e.g. `com.example.spell-check`)
     Other(ByteStr),
 }
@@ -280,6 +283,7 @@ impl EventKind {
             EventKind::Press => "press",
             EventKind::Change => "change",
             EventKind::Input => "input",
+            EventKind::Fire => "fire",
             EventKind::Other(s) => s,
         }
     }
@@ -313,6 +317,7 @@ impl EventKind {
             "press" => EventKind::Press,
             "change" => EventKind::Change,
             "input" => EventKind::Input,
+            "fire" => EventKind::Fire,
             _ => EventKind::Other(s),
         }
     }
@@ -326,6 +331,7 @@ impl EventKind {
                 | EventKind::Focus
                 | EventKind::Blur
                 | EventKind::Resize
+                | EventKind::Fire
         )
     }
 
@@ -341,6 +347,7 @@ impl EventKind {
                 | EventKind::Focus
                 | EventKind::Blur
                 | EventKind::Resize
+                | EventKind::Fire
         )
     }
 }

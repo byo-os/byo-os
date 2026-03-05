@@ -678,11 +678,8 @@ pub fn tick_scroll_physics(
     for event in synthetic_events {
         // The event.entity is the viewport (has ScrollPosition). Walk up
         // to find the scroll event target (root container with events="scroll").
-        let Some(event_target) = find_scroll_event_target(
-            event.entity,
-            &parent_query,
-            &subs_query,
-        ) else {
+        let Some(event_target) = find_scroll_event_target(event.entity, &parent_query, &subs_query)
+        else {
             continue;
         };
 
@@ -772,7 +769,9 @@ mod tests {
     fn raw_scroll_sets_active_phase() {
         let mut physics = ScrollPhysics::default();
         let entity = Entity::from_bits(1);
-        physics.on_raw_scroll(entity, 0.0, -20.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+        physics.on_raw_scroll(
+            entity, 0.0, -20.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+        );
         assert!(physics.states.contains_key(&entity));
         assert_eq!(physics.states[&entity].phase, ScrollPhase::Active);
     }
@@ -784,7 +783,9 @@ mod tests {
         // Send a burst of scroll events to build velocity
         for i in 0..5 {
             let t = 1.0 + i as f64 * 0.016;
-            physics.on_raw_scroll(entity, 0.0, -20.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+            physics.on_raw_scroll(
+                entity, 0.0, -20.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+            );
         }
         // Tick after the gap
         let events = physics.tick(1.0 + 5.0 * 0.016 + MOMENTUM_GAP_SECS + 0.01, 0.016);
@@ -801,7 +802,9 @@ mod tests {
         let entity = Entity::from_bits(1);
         for i in 0..5 {
             let t = 1.0 + i as f64 * 0.016;
-            physics.on_raw_scroll(entity, 0.0, -30.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+            physics.on_raw_scroll(
+                entity, 0.0, -30.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+            );
         }
         let base_time = 1.0 + 5.0 * 0.016;
         // Trigger Active → Momentum transition
@@ -818,14 +821,29 @@ mod tests {
         let entity = Entity::from_bits(1);
         for i in 0..5 {
             let t = 1.0 + i as f64 * 0.016;
-            physics.on_raw_scroll(entity, 0.0, -30.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+            physics.on_raw_scroll(
+                entity, 0.0, -30.0, t, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+            );
         }
         let base_time = 1.0 + 5.0 * 0.016;
         physics.tick(base_time + MOMENTUM_GAP_SECS + 0.01, 0.016);
         assert_eq!(physics.states[&entity].phase, ScrollPhase::Momentum);
 
         // New raw event arrives — should cancel momentum
-        physics.on_raw_scroll(entity, 0.0, -10.0, base_time + 0.1, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+        physics.on_raw_scroll(
+            entity,
+            0.0,
+            -10.0,
+            base_time + 0.1,
+            0.0,
+            1000.0,
+            0.0,
+            500.0,
+            0.0,
+            0.0,
+            true,
+            true,
+        );
         assert_eq!(physics.states[&entity].phase, ScrollPhase::Active);
     }
 
@@ -833,7 +851,9 @@ mod tests {
     fn momentum_eventually_stops() {
         let mut physics = ScrollPhysics::default();
         let entity = Entity::from_bits(1);
-        physics.on_raw_scroll(entity, 0.0, -5.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+        physics.on_raw_scroll(
+            entity, 0.0, -5.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+        );
         let base_time = 1.0;
         // Trigger momentum
         physics.tick(base_time + MOMENTUM_GAP_SECS + 0.01, 0.016);
@@ -856,7 +876,9 @@ mod tests {
         // Scroll down (negative delta → scroll_y increases, within bounds of large content)
         for i in 0..5 {
             let t = 1.0 + i as f64 * 0.016;
-            physics.on_raw_scroll(entity, 0.0, -30.0, t, 0.0, 10000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+            physics.on_raw_scroll(
+                entity, 0.0, -30.0, t, 0.0, 10000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+            );
         }
         assert!(!physics.has_active_momentum()); // still Active, not Momentum
 
@@ -871,7 +893,9 @@ mod tests {
         let entity = Entity::from_bits(1);
         // Scroll up (positive delta) at top → scroll_y = 0 - 20 = -20
         // clamped = 0, overflow = -20
-        physics.on_raw_scroll(entity, 0.0, 20.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+        physics.on_raw_scroll(
+            entity, 0.0, 20.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+        );
         let state = &physics.states[&entity];
         assert_eq!(state.scroll_y, -20.0); // unclamped, past min
         assert_eq!(state.clamped_y(), 0.0);
@@ -883,7 +907,9 @@ mod tests {
         let mut physics = ScrollPhysics::default();
         let entity = Entity::from_bits(1);
         // Scroll up (positive delta) at top → scroll_y = 0 - 50 = -50
-        physics.on_raw_scroll(entity, 0.0, 50.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true);
+        physics.on_raw_scroll(
+            entity, 0.0, 50.0, 1.0, 0.0, 1000.0, 0.0, 500.0, 0.0, 0.0, true, true,
+        );
         let initial = physics.states[&entity].overflow_y();
         assert!(initial < 0.0);
 
@@ -895,8 +921,6 @@ mod tests {
             t += 0.016;
         }
         // Should have sprung back and been cleaned up
-        assert!(
-            physics.states.is_empty() || physics.states[&entity].overflow_y().abs() < 0.5
-        );
+        assert!(physics.states.is_empty() || physics.states[&entity].overflow_y().abs() < 0.5);
     }
 }

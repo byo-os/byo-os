@@ -550,10 +550,7 @@ impl Engine {
                         "gotpointercapture",
                         cap_seq,
                         &id,
-                        &[Prop::val(
-                            "pointer-id",
-                            prop.pointer.pointer_id.to_string(),
-                        )],
+                        &[Prop::val("pointer-id", prop.pointer.pointer_id.to_string())],
                     )
                 });
             }
@@ -836,14 +833,8 @@ fn build_event_props(pointer: &PointerData, node: &SpineNode, verbose: bool) -> 
             "viewport-height",
             format!("{:.1}", pointer.viewport_height),
         ));
-        props.push(Prop::val(
-            "scroll-x",
-            format!("{:.1}", pointer.scroll_x),
-        ));
-        props.push(Prop::val(
-            "scroll-y",
-            format!("{:.1}", pointer.scroll_y),
-        ));
+        props.push(Prop::val("scroll-x", format!("{:.1}", pointer.scroll_x)));
+        props.push(Prop::val("scroll-y", format!("{:.1}", pointer.scroll_y)));
         props.push(Prop::val(
             "scroll-overflow-x",
             format!("{:.1}", pointer.scroll_overflow_x),

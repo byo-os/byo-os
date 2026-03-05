@@ -149,8 +149,17 @@ pub fn reconcile_views(
         Changed<ViewProps>,
     >,
 ) {
-    for (entity, props, mut node, mut bg, mut border_color, mut box_shadow, visibility, active, existing_scroll) in
-        &mut query
+    for (
+        entity,
+        props,
+        mut node,
+        mut bg,
+        mut border_color,
+        mut box_shadow,
+        visibility,
+        active,
+        existing_scroll,
+    ) in &mut query
     {
         let resolved = resolve_view_props(props);
         let has = |p: AnimatableProp| active.is_some_and(|a| a.has(p));

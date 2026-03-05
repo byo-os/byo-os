@@ -711,8 +711,7 @@ fn on_pointer_scroll(
     // Find the nearest ancestor with a scroll event subscription (the root
     // container). The root stays in place even when the viewport is translated
     // by overscroll, so pointer events always reach it.
-    let Some(event_target) =
-        find_scroll_event_target(event.entity, &parent_query, &subs_query)
+    let Some(event_target) = find_scroll_event_target(event.entity, &parent_query, &subs_query)
     else {
         return;
     };
@@ -756,10 +755,12 @@ fn on_pointer_scroll(
     // Only axes with OverflowAxis::Scroll allow scrolling/overscrolling.
     let (scroll_x_enabled, scroll_y_enabled) = style_node_query
         .get(scroll_entity)
-        .map(|node| (
-            node.overflow.x == OverflowAxis::Scroll,
-            node.overflow.y == OverflowAxis::Scroll,
-        ))
+        .map(|node| {
+            (
+                node.overflow.x == OverflowAxis::Scroll,
+                node.overflow.y == OverflowAxis::Scroll,
+            )
+        })
         .unwrap_or((false, false));
 
     // Feed into scroll physics keyed by the viewport entity
@@ -862,8 +863,7 @@ fn find_scrollable_child(
     };
     for child in children.iter() {
         if let Ok(node) = node_query.get(child)
-            && (node.overflow.x == OverflowAxis::Scroll
-                || node.overflow.y == OverflowAxis::Scroll)
+            && (node.overflow.x == OverflowAxis::Scroll || node.overflow.y == OverflowAxis::Scroll)
         {
             return Some(child);
         }

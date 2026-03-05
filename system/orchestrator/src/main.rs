@@ -4,8 +4,9 @@ use tracing::{error, info};
 
 use byo_orchestrator::channel::tracked_unbounded_channel;
 use byo_orchestrator::config::{Config, ProcessConfig};
-use byo_orchestrator::process::{ProcessId, spawn_process};
+use byo_orchestrator::process::{Process, ProcessId, ProcessKind, WriteMsg, spawn_process};
 use byo_orchestrator::router::{Router, RouterMsg};
+use byo_orchestrator::timer::timer_service;
 
 #[tokio::main]
 async fn main() {
@@ -86,6 +87,22 @@ async fn main() {
                 error!("failed to spawn '{}': {e}", proc_config.name);
             }
         }
+    }
+
+    // Spawn the timer service (in-process, no subprocess).
+    {
+        let timer_pid = ProcessId(next_id);
+        let (timer_write_tx, timer_write_rx) =
+            tracked_unbounded_channel::<WriteMsg>("write-timer-service", 512, 256);
+        router.add_process(Process {
+            id: timer_pid,
+            name: "timer-service".to_string(),
+            kind: ProcessKind::InProcess,
+            tx: timer_write_tx,
+        });
+        let timer_router_tx = router_tx.clone();
+        tokio::spawn(timer_service(timer_pid, timer_write_rx, timer_router_tx));
+        info!("spawned timer service (id={})", timer_pid.0);
     }
 
     // Drop our copy of the sender — the router loop only needs the receiver.

@@ -22,6 +22,15 @@ use crate::router::RouterMsg;
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct ProcessId(pub u32);
 
+/// How a process is hosted/executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessKind {
+    /// Local child process (stdin/stdout pipes).
+    Subprocess,
+    /// In-process tokio task (e.g. timer service).
+    InProcess,
+}
+
 /// Message sent to a process's stdin writer task.
 ///
 /// Payloads use `Arc<Vec<u8>>` so fan-out to multiple observers is a
@@ -36,10 +45,11 @@ pub enum WriteMsg {
     Passthrough(Arc<Vec<u8>>),
 }
 
-/// A managed child process.
+/// A managed process (subprocess, in-process service, etc.).
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
+    pub kind: ProcessKind,
     pub tx: TrackedUnboundedSender<WriteMsg>,
 }
 
@@ -145,6 +155,7 @@ pub fn spawn_process(
     Ok(Process {
         id,
         name,
+        kind: ProcessKind::Subprocess,
         tx: write_tx,
     })
 }

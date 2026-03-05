@@ -21,7 +21,7 @@ use tracing::info;
 use crate::expand::{
     expand_button, expand_checkbox, expand_scroll_view, expand_scrollbar, expand_slider,
     patch_button_state, patch_checkbox_state, patch_scroll_view_state, patch_scrollbar_state,
-    patch_slider_state,
+    patch_slider_state, resolve_scrollbar_style,
 };
 use crate::state::{ControlKind, ControlState, Daemon};
 
@@ -161,6 +161,11 @@ impl StdinHandler {
     ) -> io::Result<()> {
         info!("received event {}({seq}) target={id}", kind.as_str());
 
+        // Timer fire events use a naming convention: {scrollbar_local_id}-fade
+        if *kind == EventKind::Fire {
+            return self.on_fire(seq, id);
+        }
+
         // Look up which control this expansion ID belongs to
         let source_qid = match self.daemon.resolve(id) {
             Some(qid) => qid.to_owned(),
@@ -241,11 +246,17 @@ impl StdinHandler {
         }
 
         // Scrollbar sub-element hover tracking
+        let mut fade_cancel_timer: Option<String> = None;
         if state.kind == ControlKind::Scrollbar {
             match Self::scrollbar_target_kind(state, expansion_id) {
                 ScrollbarTarget::Thumb => state.thumb_hover = true,
                 ScrollbarTarget::Track => state.track_hover = true,
                 ScrollbarTarget::Other => {}
+            }
+            // Fade-in on hover and cancel any pending fade-out timer
+            if resolve_scrollbar_style(state) == "modern" {
+                state.fade_visible = true;
+                fade_cancel_timer = Some(format!("{}-fade", state.local_id));
             }
         } else {
             state.hover = true;
@@ -264,6 +275,9 @@ impl StdinHandler {
         em.frame(|em| {
             byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
             emit_visual_patch(em, state)?;
+            if let Some(ref timer_id) = fade_cancel_timer {
+                byo_write!(em, -timer {timer_id.as_str()})?;
+            }
             if let Some(seq) = enter_seq {
                 byo_write!(em, !pointerenter {seq} {source_qid})?;
             }
@@ -286,6 +300,7 @@ impl StdinHandler {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
+        let mut fade_arm_timer: Option<String> = None;
         if state.kind == ControlKind::Scrollbar {
             match Self::scrollbar_target_kind(state, expansion_id) {
                 ScrollbarTarget::Thumb => {
@@ -296,6 +311,10 @@ impl StdinHandler {
                 }
                 ScrollbarTarget::Track => state.track_hover = false,
                 ScrollbarTarget::Other => {}
+            }
+            // Arm fade-out timer on leave (fade_visible stays true until timer fires)
+            if resolve_scrollbar_style(state) == "modern" {
+                fade_arm_timer = Some(format!("{}-fade", state.local_id));
             }
         } else {
             state.hover = false;
@@ -315,6 +334,9 @@ impl StdinHandler {
         em.frame(|em| {
             byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
             emit_visual_patch(em, state)?;
+            if let Some(ref timer_id) = fade_arm_timer {
+                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+            }
             if let Some(seq) = leave_seq {
                 byo_write!(em, !pointerleave {seq} {source_qid})?;
             }
@@ -370,9 +392,15 @@ impl StdinHandler {
                         .unwrap_or(0.0);
                     // Derive track size from thumb pixel size + content/viewport ratio
                     let thumb_pixels: f64 = if is_vertical {
-                        prop_map.get("height").and_then(|v| v.parse().ok()).unwrap_or(1.0)
+                        prop_map
+                            .get("height")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1.0)
                     } else {
-                        prop_map.get("width").and_then(|v| v.parse().ok()).unwrap_or(1.0)
+                        prop_map
+                            .get("width")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1.0)
                     };
                     let thumb_pct = if state.content_size > 0.0 {
                         (state.viewport_size / state.content_size).clamp(0.05, 1.0)
@@ -389,9 +417,11 @@ impl StdinHandler {
                         "thumb_down: scrollbar={source_qid} content={:.0} viewport={:.0} \
                          thumb_px={thumb_pixels:.0} thumb_pct={thumb_pct:.3} track={:.0} \
                          scroll_pos={:.1} drag_start={:.1}",
-                        state.content_size, state.viewport_size,
+                        state.content_size,
+                        state.viewport_size,
                         state.drag_track_size,
-                        state.drag_start_scroll, state.drag_start_pos,
+                        state.drag_start_scroll,
+                        state.drag_start_pos,
                     );
 
                     let daemon = &self.daemon;
@@ -849,9 +879,7 @@ impl StdinHandler {
 
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar)
         let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
-        if scroll_y_enabled
-            && let Some(ref qid) = sb_y_qid
-        {
+        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
             let sb = self.daemon.get_mut(qid).unwrap();
             sb.content_size = content_height;
             sb.viewport_size = viewport_height;
@@ -863,9 +891,7 @@ impl StdinHandler {
             sb.props
                 .insert("scroll-position".to_string(), scroll_y.to_string());
         }
-        if scroll_x_enabled
-            && let Some(ref qid) = sb_x_qid
-        {
+        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
             let sb = self.daemon.get_mut(qid).unwrap();
             sb.content_size = content_width;
             sb.viewport_size = viewport_width;
@@ -876,6 +902,24 @@ impl StdinHandler {
                 .insert("viewport-size".to_string(), viewport_width.to_string());
             sb.props
                 .insert("scroll-position".to_string(), scroll_x.to_string());
+        }
+
+        // Fade-in: make modern scrollbars visible on scroll and arm hide timer
+        let mut fade_y_timer: Option<String> = None;
+        let mut fade_x_timer: Option<String> = None;
+        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
+            let sb = self.daemon.get_mut(qid).unwrap();
+            if resolve_scrollbar_style(sb) == "modern" {
+                sb.fade_visible = true;
+                fade_y_timer = Some(format!("{}-fade", sb.local_id));
+            }
+        }
+        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
+            let sb = self.daemon.get_mut(qid).unwrap();
+            if resolve_scrollbar_style(sb) == "modern" {
+                sb.fade_visible = true;
+                fade_x_timer = Some(format!("{}-fade", sb.local_id));
+            }
         }
 
         // Get immutable ref for emission
@@ -902,6 +946,14 @@ impl StdinHandler {
                 && let Some(sb_state) = daemon.get(qid)
             {
                 patch_scrollbar_state(em, sb_state)?;
+            }
+
+            // Arm fade-out timers for modern scrollbars
+            if let Some(ref timer_id) = fade_y_timer {
+                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+            }
+            if let Some(ref timer_id) = fade_x_timer {
+                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
             }
 
             // Release any controlled scroll props from a prior track click.
@@ -984,9 +1036,7 @@ impl StdinHandler {
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar).
         // Find child scrollbar QIDs and update their content_size/viewport_size + props.
         let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
-        if scroll_y_enabled
-            && let Some(ref qid) = sb_y_qid
-        {
+        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
             let sb = self.daemon.get_mut(qid).unwrap();
             sb.content_size = content_height;
             sb.viewport_size = viewport_height;
@@ -995,9 +1045,7 @@ impl StdinHandler {
             sb.props
                 .insert("viewport-size".to_string(), viewport_height.to_string());
         }
-        if scroll_x_enabled
-            && let Some(ref qid) = sb_x_qid
-        {
+        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
             let sb = self.daemon.get_mut(qid).unwrap();
             sb.content_size = content_width;
             sb.viewport_size = viewport_width;
@@ -1005,6 +1053,24 @@ impl StdinHandler {
                 .insert("content-size".to_string(), content_width.to_string());
             sb.props
                 .insert("viewport-size".to_string(), viewport_width.to_string());
+        }
+
+        // Fade-in: make modern scrollbars visible on resize and arm hide timer
+        let mut fade_y_timer: Option<String> = None;
+        let mut fade_x_timer: Option<String> = None;
+        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
+            let sb = self.daemon.get_mut(qid).unwrap();
+            if resolve_scrollbar_style(sb) == "modern" {
+                sb.fade_visible = true;
+                fade_y_timer = Some(format!("{}-fade", sb.local_id));
+            }
+        }
+        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
+            let sb = self.daemon.get_mut(qid).unwrap();
+            if resolve_scrollbar_style(sb) == "modern" {
+                sb.fade_visible = true;
+                fade_x_timer = Some(format!("{}-fade", sb.local_id));
+            }
         }
 
         // Emit visual patches directly (compositor-native @view, no re-expand)
@@ -1026,6 +1092,14 @@ impl StdinHandler {
                 patch_scrollbar_state(em, sb_state)?;
             }
 
+            // Arm fade-out timers for modern scrollbars
+            if let Some(ref timer_id) = fade_y_timer {
+                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+            }
+            if let Some(ref timer_id) = fade_x_timer {
+                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+            }
+
             // Forward resize event to app if subscribed
             if let Some(seq) = resize_seq {
                 byo_write!(em,
@@ -1038,6 +1112,60 @@ impl StdinHandler {
             }
 
             Ok(())
+        })
+    }
+
+    fn on_fire(&mut self, seq: u64, id: &str) -> io::Result<()> {
+        // Timer IDs follow the convention: {scrollbar_local_id}-fade
+        let scrollbar_local_id = match id.strip_suffix("-fade") {
+            Some(s) => s,
+            None => {
+                info!("  fire: unknown timer {id}, ACK-only");
+                let mut em = Emitter::new(&mut self.stdout);
+                return em.frame(|em| byo_write!(em, !ack fire {seq} handled=true));
+            }
+        };
+
+        // Find the scrollbar by local_id
+        let source_qid = self
+            .daemon
+            .controls
+            .iter()
+            .find(|(_, state)| {
+                state.kind == ControlKind::Scrollbar && state.local_id == scrollbar_local_id
+            })
+            .map(|(qid, _)| qid.clone());
+
+        let source_qid = match source_qid {
+            Some(qid) => qid,
+            None => {
+                info!("  fire: no scrollbar for timer {id}");
+                let mut em = Emitter::new(&mut self.stdout);
+                return em.frame(|em| byo_write!(em, !ack fire {seq} handled=true));
+            }
+        };
+
+        let state = self.daemon.get_mut(&source_qid).unwrap();
+
+        // If the scrollbar is currently hovered, re-arm the timer instead of hiding
+        if state.thumb_hover || state.track_hover || state.thumb_pressed {
+            let timer_id = id;
+            let mut em = Emitter::new(&mut self.stdout);
+            return em.frame(|em| {
+                byo_write!(em, !ack fire {seq} handled=true)?;
+                byo_write!(em, +timer {timer_id} delay=2000)
+            });
+        }
+
+        // Fade out: set invisible and patch
+        state.fade_visible = false;
+
+        let daemon = &self.daemon;
+        let state = daemon.get(&source_qid).unwrap();
+        let mut em = Emitter::new(&mut self.stdout);
+        em.frame(|em| {
+            byo_write!(em, !ack fire {seq} handled=true)?;
+            emit_visual_patch(em, state)
         })
     }
 
@@ -1234,7 +1362,10 @@ fn find_parent_scroll_view(daemon: &Daemon, scrollbar_qid: &str) -> Option<Strin
 
 /// Find child scrollbar QIDs for a scroll-view by its local_id.
 /// Returns (y_scrollbar_qid, x_scrollbar_qid).
-fn find_child_scrollbars(daemon: &Daemon, scroll_view_local_id: &str) -> (Option<String>, Option<String>) {
+fn find_child_scrollbars(
+    daemon: &Daemon,
+    scroll_view_local_id: &str,
+) -> (Option<String>, Option<String>) {
     let mut y_qid = None;
     let mut x_qid = None;
     let y_local = format!("{scroll_view_local_id}-scrollbar-y");
