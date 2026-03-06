@@ -11,9 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use byo::emitter::Emitter;
-use byo::protocol::Command;
-use byo::tree::{self, ObjectKind};
+use byo::protocol::{Command, Prop};
+use byo::tree::{self, ObjectKind, map_to_props};
 
 use crate::id::QualifiedId;
 use crate::process::ProcessId;
@@ -49,17 +48,17 @@ pub fn nearest_observed_ancestor(
 /// observed types. Non-observed nodes are skipped but their children are
 /// recursed into, naturally re-parenting observed descendants under their
 /// nearest observed ancestor via `@ancestor id { +child ... }`.
-pub fn project_tree(tree: &ObjectTree, observed_types: &HashSet<String>) -> Vec<u8> {
-    let mut buf = Vec::new();
+pub fn project_tree(tree: &ObjectTree, observed_types: &HashSet<String>) -> Vec<Command> {
+    let mut cmds = Vec::new();
 
     // Find all root nodes (no parent).
     let mut roots: Vec<&QualifiedId> = tree.roots();
     roots.sort_by_key(|a| a.to_string());
 
     for root in roots {
-        project_subtree(tree, root, observed_types, &mut buf);
+        project_subtree(tree, root, observed_types, &mut cmds);
     }
-    buf
+    cmds
 }
 
 /// Recursively project a subtree rooted at `qid`.
@@ -72,7 +71,7 @@ fn project_subtree(
     tree: &ObjectTree,
     qid: &QualifiedId,
     observed_types: &HashSet<String>,
-    buf: &mut Vec<u8>,
+    cmds: &mut Vec<Command>,
 ) {
     let Some(obj) = tree.get(qid) else {
         return;
@@ -93,7 +92,7 @@ fn project_subtree(
                     && let Some(content_obj) = tree.get(content_qid)
                 {
                     for child in &content_obj.children {
-                        project_subtree(tree, child, observed_types, buf);
+                        project_subtree(tree, child, observed_types, cmds);
                     }
                 }
             }
@@ -104,20 +103,23 @@ fn project_subtree(
     if observed_types.contains(kind) {
         // Emit this object.
         let id = obj.id.to_string();
-        let mut em = Emitter::new(&mut *buf);
-        let _ = em.upsert(kind, &id, &obj.props);
+        cmds.push(Command::Upsert {
+            kind: kind.into(),
+            id: id.as_str().into(),
+            props: map_to_props(&obj.props),
+        });
 
         if has_observed_descendants(tree, qid, observed_types) {
-            buf.extend_from_slice(b" {");
+            cmds.push(Command::Push { slot: None });
             for child in &obj.children {
-                project_subtree(tree, child, observed_types, buf);
+                project_subtree(tree, child, observed_types, cmds);
             }
-            buf.extend_from_slice(b"\n}");
+            cmds.push(Command::Pop);
         }
     } else {
         // Skip this object, recurse into children.
         for child in &obj.children {
-            project_subtree(tree, child, observed_types, buf);
+            project_subtree(tree, child, observed_types, cmds);
         }
     }
 }
@@ -162,63 +164,52 @@ fn has_observed_descendants(
     false
 }
 
-/// Append `\n+kind id props...` for a reduced object to `buf`.
+/// Build a `Command::Upsert` for a reduced object.
 ///
-/// Returns `true` if the object was found and written.
-/// Slot nodes are never serialized.
-pub fn write_reduced_upsert(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) -> bool {
-    let Some(obj) = tree.get(qid) else {
-        return false;
-    };
-    let Some(kind) = obj.kind.as_type() else {
-        return false;
-    };
+/// Returns `None` if the object doesn't exist or is a slot node.
+pub fn reduced_upsert(tree: &ObjectTree, qid: &QualifiedId) -> Option<Command> {
+    let obj = tree.get(qid)?;
+    let kind = obj.kind.as_type()?;
     let id = obj.id.to_string();
-    let mut em = Emitter::new(&mut *buf);
-    let _ = em.upsert(kind, &id, &obj.props);
-    true
+    Some(Command::Upsert {
+        kind: kind.into(),
+        id: id.as_str().into(),
+        props: map_to_props(&obj.props),
+    })
 }
 
-/// Append ` kind={kind} props...` for an expand request to `buf`.
+/// Get the kind and props for an expand request.
 ///
-/// Returns `true` if the object was found and written.
-pub fn write_expand_props(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) -> bool {
-    let Some(obj) = tree.get(qid) else {
-        return false;
-    };
-    let Some(kind) = obj.kind.as_type() else {
-        return false;
-    };
-    let mut em = Emitter::new(&mut *buf);
-    let _ = em.expand_props(kind, &obj.props);
-    true
+/// Returns `None` if the object doesn't exist or is a slot node.
+pub fn expand_props(tree: &ObjectTree, qid: &QualifiedId) -> Option<(String, Vec<Prop>)> {
+    let obj = tree.get(qid)?;
+    let kind = obj.kind.as_type()?;
+    let mut props = vec![Prop::val("kind", kind)];
+    props.extend(map_to_props(&obj.props));
+    Some((kind.to_string(), props))
 }
 
-/// Write the children of an object as serialized BYO commands.
+/// Get the children of an object as `Command` values.
 ///
-/// Slot children are emitted as `{slot_name ...}` blocks, and regular
-/// type children as `+kind id props... { children }`. Used to reconstruct
+/// Slot children are emitted as `Push { slot: Some(...) }` blocks, and regular
+/// type children as `Upsert { ... }` with `Push`/`Pop`. Used to reconstruct
 /// app-provided slot content from the state tree during daemon crash
 /// recovery replay.
-///
-/// Returns `true` if any children were written.
-pub fn write_children(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) -> bool {
+pub fn children_commands(tree: &ObjectTree, qid: &QualifiedId) -> Vec<Command> {
     let Some(obj) = tree.get(qid) else {
-        return false;
+        return Vec::new();
     };
-    if obj.children.is_empty() {
-        return false;
-    }
+    let mut cmds = Vec::new();
     for child_id in &obj.children {
-        write_child_node(tree, child_id, buf);
+        child_node_commands(tree, child_id, &mut cmds);
     }
-    true
+    cmds
 }
 
 /// Extract prior slot contents from the state tree for a source object.
 ///
-/// Finds all `SlotContent` children of the given object, serializes their
-/// children as BYO commands, and returns a map of slot name → commands.
+/// Finds all `SlotContent` children of the given object, builds their
+/// children as `Command` values, and returns a map of slot name → commands.
 /// Used to provide prior slot state for `@` (Patch) re-expansions.
 pub fn collect_prior_slots(tree: &ObjectTree, qid: &QualifiedId) -> HashMap<String, Vec<Command>> {
     let Some(obj) = tree.get(qid) else {
@@ -245,23 +236,21 @@ pub fn collect_prior_slots(tree: &ObjectTree, qid: &QualifiedId) -> HashMap<Stri
         };
         let name = &local[sep_pos + 2..];
 
-        // Serialize the slot's children as commands
-        let mut buf = Vec::new();
+        // Build commands for the slot's children
+        let mut cmds = Vec::new();
         for grandchild_id in &child_obj.children {
-            write_child_node(tree, grandchild_id, &mut buf);
+            child_node_commands(tree, grandchild_id, &mut cmds);
         }
 
-        if !buf.is_empty()
-            && let Ok(cmds) = byo::parser::parse_bytes(buf.into())
-        {
+        if !cmds.is_empty() {
             result.insert(name.to_string(), cmds);
         }
     }
     result
 }
 
-/// Write a single child node (slot or regular type) into `buf`.
-fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
+/// Build commands for a single child node (slot or regular type).
+fn child_node_commands(tree: &ObjectTree, qid: &QualifiedId, cmds: &mut Vec<Command>) {
     let Some(obj) = tree.get(qid) else {
         return;
     };
@@ -271,13 +260,13 @@ fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
             // Extract the bare slot name after `::` for the wire.
             let local = obj.id.local_id();
             let slot_name = local.rfind("::").map(|i| &local[i + 2..]).unwrap_or(local);
-            let mut em = Emitter::new(&mut *buf);
-            let _ = em.slot_push(slot_name);
+            cmds.push(Command::Push {
+                slot: Some(slot_name.into()),
+            });
             for child_id in &obj.children {
-                write_child_node(tree, child_id, buf);
+                child_node_commands(tree, child_id, cmds);
             }
-            let mut em = Emitter::new(&mut *buf);
-            let _ = em.pop();
+            cmds.push(Command::Pop);
         }
         ObjectKind::Slot => {
             // Expansion-side slot placeholder — skip during serialization.
@@ -285,18 +274,17 @@ fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
         }
         ObjectKind::Type(kind) => {
             let id = obj.id.to_string();
-            if obj.children.is_empty() {
-                let mut em = Emitter::new(&mut *buf);
-                let _ = em.upsert(kind, &id, &obj.props);
-            } else {
-                let mut em = Emitter::new(&mut *buf);
-                let _ = em.upsert(kind, &id, &obj.props);
-                buf.extend_from_slice(b" {");
+            cmds.push(Command::Upsert {
+                kind: kind.as_str().into(),
+                id: id.as_str().into(),
+                props: map_to_props(&obj.props),
+            });
+            if !obj.children.is_empty() {
+                cmds.push(Command::Push { slot: None });
                 for child_id in &obj.children {
-                    write_child_node(tree, child_id, buf);
+                    child_node_commands(tree, child_id, cmds);
                 }
-                let mut em = Emitter::new(&mut *buf);
-                let _ = em.pop();
+                cmds.push(Command::Pop);
             }
         }
     }
@@ -306,7 +294,16 @@ fn write_child_node(tree: &ObjectTree, qid: &QualifiedId, buf: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use byo::assert::assert_eq_bytes;
+    use byo::emitter::Emitter;
     use indexmap::IndexMap;
+
+    /// Serialize commands to bytes for test assertions.
+    fn cmds_to_bytes(cmds: &[Command]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        let _ = em.commands(cmds);
+        buf
+    }
 
     fn pid(n: u32) -> ProcessId {
         ProcessId(n)
@@ -361,7 +358,7 @@ mod tests {
         let observed = types(&["view", "text"]);
         let result = project_tree(&tree, &observed);
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view app:root class=w-64 { +text app:label content=Hi }",
         );
     }
@@ -387,7 +384,10 @@ mod tests {
 
         let observed = types(&["view", "text"]);
         let result = project_tree(&tree, &observed);
-        assert_eq_bytes(&result, "+view app:root { +text app:label }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "+view app:root { +text app:label }",
+        );
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
 
         let observed = types(&["text"]);
         let result = project_tree(&tree, &observed);
-        assert_eq_bytes(&result, "+text app:label");
+        assert_eq_bytes(&cmds_to_bytes(&result), "+text app:label");
     }
 
     #[test]
@@ -419,7 +419,7 @@ mod tests {
 
         let observed: HashSet<String> = HashSet::new();
         let result = project_tree(&tree, &observed);
-        assert!(result.is_empty());
+        assert!(cmds_to_bytes(&result).is_empty());
     }
 
     #[test]
@@ -469,19 +469,18 @@ mod tests {
     }
 
     #[test]
-    fn write_reduced_upsert_with_comma_value() {
+    fn reduced_upsert_with_comma_value() {
         let mut tree = ObjectTree::new();
         let id = qid("app", "x");
         tree.upsert("view".into(), &id, &props(&[("data", "a,b")]), pid(1));
 
-        let mut buf = Vec::new();
-        assert!(write_reduced_upsert(&tree, &id, &mut buf));
-        let s = String::from_utf8(buf).unwrap();
+        let cmd = reduced_upsert(&tree, &id).unwrap();
+        let s = String::from_utf8(cmds_to_bytes(&[cmd])).unwrap();
         assert_eq!(s, "\n+view app:x data=\"a,b\"");
     }
 
     #[test]
-    fn write_reduced_upsert_basic() {
+    fn reduced_upsert_basic() {
         let mut tree = ObjectTree::new();
         tree.upsert(
             "view".into(),
@@ -490,30 +489,30 @@ mod tests {
             pid(1),
         );
 
-        let mut buf = Vec::new();
-        assert!(write_reduced_upsert(
-            &tree,
-            &qid("app", "sidebar"),
-            &mut buf
-        ));
-        assert_eq_bytes(&buf, "+view app:sidebar class=w-64 order=0");
+        let cmd = reduced_upsert(&tree, &qid("app", "sidebar")).unwrap();
+        assert_eq_bytes(
+            &cmds_to_bytes(&[cmd]),
+            "+view app:sidebar class=w-64 order=0",
+        );
     }
 
     #[test]
-    fn write_reduced_upsert_with_flags() {
+    fn reduced_upsert_with_flags() {
         let mut tree = ObjectTree::new();
         let id = qid("app", "sidebar");
         let mut p = props(&[("class", "w-64")]);
         p.insert("hidden".into(), PropValue::Flag);
         tree.upsert("view".into(), &id, &p, pid(1));
 
-        let mut buf = Vec::new();
-        assert!(write_reduced_upsert(&tree, &id, &mut buf));
-        assert_eq_bytes(&buf, "+view app:sidebar class=w-64 hidden");
+        let cmd = reduced_upsert(&tree, &id).unwrap();
+        assert_eq_bytes(
+            &cmds_to_bytes(&[cmd]),
+            "+view app:sidebar class=w-64 hidden",
+        );
     }
 
     #[test]
-    fn write_reduced_upsert_quoted_value() {
+    fn reduced_upsert_quoted_value() {
         let mut tree = ObjectTree::new();
         let id = qid("app", "label");
         tree.upsert(
@@ -523,22 +522,19 @@ mod tests {
             pid(1),
         );
 
-        let mut buf = Vec::new();
-        assert!(write_reduced_upsert(&tree, &id, &mut buf));
-        let s = String::from_utf8(buf).unwrap();
+        let cmd = reduced_upsert(&tree, &id).unwrap();
+        let s = String::from_utf8(cmds_to_bytes(&[cmd])).unwrap();
         assert_eq!(s, "\n+text app:label content=\"Hello, world\"");
     }
 
     #[test]
-    fn write_reduced_upsert_nonexistent() {
+    fn reduced_upsert_nonexistent() {
         let tree = ObjectTree::new();
-        let mut buf = Vec::new();
-        assert!(!write_reduced_upsert(&tree, &qid("app", "nope"), &mut buf));
-        assert!(buf.is_empty());
+        assert!(reduced_upsert(&tree, &qid("app", "nope")).is_none());
     }
 
     #[test]
-    fn write_reduced_upsert_slot_content_skipped() {
+    fn reduced_upsert_slot_content_skipped() {
         use byo::tree::ObjectKind;
         let mut tree = ObjectTree::new();
         tree.upsert(
@@ -547,17 +543,11 @@ mod tests {
             &IndexMap::new(),
             pid(1),
         );
-        let mut buf = Vec::new();
-        assert!(!write_reduced_upsert(
-            &tree,
-            &qid("app", "d::header"),
-            &mut buf
-        ));
-        assert!(buf.is_empty());
+        assert!(reduced_upsert(&tree, &qid("app", "d::header")).is_none());
     }
 
     #[test]
-    fn write_reduced_upsert_slot_skipped() {
+    fn reduced_upsert_slot_skipped() {
         use byo::tree::ObjectKind;
         let mut tree = ObjectTree::new();
         tree.upsert(
@@ -566,17 +556,11 @@ mod tests {
             &IndexMap::new(),
             pid(2),
         );
-        let mut buf = Vec::new();
-        assert!(!write_reduced_upsert(
-            &tree,
-            &qid("controls", "hdr-wrap::header"),
-            &mut buf
-        ));
-        assert!(buf.is_empty());
+        assert!(reduced_upsert(&tree, &qid("controls", "hdr-wrap::header")).is_none());
     }
 
     #[test]
-    fn write_children_basic() {
+    fn children_commands_basic() {
         let mut tree = ObjectTree::new();
         tree.upsert("view".into(), &qid("app", "root"), &IndexMap::new(), pid(1));
         tree.upsert(
@@ -587,13 +571,13 @@ mod tests {
         );
         tree.set_parent(&qid("app", "label"), &qid("app", "root"));
 
-        let mut buf = Vec::new();
-        assert!(write_children(&tree, &qid("app", "root"), &mut buf));
-        assert_eq_bytes(&buf, "+text app:label content=Hi");
+        let cmds = children_commands(&tree, &qid("app", "root"));
+        assert!(!cmds.is_empty());
+        assert_eq_bytes(&cmds_to_bytes(&cmds), "+text app:label content=Hi");
     }
 
     #[test]
-    fn write_children_with_slots() {
+    fn children_commands_with_slots() {
         use byo::tree::ObjectKind;
         let mut tree = ObjectTree::new();
         tree.upsert(
@@ -634,9 +618,9 @@ mod tests {
         tree.upsert("view".into(), &qid("app", "body"), &IndexMap::new(), pid(1));
         tree.set_parent(&qid("app", "body"), &qid("app", "dialog::_"));
 
-        let mut buf = Vec::new();
-        assert!(write_children(&tree, &qid("app", "dialog"), &mut buf));
-        let s = String::from_utf8(buf).unwrap();
+        let cmds = children_commands(&tree, &qid("app", "dialog"));
+        assert!(!cmds.is_empty());
+        let s = String::from_utf8(cmds_to_bytes(&cmds)).unwrap();
         assert!(s.contains("::header {"), "expected ::header {{ in: {s}");
         assert!(
             s.contains("+text app:title content=Hello"),
@@ -647,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn write_children_nested() {
+    fn children_commands_nested() {
         let mut tree = ObjectTree::new();
         tree.upsert("view".into(), &qid("app", "root"), &IndexMap::new(), pid(1));
         tree.upsert(
@@ -665,9 +649,12 @@ mod tests {
         tree.set_parent(&qid("app", "child"), &qid("app", "root"));
         tree.set_parent(&qid("app", "label"), &qid("app", "child"));
 
-        let mut buf = Vec::new();
-        assert!(write_children(&tree, &qid("app", "root"), &mut buf));
-        assert_eq_bytes(&buf, "+view app:child class=p-4 { +text app:label }");
+        let cmds = children_commands(&tree, &qid("app", "root"));
+        assert!(!cmds.is_empty());
+        assert_eq_bytes(
+            &cmds_to_bytes(&cmds),
+            "+view app:child class=p-4 { +text app:label }",
+        );
     }
 
     // ---------------------------------------------------------------
@@ -766,7 +753,7 @@ mod tests {
         let tree = build_slot_tree();
         let observed = types(&["view", "text"]);
         let result = project_tree(&tree, &observed);
-        let s = String::from_utf8(result).unwrap();
+        let s = String::from_utf8(cmds_to_bytes(&result)).unwrap();
 
         // App content should appear INSIDE the viewport, not as a sibling.
         assert!(
@@ -800,13 +787,13 @@ mod tests {
         let tree = build_slot_tree();
         let observed = types(&["view", "text"]);
         let result = project_tree(&tree, &observed);
-        let s = String::from_utf8(result).unwrap();
+        let s = String::from_utf8(cmds_to_bytes(&result)).unwrap();
 
         // app:content should NOT appear as a sibling of controls:root
         // (i.e. directly under app:parent). It should only appear inside
         // the viewport via the slot_ref link.
         let parent_brace = s.find("app:parent").unwrap();
-        let parent_brace_open = s[parent_brace..]
+        let _parent_brace_open = s[parent_brace..]
             .find('{')
             .map(|i| i + parent_brace)
             .unwrap();
@@ -849,7 +836,10 @@ mod tests {
         let observed = types(&["view"]);
         let result = project_tree(&tree, &observed);
         // Viewport should exist but have no children (empty slot).
-        assert_eq_bytes(&result, "+view app:root { +view controls:vp }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "+view app:root { +view controls:vp }",
+        );
     }
 
     #[test]

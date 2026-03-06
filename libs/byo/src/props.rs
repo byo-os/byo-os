@@ -44,6 +44,24 @@ pub trait ToProps {
     fn to_props(&self) -> Vec<Prop>;
 }
 
+impl ToProps for [Prop] {
+    fn to_props(&self) -> Vec<Prop> {
+        self.to_vec()
+    }
+}
+
+impl ToProps for Vec<Prop> {
+    fn to_props(&self) -> Vec<Prop> {
+        self.clone()
+    }
+}
+
+impl<T: ToProps + ?Sized> ToProps for &T {
+    fn to_props(&self) -> Vec<Prop> {
+        (**self).to_props()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in ReadProp impls
 // ---------------------------------------------------------------------------

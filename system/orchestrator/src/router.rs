@@ -5,18 +5,17 @@
 //! triggers daemon expansion, and maintains per-process output ordering.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
 use indexmap::IndexMap;
 
-use byo::emitter::Emitter;
-use byo::parser::parse;
+use byo::ByteStr;
+use byo::byo_vec;
 use byo::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
 use byo::tree::{ObjectKind, PropValue, props_to_map, props_to_patch};
 
-use crate::batch::{OutputQueue, PendingBatch, write_props};
+use crate::batch::{OutputQueue, PendingBatch};
 use crate::id::QualifiedId;
 use crate::process::{Process, ProcessId, ProcessKind, WriteMsg};
 use crate::state::ObjectTree;
@@ -319,12 +318,13 @@ impl Router {
                     {
                         let qid = QualifiedId::new(&client, id);
                         let expand_seq = self.next_expand_seq(subscriber);
+                        let qid_str = qid.to_string();
+                        let kind_val = &**kind;
+                        let expand_cmds = byo_vec! {
+                            ?expand {expand_seq} {qid_str} kind={kind_val} {..props}
+                        };
 
-                        let mut expand_buf = Vec::new();
-                        let _ = write!(expand_buf, "\n?expand {expand_seq} {qid} kind={kind}");
-                        write_props(&mut expand_buf, props);
-
-                        expand_msgs.push((subscriber, qid, expand_seq, expand_buf, false));
+                        expand_msgs.push((subscriber, qid, expand_seq, expand_cmds, false));
                     }
                 }
                 Command::Patch { kind, id, .. } if *id != "_" => {
@@ -334,10 +334,14 @@ impl Router {
                         let qid = QualifiedId::new(&client, id);
 
                         let expand_seq = self.next_expand_seq(subscriber);
-                        let mut expand_buf = Vec::new();
-                        let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
-                        if crate::state::write_expand_props(&self.state, &qid, &mut expand_buf) {
-                            expand_msgs.push((subscriber, qid, expand_seq, expand_buf, true));
+                        if let Some((_kind_str, props)) =
+                            crate::state::expand_props(&self.state, &qid)
+                        {
+                            let qid_str = qid.to_string();
+                            let expand_cmds = byo_vec! {
+                                ?expand {expand_seq} {qid_str} {..props}
+                            };
+                            expand_msgs.push((subscriber, qid, expand_seq, expand_cmds, true));
                         }
                     }
                 }
@@ -354,13 +358,13 @@ impl Router {
         } else {
             let mut batch = PendingBatch::new(from, client, commands);
 
-            for (subscriber, qid, expand_seq, expand_buf, is_re_expand) in expand_msgs {
+            for (subscriber, qid, expand_seq, expand_cmds, is_re_expand) in expand_msgs {
                 if is_re_expand {
                     batch.add_pending_re_expand(subscriber, expand_seq, qid);
                 } else {
                     batch.add_pending_expand(subscriber, expand_seq, qid, 0);
                 }
-                self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
+                self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_cmds)));
             }
 
             if let Some(queue) = self.output_queues.get_mut(&from) {
@@ -609,15 +613,15 @@ impl Router {
 
             // Inject a redirect frame if the compositor's target needs switching.
             if qualified_target != self.last_forwarded_target {
-                let mut redirect_buf = Vec::new();
-                if qualified_target == "/" {
-                    let _ = write!(redirect_buf, "\n#unredirect");
+                let qt = qualified_target.as_str();
+                let redirect_cmds = if qualified_target == "/" {
+                    byo_vec! { #unredirect }
                 } else {
-                    let _ = write!(redirect_buf, "\n#redirect {qualified_target}");
-                }
+                    byo_vec! { #redirect {qt} }
+                };
                 self.last_forwarded_target.clone_from(&qualified_target);
 
-                let redirect_arc = Arc::new(redirect_buf);
+                let redirect_arc = Arc::new(redirect_cmds);
                 for &pid in &observers {
                     if pid != from {
                         self.send_to(pid, WriteMsg::Byo(Arc::clone(&redirect_arc)));
@@ -668,25 +672,31 @@ impl Router {
 
         if !owned_roots.is_empty() {
             // Generate destroy commands for root objects.
-            let mut destroy_buf = Vec::new();
-            let mut daemon_notifications: HashMap<ProcessId, Vec<u8>> = HashMap::new();
+            let mut destroy_cmds = Vec::new();
+            let mut daemon_notifications: HashMap<ProcessId, Vec<Command>> = HashMap::new();
 
             for (qid, kind) in &owned_roots {
-                let _ = write!(destroy_buf, "\n-{kind} {qid}");
+                destroy_cmds.push(Command::Destroy {
+                    kind: ByteStr::from(kind.to_string()),
+                    id: ByteStr::from(qid.to_string()),
+                });
 
                 // Collect expansion descendants owned by OTHER processes so we
                 // can notify their daemons (same logic as handle_cascade_destroys).
                 let descendants = self.state.descendants_info(qid);
                 for (desc_qid, desc_kind, desc_owner) in &descendants {
                     if *desc_owner != process {
-                        let buf = daemon_notifications.entry(*desc_owner).or_default();
-                        let _ = write!(buf, "\n-{desc_kind} {desc_qid}");
+                        let cmds = daemon_notifications.entry(*desc_owner).or_default();
+                        cmds.push(Command::Destroy {
+                            kind: ByteStr::from(desc_kind.to_string()),
+                            id: ByteStr::from(desc_qid.to_string()),
+                        });
                     }
                 }
             }
 
             // Forward destroy commands to observers (projection handles type filtering).
-            self.forward_to_observers(&destroy_buf, process).await;
+            self.forward_to_observers(&destroy_cmds, process).await;
 
             // Notify daemons about their expansion objects being destroyed.
             for (daemon_pid, notification) in daemon_notifications {
@@ -844,37 +854,33 @@ impl Router {
             // Synthesize replay commands from the state tree. These include
             // the original app objects with their slot children, so that the
             // batch rewriter can perform slot substitution during expansion.
-            let mut replay_cmds_buf = Vec::new();
+            let mut replay_cmds = Vec::new();
             for (qid, _kind) in &objects {
-                let mut obj_buf = Vec::new();
-                crate::state::write_reduced_upsert(&self.state, qid, &mut obj_buf);
+                if let Some(upsert) = crate::state::reduced_upsert(&self.state, qid) {
+                    replay_cmds.push(upsert);
 
-                // Include any children (with slot nodes) so the rewriter
-                // can reconstruct slot contents for substitution.
-                if self.state.has_children(qid) {
-                    obj_buf.extend_from_slice(b" {");
-                    crate::state::write_children(&self.state, qid, &mut obj_buf);
-                    obj_buf.extend_from_slice(b"\n}");
+                    // Include any children (with slot nodes) so the rewriter
+                    // can reconstruct slot contents for substitution.
+                    if self.state.has_children(qid) {
+                        replay_cmds.push(Command::Push { slot: None });
+                        replay_cmds.extend(crate::state::children_commands(&self.state, qid));
+                        replay_cmds.push(Command::Pop);
+                    }
                 }
-                replay_cmds_buf.extend_from_slice(&obj_buf);
             }
-
-            let replay_cmds = if replay_cmds_buf.is_empty() {
-                Vec::new()
-            } else {
-                byo::parser::parse_bytes(bytes::Bytes::from(replay_cmds_buf)).unwrap_or_default()
-            };
 
             let mut batch = PendingBatch::new(from, client.to_owned(), replay_cmds);
             batch.is_replay = true;
 
             for (qid, _kind) in &objects {
                 let expand_seq = self.next_expand_seq(from);
-                let mut expand_buf = Vec::new();
-                let _ = write!(expand_buf, "\n?expand {expand_seq} {qid}");
-                if crate::state::write_expand_props(&self.state, qid, &mut expand_buf) {
+                if let Some((_kind_str, props)) = crate::state::expand_props(&self.state, qid) {
+                    let qid_str = qid.to_string();
+                    let expand_cmds = byo_vec! {
+                        ?expand {expand_seq} {qid_str} {..props}
+                    };
                     batch.add_pending_expand(from, expand_seq, qid.clone(), 0);
-                    self.send_to(from, WriteMsg::Byo(Arc::new(expand_buf)));
+                    self.send_to(from, WriteMsg::Byo(Arc::new(expand_cmds)));
                 }
             }
 
@@ -944,14 +950,14 @@ impl Router {
                 continue; // discard target
             }
             if qualified_target != self.last_forwarded_target {
-                let mut redirect_buf = Vec::new();
-                if qualified_target == "/" {
-                    let _ = write!(redirect_buf, "\n#unredirect");
+                let qt = qualified_target.as_str();
+                let redirect_cmds = if qualified_target == "/" {
+                    byo_vec! { #unredirect }
                 } else {
-                    let _ = write!(redirect_buf, "\n#redirect {qualified_target}");
-                }
+                    byo_vec! { #redirect {qt} }
+                };
                 self.last_forwarded_target.clone_from(&qualified_target);
-                let redirect_arc = Arc::new(redirect_buf);
+                let redirect_arc = Arc::new(redirect_cmds);
                 for &pid in &observers {
                     if pid != from {
                         self.send_to(pid, WriteMsg::Byo(Arc::clone(&redirect_arc)));
@@ -1042,12 +1048,13 @@ impl Router {
             target_pid.0
         );
 
-        // Serialize the event with remapped seq and dequalified target.
-        let mut buf = Vec::new();
-        let mut em = Emitter::new(&mut buf);
-        let _ = em.event(event_type, remapped_seq, dequalified_target, props);
-
-        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf)));
+        // Build event command with remapped seq and dequalified target.
+        self.send_to(
+            target_pid,
+            WriteMsg::Byo(Arc::new(byo_vec! {
+                !{event_type} {remapped_seq} {dequalified_target} {..props}
+            })),
+        );
 
         // Store PendingAck for the return trip.
         self.pending_acks.insert(
@@ -1086,12 +1093,14 @@ impl Router {
             pending.sender_seq
         );
 
-        // Serialize the ACK with the original sender's seq.
-        let mut buf = Vec::new();
-        let mut em = Emitter::new(&mut buf);
-        let _ = em.ack(&event_type, pending.sender_seq, props);
-
-        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)));
+        // Build ACK command with the original sender's seq.
+        let ack_seq = pending.sender_seq;
+        self.send_to(
+            pending.sender,
+            WriteMsg::Byo(Arc::new(byo_vec! {
+                !ack {event_type} {ack_seq} {..props}
+            })),
+        );
     }
 
     /// Route a custom request to the owner of the target object.
@@ -1132,11 +1141,12 @@ impl Router {
         let remapped_seq = self.next_request_seq(target_pid, kind_name);
         let dequalified_target = dequalify(&dest_client, &qualified_id);
 
-        let mut buf = Vec::new();
-        let mut em = Emitter::new(&mut buf);
-        let _ = em.request(kind_name, remapped_seq, dequalified_target, props);
-
-        self.send_to(target_pid, WriteMsg::Byo(Arc::new(buf)));
+        self.send_to(
+            target_pid,
+            WriteMsg::Byo(Arc::new(byo_vec! {
+                ?{kind_name} {remapped_seq} {dequalified_target} {..props}
+            })),
+        );
 
         self.pending_responses.insert(
             (target_pid, kind_name.to_owned(), remapped_seq),
@@ -1169,15 +1179,14 @@ impl Router {
             return; // Stale or unknown response — drop silently
         };
 
-        let mut buf = Vec::new();
-        let mut em = Emitter::new(&mut buf);
-        if let Some(body) = body {
-            let _ = em.response_with(kind_name, pending.sender_seq, props, |em| em.commands(body));
-        } else {
-            let _ = em.response(kind_name, pending.sender_seq, props);
-        }
+        let response_cmds = vec![Command::Response {
+            kind: ResponseKind::Other(ByteStr::from(kind_name)),
+            seq: pending.sender_seq,
+            props: props.to_vec(),
+            body: body.clone(),
+        }];
 
-        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(buf)));
+        self.send_to(pending.sender, WriteMsg::Byo(Arc::new(response_cmds)));
     }
 
     /// Resync an observer by replaying the full projected state tree.
@@ -1189,9 +1198,9 @@ impl Router {
             Some(t) => t,
             None => return,
         };
-        let replay = crate::state::project_tree(&self.state, types);
-        if !replay.is_empty() {
-            self.send_to(pid, WriteMsg::Byo(Arc::new(replay)));
+        let replay_cmds = crate::state::project_tree(&self.state, types);
+        if !replay_cmds.is_empty() {
+            self.send_to(pid, WriteMsg::Byo(Arc::new(replay_cmds)));
         }
     }
 
@@ -1243,7 +1252,6 @@ impl Router {
         daemon_client: &str,
         current_depth: u32,
     ) {
-        use crate::batch::write_props;
         use crate::id::qualify;
 
         let mut nested_expands = Vec::new();
@@ -1255,16 +1263,13 @@ impl Router {
             {
                 let qid = QualifiedId::new(daemon_client, id);
                 let expand_seq = self.next_expand_seq(subscriber);
+                let qualified = qualify(daemon_client, id);
+                let kind_val = &**kind;
+                let expand_cmds = byo_vec! {
+                    ?expand {expand_seq} {qualified} kind={kind_val} {..props}
+                };
 
-                let mut expand_buf = Vec::new();
-                let _ = write!(
-                    expand_buf,
-                    "\n?expand {expand_seq} {} kind={kind}",
-                    qualify(daemon_client, id)
-                );
-                write_props(&mut expand_buf, props);
-
-                nested_expands.push((subscriber, qid, expand_seq, expand_buf));
+                nested_expands.push((subscriber, qid, expand_seq, expand_cmds));
             }
         }
 
@@ -1276,7 +1281,7 @@ impl Router {
                 .position(|b| b.has_pending_expand(from, seq));
 
             if let Some(idx) = batch_idx {
-                for (subscriber, qid, expand_seq, expand_buf) in nested_expands {
+                for (subscriber, qid, expand_seq, expand_cmds) in nested_expands {
                     tracing::trace!(
                         "nested expansion: {qid} (seq={expand_seq}, depth={})",
                         current_depth + 1
@@ -1287,7 +1292,7 @@ impl Router {
                         qid,
                         current_depth + 1,
                     );
-                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_buf)));
+                    self.send_to(subscriber, WriteMsg::Byo(Arc::new(expand_cmds)));
                 }
             } else {
                 tracing::warn!("nested expansion: batch not found for ({from:?}, seq={seq})");
@@ -1402,9 +1407,7 @@ impl Router {
         source_qid: &QualifiedId,
         daemon_pid: ProcessId,
         new_expansion_cmds: &[Command],
-    ) -> Vec<u8> {
-        use std::io::Write;
-
+    ) -> Vec<Command> {
         // Collect old expansion objects (all descendants of the source object).
         let descendants = self.state.descendants_info(source_qid);
         let old_objects: HashMap<QualifiedId, IndexMap<String, PropValue>> = descendants
@@ -1422,7 +1425,7 @@ impl Router {
             .filter_map(|(qid, _, _)| self.state.get(qid).map(|o| (qid.clone(), o.parent.clone())))
             .collect();
 
-        let mut delta = Vec::new();
+        let mut delta: Vec<Command> = Vec::new();
         let mut seen_qids: std::collections::HashSet<QualifiedId> =
             std::collections::HashSet::new();
         let mut parent_stack: Vec<QualifiedId> = Vec::new();
@@ -1455,23 +1458,27 @@ impl Router {
                         if parent_changed {
                             // Parent changed — emit destroy+create (compositor
                             // can't reparent via patch).
-                            let _ = write!(delta, "\n-{kind} {qid}");
-                            crate::batch::write_upsert(&mut delta, kind, &qid.to_string(), props);
+                            delta.push(Command::Destroy {
+                                kind: kind.clone(),
+                                id: ByteStr::from(qid.to_string()),
+                            });
+                            delta.push(Command::Upsert {
+                                kind: kind.clone(),
+                                id: ByteStr::from(qid.to_string()),
+                                props: props.clone(),
+                            });
                         } else {
                             // Same parent — compute prop delta.
-                            let mut delta_props: Vec<u8> = Vec::new();
-                            let mut has_changes = false;
+                            let mut delta_props: Vec<Prop> = Vec::new();
 
                             for (key, new_val) in &new_props {
                                 if old_props.get(key) != Some(new_val) {
-                                    has_changes = true;
                                     match new_val {
                                         PropValue::Str(s) => {
-                                            let _ = write!(delta_props, " {key}=");
-                                            crate::batch::write_value(&mut delta_props, s);
+                                            delta_props.push(Prop::val(key.as_str(), s.as_str()));
                                         }
                                         PropValue::Flag => {
-                                            let _ = write!(delta_props, " {key}");
+                                            delta_props.push(Prop::flag(key.as_str()));
                                         }
                                     }
                                 }
@@ -1479,19 +1486,25 @@ impl Router {
 
                             for key in old_props.keys() {
                                 if !new_props.contains_key(key) {
-                                    has_changes = true;
-                                    let _ = write!(delta_props, " ~{key}");
+                                    delta_props.push(Prop::remove(key.as_str()));
                                 }
                             }
 
-                            if has_changes {
-                                let _ = write!(delta, "\n@{kind} {qid}");
-                                delta.extend_from_slice(&delta_props);
+                            if !delta_props.is_empty() {
+                                delta.push(Command::Patch {
+                                    kind: kind.clone(),
+                                    id: ByteStr::from(qid.to_string()),
+                                    props: delta_props,
+                                });
                             }
                         }
                     } else {
                         // New object — emit create.
-                        crate::batch::write_upsert(&mut delta, kind, &qid.to_string(), props);
+                        delta.push(Command::Upsert {
+                            kind: kind.clone(),
+                            id: ByteStr::from(qid.to_string()),
+                            props: props.clone(),
+                        });
                     }
 
                     // Update state tree.
@@ -1545,7 +1558,10 @@ impl Router {
         for qid in old_objects.keys() {
             if !seen_qids.contains(qid) {
                 if let Some(kind) = old_kinds.get(qid) {
-                    let _ = write!(delta, "\n-{kind} {qid}");
+                    delta.push(Command::Destroy {
+                        kind: ByteStr::from(kind.to_string()),
+                        id: ByteStr::from(qid.to_string()),
+                    });
                 }
                 self.state.destroy(qid);
             }
@@ -1612,10 +1628,8 @@ impl Router {
     async fn handle_cascade_destroys(
         &mut self,
         claimed_destroys: &[QualifiedId],
-        rewritten: &mut Vec<u8>,
+        rewritten: &mut Vec<Command>,
     ) {
-        use std::io::Write;
-
         for source_qid in claimed_destroys {
             // Collect info about all descendants before destroying.
             let all_descendants = self.state.descendants_info(source_qid);
@@ -1625,20 +1639,26 @@ impl Router {
             if let Some(source) = self.state.get(source_qid) {
                 for child_qid in source.children.clone() {
                     if let Some(child) = self.state.get(&child_qid) {
-                        let _ = write!(rewritten, "\n-{} {child_qid}", child.kind);
+                        rewritten.push(Command::Destroy {
+                            kind: ByteStr::from(child.kind.to_string()),
+                            id: ByteStr::from(child_qid.to_string()),
+                        });
                     }
                 }
             }
 
             // Group all destroyed descendants by owner daemon and notify.
-            let mut daemon_notifications: HashMap<ProcessId, Vec<u8>> = HashMap::new();
+            let mut daemon_notifications: HashMap<ProcessId, Vec<Command>> = HashMap::new();
             for (qid, kind, owner) in &all_descendants {
-                let buf = daemon_notifications.entry(*owner).or_default();
-                let _ = write!(buf, "\n-{kind} {qid}");
+                let cmds = daemon_notifications.entry(*owner).or_default();
+                cmds.push(Command::Destroy {
+                    kind: ByteStr::from(kind.to_string()),
+                    id: ByteStr::from(qid.to_string()),
+                });
             }
 
-            for (daemon_pid, notification_buf) in daemon_notifications {
-                self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification_buf)));
+            for (daemon_pid, notification_cmds) in daemon_notifications {
+                self.send_to(daemon_pid, WriteMsg::Byo(Arc::new(notification_cmds)));
             }
 
             // Destroy the source object — cascades to all children/expansion objects.
@@ -1685,7 +1705,7 @@ impl Router {
             // Reconcile re-expansions using the per-expansion flag.
             // For re-expansions, substitute slot contents (batch + prior state)
             // into the daemon's expansion before reconciling.
-            let mut reconciliation_buf = Vec::new();
+            let mut reconciliation_cmds: Vec<Command> = Vec::new();
             for (source_qid_str, (daemon_pid, expansion_cmds, is_re_expand, _depth)) in
                 &batch.expansions
             {
@@ -1703,7 +1723,7 @@ impl Router {
                         crate::batch::substitute_slots(expansion_cmds, &merged)
                     };
                     let delta = self.reconcile_expansion(&source_qid, *daemon_pid, &effective_cmds);
-                    reconciliation_buf.extend_from_slice(&delta);
+                    reconciliation_cmds.extend(delta);
                 }
             }
 
@@ -1725,7 +1745,7 @@ impl Router {
             }
 
             // Append reconciliation output.
-            rewritten.extend_from_slice(&reconciliation_buf);
+            rewritten.extend(reconciliation_cmds);
 
             let process_id = batch.from;
 
@@ -1777,9 +1797,9 @@ impl Router {
         }
     }
 
-    /// Forward rewritten payload bytes to all observers, filtered per observer's
+    /// Forward rewritten commands to all observers, filtered per observer's
     /// type subscriptions.
-    async fn forward_to_observers(&self, payload: &[u8], _from: ProcessId) {
+    async fn forward_to_observers(&self, commands: &[Command], _from: ProcessId) {
         // Collect unique observer PIDs.
         let mut targets: Vec<ProcessId> = Vec::new();
         for observers in self.observers.values() {
@@ -1794,22 +1814,12 @@ impl Router {
             return;
         }
 
-        // Parse the rewritten payload for per-observer projection.
-        let payload_str = match std::str::from_utf8(payload) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let commands = match parse(payload_str) {
-            Ok(cmds) => cmds,
-            Err(_) => return,
-        };
-
         for target in targets {
             let projected = if let Some(types) = self.observer_types.get(&target) {
-                project_commands(&commands, types, &self.state)
+                project_commands(commands, types, &self.state)
             } else {
                 // No type filter — send everything.
-                payload.to_vec()
+                commands.to_vec()
             };
             if !projected.is_empty() {
                 self.send_to(target, WriteMsg::Byo(Arc::new(projected)));
@@ -1868,11 +1878,11 @@ fn project_commands(
     commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
+) -> Vec<Command> {
+    let mut out = Vec::new();
     let mut i = 0;
-    project_at_level(commands, observed_types, state, &mut i, &mut buf, false);
-    buf
+    project_at_level(commands, observed_types, state, &mut i, &mut out, false);
+    out
 }
 
 /// Recursive helper for `project_commands`. Processes commands at the current
@@ -1888,7 +1898,7 @@ fn project_at_level(
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,
-    buf: &mut Vec<u8>,
+    out: &mut Vec<Command>,
     in_observed_context: bool,
 ) {
     while *i < commands.len() {
@@ -1904,34 +1914,43 @@ fn project_at_level(
                     *i += 1; // consume Push
 
                     if is_observed {
-                        let child_buf = collect_children(commands, observed_types, state, i);
-                        let mut em = Emitter::new(&mut *buf);
-                        if child_buf.is_empty() {
-                            let _ = em.upsert(kind, id, props);
-                        } else {
-                            let _ = em.upsert_with(kind, id, props, |em| em.raw(&child_buf));
+                        let child_cmds = collect_children(commands, observed_types, state, i);
+                        out.push(Command::Upsert {
+                            kind: kind.clone(),
+                            id: id.clone(),
+                            props: props.clone(),
+                        });
+                        if !child_cmds.is_empty() {
+                            out.push(Command::Push { slot: None });
+                            out.extend(child_cmds);
+                            out.push(Command::Pop);
                         }
                     } else if in_observed_context {
                         // Inside an observed parent — flatten children here.
-                        project_at_level(commands, observed_types, state, i, buf, true);
+                        project_at_level(commands, observed_types, state, i, out, true);
                     } else {
                         // Top level, non-observed object — wrap children under
                         // nearest observed ancestor from the state tree.
-                        project_under_ancestor(commands, observed_types, state, i, buf, id);
+                        project_under_ancestor(commands, observed_types, state, i, out, id);
                     }
                 } else if is_observed {
-                    let mut em = Emitter::new(&mut *buf);
-                    let _ = em.upsert(kind, id, props);
+                    out.push(Command::Upsert {
+                        kind: kind.clone(),
+                        id: id.clone(),
+                        props: props.clone(),
+                    });
                 }
             }
             Command::Destroy { kind, id } => {
                 if observed_types.contains(&**kind) {
-                    let mut em = Emitter::new(&mut *buf);
-                    let _ = em.destroy(kind, id);
+                    out.push(Command::Destroy {
+                        kind: kind.clone(),
+                        id: id.clone(),
+                    });
                 } else {
                     // Non-observed type destroyed — emit destroys for any
                     // observed descendants so the observer can clean up.
-                    emit_observed_descendant_destroys(state, id, observed_types, buf);
+                    emit_observed_descendant_destroys(state, id, observed_types, out);
                 }
                 *i += 1;
             }
@@ -1946,21 +1965,28 @@ fn project_at_level(
                     *i += 1; // consume Push
 
                     if is_observed {
-                        let child_buf = collect_children(commands, observed_types, state, i);
-                        let mut em = Emitter::new(&mut *buf);
-                        if child_buf.is_empty() {
-                            let _ = em.patch(kind, id, props);
-                        } else {
-                            let _ = em.patch_with(kind, id, props, |em| em.raw(&child_buf));
+                        let child_cmds = collect_children(commands, observed_types, state, i);
+                        out.push(Command::Patch {
+                            kind: kind.clone(),
+                            id: id.clone(),
+                            props: props.clone(),
+                        });
+                        if !child_cmds.is_empty() {
+                            out.push(Command::Push { slot: None });
+                            out.extend(child_cmds);
+                            out.push(Command::Pop);
                         }
                     } else if in_observed_context {
-                        project_at_level(commands, observed_types, state, i, buf, true);
+                        project_at_level(commands, observed_types, state, i, out, true);
                     } else {
-                        project_under_ancestor(commands, observed_types, state, i, buf, id);
+                        project_under_ancestor(commands, observed_types, state, i, out, id);
                     }
                 } else if is_observed {
-                    let mut em = Emitter::new(&mut *buf);
-                    let _ = em.patch(kind, id, props);
+                    out.push(Command::Patch {
+                        kind: kind.clone(),
+                        id: id.clone(),
+                        props: props.clone(),
+                    });
                 }
             }
             Command::Pop => {
@@ -1974,16 +2000,16 @@ fn project_at_level(
     }
 }
 
-/// Recurse into children, returning the projected bytes (empty if nothing observed).
+/// Recurse into children, returning the projected commands (empty if nothing observed).
 fn collect_children(
     commands: &[Command],
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,
-) -> Vec<u8> {
-    let mut child_buf = Vec::new();
-    project_at_level(commands, observed_types, state, i, &mut child_buf, true);
-    child_buf
+) -> Vec<Command> {
+    let mut child_cmds = Vec::new();
+    project_at_level(commands, observed_types, state, i, &mut child_cmds, true);
+    child_cmds
 }
 
 /// Project children of a non-observed object, wrapping them under the object's
@@ -1995,7 +2021,7 @@ fn project_under_ancestor(
     observed_types: &HashSet<String>,
     state: &ObjectTree,
     i: &mut usize,
-    buf: &mut Vec<u8>,
+    out: &mut Vec<Command>,
     id: &str,
 ) {
     // Look up the nearest observed ancestor in the state tree.
@@ -2006,17 +2032,22 @@ fn project_under_ancestor(
         && let Some(ancestor_obj) = state.get(ancestor_qid)
     {
         // Wrap children under `@ancestorKind ancestorQid { ... }`.
-        let child_buf = collect_children(commands, observed_types, state, i);
+        let child_cmds = collect_children(commands, observed_types, state, i);
 
-        if !child_buf.is_empty() {
-            let ancestor_str = ancestor_qid.to_string();
-            let mut em = Emitter::new(&mut *buf);
+        if !child_cmds.is_empty() {
             let ancestor_kind = ancestor_obj.kind.as_type().unwrap_or("_slot");
-            let _ = em.patch_with(ancestor_kind, &ancestor_str, &[], |em| em.raw(&child_buf));
+            out.push(Command::Patch {
+                kind: ByteStr::from(ancestor_kind),
+                id: ByteStr::from(ancestor_qid.to_string()),
+                props: vec![],
+            });
+            out.push(Command::Push { slot: None });
+            out.extend(child_cmds);
+            out.push(Command::Pop);
         }
     } else {
         // No observed ancestor — emit children at top level.
-        project_at_level(commands, observed_types, state, i, buf, false);
+        project_at_level(commands, observed_types, state, i, out, false);
     }
 }
 
@@ -2026,7 +2057,7 @@ fn emit_observed_descendant_destroys(
     state: &ObjectTree,
     id: &str,
     observed_types: &HashSet<String>,
-    buf: &mut Vec<u8>,
+    out: &mut Vec<Command>,
 ) {
     let Some(qid) = QualifiedId::parse(id) else {
         return;
@@ -2038,9 +2069,10 @@ fn emit_observed_descendant_destroys(
         if let Some(kind_str) = kind.as_type()
             && observed_types.contains(kind_str)
         {
-            let desc_str = desc_qid.to_string();
-            let mut em = Emitter::new(&mut *buf);
-            let _ = em.destroy(kind_str, &desc_str);
+            out.push(Command::Destroy {
+                kind: ByteStr::from(kind_str),
+                id: ByteStr::from(desc_qid.to_string()),
+            });
         }
     }
 }
@@ -2051,14 +2083,25 @@ mod tests {
     use byo::assert::assert_eq_bytes;
     use byo::protocol::Prop;
 
+    fn cmds_to_bytes(cmds: &[Command]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut em = byo::emitter::Emitter::new(&mut buf);
+        let _ = em.commands(cmds);
+        buf
+    }
+
+    fn parse(input: &str) -> Vec<Command> {
+        byo::parser::parse(input).unwrap()
+    }
+
     #[test]
     fn project_all_types_observed() {
         let state = ObjectTree::new();
-        let commands = parse("+view app:root { +text app:label content=Hello }").unwrap();
+        let commands = parse("+view app:root { +text app:label content=Hello }");
         let types: HashSet<String> = ["view", "text"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             r#"+view app:root { +text app:label content=Hello }"#,
         );
     }
@@ -2067,11 +2110,10 @@ mod tests {
     fn project_skip_unobserved_leaf() {
         let state = ObjectTree::new();
         let commands =
-            parse("+view app:root { +text app:label content=Hello +image app:bg src=bg.png }")
-                .unwrap();
+            parse("+view app:root { +text app:label content=Hello +image app:bg src=bg.png }");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "+view app:root");
+        assert_eq_bytes(&cmds_to_bytes(&result), "+view app:root");
     }
 
     #[test]
@@ -2079,42 +2121,40 @@ mod tests {
         let state = ObjectTree::new();
         // root (view) → container (panel, not observed) → child (view, observed)
         let commands =
-            parse("+view app:root { +panel app:container { +view app:child class=inner } }")
-                .unwrap();
+            parse("+view app:root { +panel app:container { +view app:child class=inner } }");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "+view app:root { +view app:child class=inner }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "+view app:root { +view app:child class=inner }",
+        );
     }
 
     #[test]
     fn project_destroy_observed() {
         let state = ObjectTree::new();
-        let commands = parse("-view app:sidebar -text app:label").unwrap();
+        let commands = parse("-view app:sidebar -text app:label");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "-view app:sidebar");
+        assert_eq_bytes(&cmds_to_bytes(&result), "-view app:sidebar");
     }
 
     #[test]
     fn project_patch_observed() {
         let state = ObjectTree::new();
-        let commands = parse("@view app:sidebar hidden @text app:label content=New").unwrap();
+        let commands = parse("@view app:sidebar hidden @text app:label content=New");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "@view app:sidebar hidden");
+        assert_eq_bytes(&cmds_to_bytes(&result), "@view app:sidebar hidden");
     }
 
     #[test]
     fn project_empty_filter() {
         let state = ObjectTree::new();
-        let commands = parse("+view app:root { +text app:label content=Hello }").unwrap();
+        let commands = parse("+view app:root { +text app:label content=Hello }");
         let types: HashSet<String> = HashSet::new();
         let result = project_commands(&commands, &types, &state);
-        assert!(
-            result.is_empty(),
-            "expected empty, got: {:?}",
-            String::from_utf8(result)
-        );
+        assert!(result.is_empty(), "expected empty, got: {result:?}");
     }
 
     #[test]
@@ -2122,20 +2162,22 @@ mod tests {
         let state = ObjectTree::new();
         // a (view) → b (panel) → c (panel) → d (view)
         // With only view observed, d should be re-parented under a.
-        let commands = parse("+view a { +panel b { +panel c { +view d } } }").unwrap();
+        let commands = parse("+view a { +panel b { +panel c { +view d } } }");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "+view a { +view d }");
+        assert_eq_bytes(&cmds_to_bytes(&result), "+view a { +view d }");
     }
 
     #[test]
     fn project_patch_with_children() {
         let state = ObjectTree::new();
-        let commands =
-            parse("@view app:root { +text app:label content=Hello +view app:child }").unwrap();
+        let commands = parse("@view app:root { +text app:label content=Hello +view app:child }");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "@view app:root { +view app:child }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "@view app:root { +view app:child }",
+        );
     }
 
     #[test]
@@ -2159,10 +2201,13 @@ mod tests {
         );
         state.set_parent(&container_qid, &root_qid);
 
-        let commands = parse("@panel app:container { +view app:child class=inner }").unwrap();
+        let commands = parse("@panel app:container { +view app:child class=inner }");
         let types: HashSet<String> = ["view"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "@view app:root { +view app:child class=inner }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "@view app:root { +view app:child class=inner }",
+        );
     }
 
     #[test]
@@ -2182,10 +2227,10 @@ mod tests {
         state.set_parent(&child, &container);
         state.set_parent(&label, &child);
 
-        let commands = parse("-panel app:container").unwrap();
+        let commands = parse("-panel app:container");
         let types: HashSet<String> = ["view", "text"].iter().map(|s| s.to_string()).collect();
         let result = project_commands(&commands, &types, &state);
-        assert_eq_bytes(&result, "-text app:label -view app:child");
+        assert_eq_bytes(&cmds_to_bytes(&result), "-text app:label -view app:child");
     }
 
     #[test]

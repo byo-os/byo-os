@@ -95,6 +95,36 @@ pub use byo_macros::byo_str;
 pub use byo_macros::byo_assert_eq;
 
 #[cfg(feature = "macros")]
+/// Build comma-separated `Command` enum expressions from BYO DSL.
+///
+/// For simple cases, produces bare expressions for splicing into `vec![...]`.
+/// For complex cases (control flow, children), produces a block returning `Vec<Command>`.
+///
+/// ```
+/// use byo::byo_commands;
+/// use byo::protocol::Command;
+///
+/// let cmds: Vec<Command> = vec![byo_commands! { +view sidebar class="w-64" }];
+/// assert_eq!(cmds.len(), 1);
+/// ```
+pub use byo_macros::byo_commands;
+
+#[cfg(feature = "macros")]
+/// Build a `Vec<Command>` from BYO DSL.
+///
+/// ```
+/// use byo::byo_vec;
+/// use byo::protocol::Command;
+///
+/// let cmds: Vec<Command> = byo_vec! {
+///     +view sidebar class="w-64"
+///     -view old
+/// };
+/// assert_eq!(cmds.len(), 2);
+/// ```
+pub use byo_macros::byo_vec;
+
+#[cfg(feature = "macros")]
 pub use byo_macros::FromProps;
 
 #[cfg(feature = "macros")]

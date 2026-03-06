@@ -149,32 +149,32 @@ impl PendingBatch {
     }
 
     /// Rewrite the batch: splice expansions and qualify all IDs.
-    /// Returns the rewritten payload bytes.
+    /// Returns the rewritten commands.
     ///
     /// For each command in the original:
     /// - If it's a daemon-owned type with an expansion, splice the expansion
     /// - Otherwise, re-emit with qualified IDs
     ///
     /// The `claims` map tells us which types are daemon-claimed.
-    /// Rewrite result: the rewritten payload bytes plus any claimed-type
+    /// Rewrite result: the rewritten commands plus any claimed-type
     /// destroys that need cascade handling by the router.
-    pub fn rewrite(&self, claims: &HashMap<String, ProcessId>) -> (Vec<u8>, Vec<QualifiedId>) {
+    pub fn rewrite(&self, claims: &HashMap<String, ProcessId>) -> (Vec<Command>, Vec<QualifiedId>) {
         debug_assert!(
             self.is_ready(),
             "rewrite called before all expansions received ({} pending)",
             self.pending_expands.len(),
         );
-        let mut buf = Vec::new();
+        let mut out = Vec::new();
         let mut claimed_destroys = Vec::new();
         self.rewrite_commands(
             &self.commands,
             &self.client_name,
             claims,
-            &mut buf,
+            &mut out,
             &mut claimed_destroys,
             None,
         );
-        (buf, claimed_destroys)
+        (out, claimed_destroys)
     }
 
     /// Recursive rewrite helper. Walks commands, qualifies IDs under `client`,
@@ -188,7 +188,7 @@ impl PendingBatch {
         commands: &[byo::Command],
         client: &str,
         claims: &HashMap<String, ProcessId>,
-        buf: &mut Vec<u8>,
+        out: &mut Vec<Command>,
         claimed_destroys: &mut Vec<QualifiedId>,
         slot_contents: Option<&HashMap<String, Vec<byo::Command>>>,
     ) {
@@ -245,7 +245,7 @@ impl PendingBatch {
                                 &expansion_cmds,
                                 "",
                                 claims,
-                                buf,
+                                out,
                                 claimed_destroys,
                                 if qualified_slots.is_empty() {
                                     None
@@ -261,7 +261,7 @@ impl PendingBatch {
                 // Not a Push — fall through to normal processing.
                 // For CollectSlots mode, emit the expansion without slot contents.
                 if let SkipMode::CollectSlots { expansion_cmds, .. } = mode {
-                    self.rewrite_commands(&expansion_cmds, "", claims, buf, claimed_destroys, None);
+                    self.rewrite_commands(&expansion_cmds, "", claims, out, claimed_destroys, None);
                 }
             }
 
@@ -289,7 +289,11 @@ impl PendingBatch {
                         );
                         skip_next_children = Some(SkipMode::Skip);
                     } else {
-                        write_upsert(buf, kind, &qid_buf, props);
+                        out.push(Command::Upsert {
+                            kind: kind.clone(),
+                            id: qid_buf.as_str().into(),
+                            props: props.clone(),
+                        });
                     }
                 }
                 byo::Command::Destroy { kind, id } => {
@@ -301,7 +305,10 @@ impl PendingBatch {
                             claimed_destroys.push(qid);
                         }
                     } else {
-                        let _ = write!(buf, "\n-{kind} {qid_buf}");
+                        out.push(Command::Destroy {
+                            kind: kind.clone(),
+                            id: qid_buf.as_str().into(),
+                        });
                     }
                 }
                 byo::Command::Push { slot } => {
@@ -333,7 +340,7 @@ impl PendingBatch {
                         if has_content {
                             let content = &slot_contents.unwrap()[&slot_key];
                             // Emit substituted content inline (no wrapping braces)
-                            self.rewrite_commands(content, "", claims, buf, claimed_destroys, None);
+                            self.rewrite_commands(content, "", claims, out, claimed_destroys, None);
                         } else {
                             // No slot content — emit fallback content inline
                             let fallback = &commands[fallback_start..fallback_end];
@@ -342,7 +349,7 @@ impl PendingBatch {
                                     fallback,
                                     client,
                                     claims,
-                                    buf,
+                                    out,
                                     claimed_destroys,
                                     None,
                                 );
@@ -354,11 +361,11 @@ impl PendingBatch {
                     }
                     // Regular (non-slotted) push
                     depth += 1;
-                    buf.extend_from_slice(b" {");
+                    out.push(Command::Push { slot: None });
                 }
                 byo::Command::Pop => {
                     depth = depth.saturating_sub(1);
-                    buf.extend_from_slice(b"\n}");
+                    out.push(Command::Pop);
                 }
                 byo::Command::Patch { kind, id, props } => {
                     if claims.contains_key(&**kind) && *id != "_" {
@@ -369,7 +376,11 @@ impl PendingBatch {
                         skip_next_children = Some(SkipMode::Skip);
                     } else {
                         qualify_into(&mut qid_buf, client, id);
-                        write_patch(buf, kind, &qid_buf, props);
+                        out.push(Command::Patch {
+                            kind: kind.clone(),
+                            id: qid_buf.as_str().into(),
+                            props: props.clone(),
+                        });
                     }
                 }
                 byo::Command::Pragma {
@@ -385,9 +396,8 @@ impl PendingBatch {
                 | byo::Command::Response { .. }
                 | byo::Command::Pragma { .. } => {
                     // Events/requests/responses/pragmas in a batch are handled
-                    // separately by the router.
-                    let mut em = byo::emitter::Emitter::new(&mut *buf);
-                    let _ = em.commands(std::slice::from_ref(cmd));
+                    // separately by the router. Pass through as-is.
+                    out.push(cmd.clone());
                 }
             }
             i += 1;
@@ -395,7 +405,7 @@ impl PendingBatch {
 
         // If the last command was an expanded type with no following Push, emit now
         if let Some(SkipMode::CollectSlots { expansion_cmds, .. }) = skip_next_children {
-            self.rewrite_commands(&expansion_cmds, "", claims, buf, claimed_destroys, None);
+            self.rewrite_commands(&expansion_cmds, "", claims, out, claimed_destroys, None);
         }
     }
 }
@@ -415,12 +425,6 @@ pub(crate) fn write_patch(buf: &mut Vec<u8>, kind: &str, qid: &str, props: &[byo
 /// Write props in wire format. Delegates to [`EmitProps::emit_props`].
 pub(crate) fn write_props(buf: &mut Vec<u8>, props: &(impl byo::emitter::EmitProps + ?Sized)) {
     props.emit_props(&mut *buf).unwrap();
-}
-
-/// Write a value, auto-quoting as needed. Delegates to the canonical
-/// implementation in [`byo::emitter::write_value`].
-pub(crate) fn write_value(buf: &mut Vec<u8>, value: &str) {
-    byo::emitter::write_value(&mut *buf, value).unwrap();
 }
 
 /// Re-serialize commands with all IDs qualified under `client`.
@@ -778,6 +782,13 @@ mod tests {
         byo::parser::parse(s).unwrap()
     }
 
+    fn cmds_to_bytes(cmds: &[Command]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut em = byo::emitter::Emitter::new(&mut buf);
+        let _ = em.commands(cmds);
+        buf
+    }
+
     #[test]
     fn pending_batch_starts_ready() {
         let batch = PendingBatch::new(pid(1), "app".into(), cmds("+view sidebar"));
@@ -829,7 +840,7 @@ mod tests {
         let batch = PendingBatch::new(pid(1), "app".into(), cmds("+view sidebar class=w-64"));
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
-        assert_eq_bytes(&result, "+view app:sidebar class=w-64");
+        assert_eq_bytes(&cmds_to_bytes(&result), "+view app:sidebar class=w-64");
     }
 
     #[test]
@@ -850,7 +861,7 @@ mod tests {
 
         let (result, _) = batch.rewrite(&subs);
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view app:root { +view controls:save-root class=btn +view app:footer }",
         );
     }
@@ -865,7 +876,7 @@ mod tests {
         let subs = HashMap::new();
         let (result, _) = batch.rewrite(&subs);
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view app:root { +view app:child1 +view app:child2 }",
         );
     }
@@ -948,7 +959,7 @@ mod tests {
 
         let (result, _) = batch.rewrite(&claims);
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view app:root { +view controls:save-root { +image icons:check-img src=check.png } }",
         );
     }
@@ -976,7 +987,7 @@ mod tests {
 
         let claims = HashMap::new();
         let (result, claimed_destroys) = batch.rewrite(&claims);
-        assert_eq_bytes(&result, "-view app:sidebar");
+        assert_eq_bytes(&cmds_to_bytes(&result), "-view app:sidebar");
         assert!(claimed_destroys.is_empty());
     }
 
@@ -1057,7 +1068,7 @@ mod tests {
         let (result, _) = batch.rewrite(&claims);
         // The default slot should receive the button (which itself expands)
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view controls:d-root { +view buttons:ok-root class=btn }",
         );
     }
@@ -1089,7 +1100,7 @@ mod tests {
         // Header slot gets app's +text title, footer gets app's +view actions
         // Fallback content (+text controls:hdr) is skipped because app provided header
         assert_eq_bytes(
-            &result,
+            &cmds_to_bytes(&result),
             "+view controls:d-root { +text app:title content=Hi +view app:actions }",
         );
     }
@@ -1115,7 +1126,10 @@ mod tests {
 
         let (result, _) = batch.rewrite(&claims);
         // No slot content → fallback content used
-        assert_eq_bytes(&result, "+view controls:d-root { +text controls:empty }");
+        assert_eq_bytes(
+            &cmds_to_bytes(&result),
+            "+view controls:d-root { +text controls:empty }",
+        );
     }
 
     #[test]
@@ -1134,7 +1148,7 @@ mod tests {
 
         let (result, _) = batch.rewrite(&claims);
         // Empty slot produces nothing — just the empty push/pop
-        assert_eq_bytes(&result, "+view controls:d-root { }");
+        assert_eq_bytes(&cmds_to_bytes(&result), "+view controls:d-root { }");
     }
 
     // -- merge_slots tests -------------------------------------------------------

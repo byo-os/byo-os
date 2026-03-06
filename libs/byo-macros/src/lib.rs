@@ -5,6 +5,7 @@
 //! Re-exported from the `byo` crate (behind the `macros` feature, on by default).
 
 mod codegen;
+mod codegen_commands;
 mod derive_props;
 mod ir;
 mod parse;
@@ -121,6 +122,32 @@ pub fn byo_assert_eq(input: TokenStream) -> TokenStream {
         ::byo::assert::assert_eq(&#actual_expr, #canonical)
     };
     ts.into()
+}
+
+/// Build comma-separated `Command` enum expressions from BYO DSL.
+///
+/// For simple cases (no control flow, no children), produces bare expressions
+/// suitable for splicing into `vec![...]`. For complex cases, produces a block
+/// returning a `Vec<Command>`.
+#[proc_macro]
+pub fn byo_commands(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    let cmds = match parse::parse(input2, true) {
+        Ok(cmds) => cmds,
+        Err(e) => return syn_err(e),
+    };
+    codegen_commands::gen_byo_commands(&cmds).into()
+}
+
+/// Build a `Vec<Command>` from BYO DSL.
+#[proc_macro]
+pub fn byo_vec(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    let cmds = match parse::parse(input2, true) {
+        Ok(cmds) => cmds,
+        Err(e) => return syn_err(e),
+    };
+    codegen_commands::gen_byo_vec(&cmds).into()
 }
 
 /// Derive `FromProps` for a struct — builds the struct from a `&[Prop]` slice.

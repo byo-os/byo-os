@@ -14,37 +14,12 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use byo::byo_write;
-use byo::emitter::Emitter;
-use byo::parser::parse;
+use byo::byo_vec;
 use byo::protocol::{Command, Prop};
 
 use crate::channel::{TrackedUnboundedReceiver, TrackedUnboundedSender};
 use crate::process::{ProcessId, WriteMsg};
 use crate::router::RouterMsg;
-
-/// Emit BYO commands and send them as a `RouterMsg::Byo` to the router.
-fn emit_and_send(
-    pid: ProcessId,
-    router_tx: &TrackedUnboundedSender<RouterMsg>,
-    f: impl FnOnce(&mut Emitter<&mut Vec<u8>>) -> std::io::Result<()>,
-) {
-    let mut buf = Vec::new();
-    let mut em = Emitter::new(&mut buf);
-    if f(&mut em).is_err() {
-        return;
-    }
-    let payload_str = match std::str::from_utf8(&buf) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    if let Ok(commands) = parse(payload_str) {
-        let _ = router_tx.send(RouterMsg::Byo {
-            from: pid,
-            commands,
-        });
-    }
-}
 
 /// Main timer service loop. Runs as a tokio task.
 ///
@@ -56,7 +31,10 @@ pub async fn timer_service(
     router_tx: TrackedUnboundedSender<RouterMsg>,
 ) {
     // Subscribe as an observer for `timer` type objects.
-    emit_and_send(pid, &router_tx, |em| byo_write!(em, #observe timer));
+    let _ = router_tx.send(RouterMsg::Byo {
+        from: pid,
+        commands: byo_vec! { #observe timer },
+    });
 
     // qid → deadline
     let mut timers: HashMap<String, Instant> = HashMap::new();
@@ -73,8 +51,8 @@ pub async fn timer_service(
         tokio::select! {
             msg = write_rx.recv() => {
                 match msg {
-                    Some(WriteMsg::Byo(payload)) => {
-                        process_observer_payload(&payload, &mut timers);
+                    Some(WriteMsg::Byo(commands)) => {
+                        process_observer_commands(&commands, &mut timers);
                     }
                     None => break, // channel closed
                     _ => {} // Graphics/Passthrough — ignore
@@ -95,11 +73,12 @@ pub async fn timer_service(
 
                     // Fire the event and auto-destroy the timer.
                     let qid_ref = qid.as_str();
-                    emit_and_send(pid, &router_tx, |em| {
-                        byo_write!(em,
+                    let _ = router_tx.send(RouterMsg::Byo {
+                        from: pid,
+                        commands: byo_vec! {
                             !fire {seq} {qid_ref}
                             -timer {qid_ref}
-                        )
+                        },
                     });
                 }
             }
@@ -107,34 +86,24 @@ pub async fn timer_service(
     }
 }
 
-/// Parse an observer projection payload and update the timer map.
+/// Process observer projection commands and update the timer map.
 ///
 /// The orchestrator forwards `+timer`/`@timer`/`-timer` commands to us
 /// because we observe the `timer` type.
-fn process_observer_payload(payload: &[u8], timers: &mut HashMap<String, Instant>) {
-    let payload_str = match std::str::from_utf8(payload) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let commands = match parse(payload_str) {
-        Ok(cmds) => cmds,
-        Err(_) => return,
-    };
-
+fn process_observer_commands(commands: &[Command], timers: &mut HashMap<String, Instant>) {
     for cmd in commands {
         match cmd {
             Command::Upsert {
                 kind, id, props, ..
             } if kind.as_ref() == "timer" => {
-                let delay_ms = extract_delay(&props);
+                let delay_ms = extract_delay(props);
                 let deadline = Instant::now() + Duration::from_millis(delay_ms);
                 timers.insert(id.to_string(), deadline);
             }
             Command::Patch {
                 kind, id, props, ..
             } if kind.as_ref() == "timer" => {
-                let delay_ms = extract_delay(&props);
+                let delay_ms = extract_delay(props);
                 let deadline = Instant::now() + Duration::from_millis(delay_ms);
                 timers.insert(id.to_string(), deadline);
             }

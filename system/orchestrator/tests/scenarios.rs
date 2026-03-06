@@ -39,13 +39,22 @@ async fn send_byo(router: &mut Router, from: ProcessId, payload: &str) {
     router.handle(RouterMsg::Byo { from, commands }).await;
 }
 
+/// Serialize commands to bytes via Emitter.
+fn cmds_to_bytes(cmds: &[byo::protocol::Command]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut em = byo::emitter::Emitter::new(&mut buf);
+    let _ = em.commands(cmds);
+    buf
+}
+
 /// Receive the next BYO message from a mock process's channel as a raw string.
 ///
 /// Panics if no message is available or if the message is not a `WriteMsg::Byo`.
 fn recv_byo_raw(rx: &mut TrackedUnboundedReceiver<WriteMsg>) -> String {
     match rx.try_recv() {
-        Ok(WriteMsg::Byo(raw)) => {
-            String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8")
+        Ok(WriteMsg::Byo(cmds)) => {
+            let bytes = cmds_to_bytes(&cmds);
+            String::from_utf8(bytes).expect("BYO payload is valid UTF-8")
         }
         Ok(other) => panic!("expected WriteMsg::Byo, got: {other:?}"),
         Err(_) => panic!("no message available"),
@@ -55,8 +64,9 @@ fn recv_byo_raw(rx: &mut TrackedUnboundedReceiver<WriteMsg>) -> String {
 /// Try to receive a BYO message, returning None if the channel is empty.
 fn try_recv_byo(rx: &mut TrackedUnboundedReceiver<WriteMsg>) -> Option<String> {
     match rx.try_recv() {
-        Ok(WriteMsg::Byo(raw)) => {
-            Some(String::from_utf8((*raw).clone()).expect("BYO payload is valid UTF-8"))
+        Ok(WriteMsg::Byo(cmds)) => {
+            let bytes = cmds_to_bytes(&cmds);
+            Some(String::from_utf8(bytes).expect("BYO payload is valid UTF-8"))
         }
         Ok(other) => panic!("expected WriteMsg::Byo, got: {other:?}"),
         Err(_) => None,

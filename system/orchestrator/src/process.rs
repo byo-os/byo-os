@@ -33,12 +33,13 @@ pub enum ProcessKind {
 
 /// Message sent to a process's stdin writer task.
 ///
-/// Payloads use `Arc<Vec<u8>>` so fan-out to multiple observers is a
-/// refcount bump instead of a deep copy.
+/// BYO payloads use `Arc<Vec<Command>>` so fan-out to multiple observers is a
+/// refcount bump instead of a deep copy. Serialization happens at the
+/// boundary in `writer_task`.
 #[derive(Debug, Clone)]
 pub enum WriteMsg {
-    /// Raw BYO payload (will be APC-framed with `B` prefix).
-    Byo(Arc<Vec<u8>>),
+    /// Parsed BYO commands (serialized + APC-framed in `writer_task`).
+    Byo(Arc<Vec<byo::protocol::Command>>),
     /// Raw graphics payload (will be APC-framed with `G` prefix).
     Graphics(Arc<Vec<u8>>),
     /// Raw bytes, no framing.
@@ -194,12 +195,13 @@ async fn writer_task(
     let mut frame = Vec::new();
     while let Some(msg) = rx.recv().await {
         let result = match &msg {
-            WriteMsg::Byo(payload) => {
+            WriteMsg::Byo(commands) => {
                 frame.clear();
-                frame.reserve(APC_START.len() + 1 + payload.len() + ST.len());
                 frame.extend_from_slice(APC_START);
                 frame.push(PROTOCOL_ID);
-                frame.extend_from_slice(payload);
+                let mut em = byo::emitter::Emitter::new(&mut frame);
+                let _ = em.commands(commands);
+                frame.extend_from_slice(b"\n");
                 frame.extend_from_slice(ST);
                 stdin.write_all(&frame).await
             }

@@ -438,6 +438,16 @@ pub fn props_to_map(props: &[Prop]) -> IndexMap<String, PropValue> {
     map
 }
 
+/// Convert a prop map back to a `Vec<Prop>` (inverse of `props_to_map`).
+pub fn map_to_props(map: &IndexMap<String, PropValue>) -> Vec<Prop> {
+    map.iter()
+        .map(|(key, value)| match value {
+            PropValue::Str(s) => Prop::val(key.as_str(), s.as_str()),
+            PropValue::Flag => Prop::flag(key.as_str()),
+        })
+        .collect()
+}
+
 /// Convert parsed props to patch operations (set + remove).
 pub fn props_to_patch(props: &[Prop]) -> (IndexMap<String, PropValue>, Vec<String>) {
     let mut set = IndexMap::new();
