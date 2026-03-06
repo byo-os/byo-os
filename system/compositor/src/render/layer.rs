@@ -1,5 +1,6 @@
 //! Layer render pipeline — render texture + Camera2d + 3D textured plane.
 
+use crate::components::LayerPlane;
 use crate::props::types::ByoTextureFormat;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
@@ -118,6 +119,7 @@ pub fn spawn_layer_render(
     });
 
     let mut plane_cmd = commands.spawn((
+        LayerPlane,
         Mesh3d(plane_mesh),
         MeshMaterial3d(plane_material),
         Transform::from_xyz(0.0, 0.0, z_offset * world_scale),
@@ -148,7 +150,7 @@ pub fn resize_layer_render(
     world_scale: f32,
     images: &mut Assets<Image>,
     meshes: &mut Assets<Mesh>,
-    mesh_handles: &Query<&Mesh3d>,
+    mesh_handles: &Query<&Mesh3d, With<LayerPlane>>,
 ) {
     if render.width == new_width && render.height == new_height {
         return;

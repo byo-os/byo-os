@@ -22,6 +22,12 @@ pub struct ByoWindow;
 #[derive(Component)]
 pub struct ByoTty;
 
+/// Marker for the 3D plane child entity of a layer's render pipeline.
+/// Used to scope `Query<&mut Transform>` in layer systems, avoiding
+/// a broad query that blocks parallelism with other Transform systems.
+#[derive(Component)]
+pub struct LayerPlane;
+
 /// Ordering component extracted from the `order` prop. Used for
 /// child reordering within flex layouts.
 #[derive(Component, Default)]

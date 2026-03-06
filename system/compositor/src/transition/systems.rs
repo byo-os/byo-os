@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 
-use crate::components::{ByoLayer, ByoTty, ByoView, ByoWindow};
+use crate::components::{ByoLayer, ByoTty, ByoView, ByoWindow, LayerPlane};
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::tty::TtyProps;
@@ -601,8 +601,8 @@ pub fn handle_layer_transitions(
         Changed<LayerProps>,
     >,
     new_layers: Query<Entity, Added<LayerProps>>,
-    transforms: Query<&Transform>,
-    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
+    transforms: Query<&Transform, With<LayerPlane>>,
+    material_handles: Query<&MeshMaterial3d<StandardMaterial>, With<LayerPlane>>,
     materials: Res<Assets<StandardMaterial>>,
     world_scale: Res<WorldScale>,
     mut redraw: MessageWriter<RequestRedraw>,
@@ -934,8 +934,8 @@ pub fn tick_layer_transitions(
         (&mut ActiveTransitions, &LayerProps, &LayerRender),
         (With<ByoLayer>, Without<ByoView>, Without<ByoWindow>),
     >,
-    mut transforms: Query<&mut Transform>,
-    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut transforms: Query<&mut Transform, With<LayerPlane>>,
+    material_handles: Query<&MeshMaterial3d<StandardMaterial>, With<LayerPlane>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     world_scale: Res<WorldScale>,
     time: Res<Time>,

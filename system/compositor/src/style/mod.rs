@@ -11,6 +11,7 @@ use bevy::ui::ScrollPosition;
 
 use crate::components::ByoOrder;
 use crate::components::ByoTty;
+use crate::components::LayerPlane;
 use crate::events::config::EventSubscriptions;
 use crate::kitty_gfx::store::KittyGfxImageStore;
 use crate::plugin::WorldScale;
@@ -1193,9 +1194,9 @@ pub fn reconcile_layers(
         (&LayerProps, &mut LayerRender, Option<&ActiveTransitions>),
         Changed<LayerProps>,
     >,
-    mut transforms: Query<&mut Transform>,
-    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
-    mesh_handles: Query<&Mesh3d>,
+    mut transforms: Query<&mut Transform, With<LayerPlane>>,
+    material_handles: Query<&MeshMaterial3d<StandardMaterial>, With<LayerPlane>>,
+    mesh_handles: Query<&Mesh3d, With<LayerPlane>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1512,26 +1513,7 @@ pub fn reconcile_text_picking(
     query: Query<(Entity, &TextProps), Changed<TextProps>>,
 ) {
     for (entity, props) in &query {
-        if let Some(ref events_str) = props.events {
-            commands
-                .entity(entity)
-                .insert(EventSubscriptions::parse(events_str));
-        } else {
-            commands.entity(entity).remove::<EventSubscriptions>();
-        }
-
-        let pe = props
-            .pointer_events
-            .as_ref()
-            .unwrap_or(&ByoPointerEvents::Auto);
-        match pe {
-            ByoPointerEvents::Auto => {
-                commands.entity(entity).remove::<Pickable>();
-            }
-            ByoPointerEvents::None => {
-                commands.entity(entity).insert(Pickable::IGNORE);
-            }
-        }
+        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
     }
 }
 
@@ -1541,27 +1523,7 @@ pub fn reconcile_layer_picking(
     query: Query<(Entity, &LayerProps), Changed<LayerProps>>,
 ) {
     for (entity, props) in &query {
-        // Layers: set EventSubscriptions + Pickable directly (no class resolution needed)
-        if let Some(ref events_str) = props.events {
-            commands
-                .entity(entity)
-                .insert(EventSubscriptions::parse(events_str));
-        } else {
-            commands.entity(entity).remove::<EventSubscriptions>();
-        }
-
-        let pe = props
-            .pointer_events
-            .as_ref()
-            .unwrap_or(&ByoPointerEvents::Auto);
-        match pe {
-            ByoPointerEvents::Auto => {
-                commands.entity(entity).remove::<Pickable>();
-            }
-            ByoPointerEvents::None => {
-                commands.entity(entity).insert(Pickable::IGNORE);
-            }
-        }
+        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
     }
 }
 
@@ -1571,25 +1533,31 @@ pub fn reconcile_window_picking(
     query: Query<(Entity, &WindowProps), Changed<WindowProps>>,
 ) {
     for (entity, props) in &query {
-        if let Some(ref events_str) = props.events {
-            commands
-                .entity(entity)
-                .insert(EventSubscriptions::parse(events_str));
-        } else {
-            commands.entity(entity).remove::<EventSubscriptions>();
-        }
+        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
+    }
+}
 
-        let pe = props
-            .pointer_events
-            .as_ref()
-            .unwrap_or(&ByoPointerEvents::Auto);
-        match pe {
-            ByoPointerEvents::Auto => {
-                commands.entity(entity).remove::<Pickable>();
-            }
-            ByoPointerEvents::None => {
-                commands.entity(entity).insert(Pickable::IGNORE);
-            }
+/// Set EventSubscriptions + Pickable on an entity (shared by text/layer/window picking).
+fn apply_picking(
+    commands: &mut Commands,
+    entity: Entity,
+    events: Option<&str>,
+    pointer_events: Option<&ByoPointerEvents>,
+) {
+    if let Some(events_str) = events {
+        commands
+            .entity(entity)
+            .insert(EventSubscriptions::parse(events_str));
+    } else {
+        commands.entity(entity).remove::<EventSubscriptions>();
+    }
+
+    match pointer_events.unwrap_or(&ByoPointerEvents::Auto) {
+        ByoPointerEvents::Auto => {
+            commands.entity(entity).remove::<Pickable>();
+        }
+        ByoPointerEvents::None => {
+            commands.entity(entity).insert(Pickable::IGNORE);
         }
     }
 }
