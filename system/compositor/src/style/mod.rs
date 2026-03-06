@@ -1513,7 +1513,12 @@ pub fn reconcile_text_picking(
     query: Query<(Entity, &TextProps), Changed<TextProps>>,
 ) {
     for (entity, props) in &query {
-        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
+        apply_picking(
+            &mut commands,
+            entity,
+            props.events.as_deref(),
+            props.pointer_events.as_ref(),
+        );
     }
 }
 
@@ -1523,7 +1528,12 @@ pub fn reconcile_layer_picking(
     query: Query<(Entity, &LayerProps), Changed<LayerProps>>,
 ) {
     for (entity, props) in &query {
-        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
+        apply_picking(
+            &mut commands,
+            entity,
+            props.events.as_deref(),
+            props.pointer_events.as_ref(),
+        );
     }
 }
 
@@ -1533,7 +1543,12 @@ pub fn reconcile_window_picking(
     query: Query<(Entity, &WindowProps), Changed<WindowProps>>,
 ) {
     for (entity, props) in &query {
-        apply_picking(&mut commands, entity, props.events.as_deref(), props.pointer_events.as_ref());
+        apply_picking(
+            &mut commands,
+            entity,
+            props.events.as_deref(),
+            props.pointer_events.as_ref(),
+        );
     }
 }
 

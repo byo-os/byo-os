@@ -922,7 +922,8 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                 // Block indefinitely when idle; use timeout only when
                 // ACKs are outstanding (need periodic timeout checks).
                 let result = if engine.in_flight.is_empty() {
-                    rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    rx.recv()
+                        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
                 } else {
                     rx.recv_timeout(Duration::from_millis(50))
                 };

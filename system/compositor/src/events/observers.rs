@@ -219,7 +219,10 @@ fn resolve_target_id(entity: Entity, id_map: &IdMap, parent_query: &Query<&Child
 }
 
 /// Compute element dimensions for a given entity in logical pixels.
-pub(crate) fn compute_element_size(entity: Entity, node_query: &Query<&ComputedNode>) -> (f64, f64) {
+pub(crate) fn compute_element_size(
+    entity: Entity,
+    node_query: &Query<&ComputedNode>,
+) -> (f64, f64) {
     if let Ok(computed) = node_query.get(entity) {
         let isf = computed.inverse_scale_factor as f64;
         let size = computed.size();
@@ -329,7 +332,14 @@ fn dispatch_pointer_event(
     ui_transforms: &Query<&UiGlobalTransform>,
 ) {
     let spine = build_spine(
-        entity, &kind, &pointer, id_map, parent_query, subs_query, byo_entities, node_query,
+        entity,
+        &kind,
+        &pointer,
+        id_map,
+        parent_query,
+        subs_query,
+        byo_entities,
+        node_query,
         ui_transforms,
     );
     if !spine.is_empty() {
@@ -372,8 +382,16 @@ fn on_pointer_down(
         th,
     );
     dispatch_pointer_event(
-        event.entity, EventKind::PointerDown, pointer, &engine, &id_map, &parent_query,
-        &subs_query, &byo_entities, &node_query, &ui_transforms,
+        event.entity,
+        EventKind::PointerDown,
+        pointer,
+        &engine,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
     );
 }
 
@@ -392,7 +410,10 @@ fn on_pointer_up(
 ) {
     event.propagate(false);
     // During active capture, handle_captured_pointer synthesizes PointerUp
-    if capture_state.get(pointer_id_to_i64(&event.pointer_id)).is_some() {
+    if capture_state
+        .get(pointer_id_to_i64(&event.pointer_id))
+        .is_some()
+    {
         return;
     }
     let btn = bevy_button(event.button);
@@ -409,8 +430,16 @@ fn on_pointer_up(
         th,
     );
     dispatch_pointer_event(
-        event.entity, EventKind::PointerUp, pointer, &engine, &id_map, &parent_query,
-        &subs_query, &byo_entities, &node_query, &ui_transforms,
+        event.entity,
+        EventKind::PointerUp,
+        pointer,
+        &engine,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
     );
 }
 
@@ -429,7 +458,10 @@ fn on_pointer_move(
 ) {
     event.propagate(false);
     // During active capture, handle_captured_pointer synthesizes PointerMove
-    if capture_state.get(pointer_id_to_i64(&event.pointer_id)).is_some() {
+    if capture_state
+        .get(pointer_id_to_i64(&event.pointer_id))
+        .is_some()
+    {
         return;
     }
     let (tw, th) = compute_element_size(event.entity, &node_query);
@@ -445,8 +477,16 @@ fn on_pointer_move(
         th,
     );
     dispatch_pointer_event(
-        event.entity, EventKind::PointerMove, pointer, &engine, &id_map, &parent_query,
-        &subs_query, &byo_entities, &node_query, &ui_transforms,
+        event.entity,
+        EventKind::PointerMove,
+        pointer,
+        &engine,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
     );
 }
 
@@ -606,8 +646,16 @@ fn on_pointer_out(
         th,
     );
     dispatch_pointer_event(
-        event.entity, EventKind::PointerOut, pointer, &engine, &id_map, &parent_query,
-        &subs_query, &byo_entities, &node_query, &ui_transforms,
+        event.entity,
+        EventKind::PointerOut,
+        pointer,
+        &engine,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
     );
 
     // NOTE: We do NOT update the enter chain here. The enter/leave chain diff
@@ -767,8 +815,16 @@ fn on_pointer_scroll(
     // scroll event subscription. The root stays in place even during
     // overscroll, ensuring events always reach the daemon.
     dispatch_pointer_event(
-        event_target, EventKind::Scroll, pointer, &engine, &id_map, &parent_query,
-        &subs_query, &byo_entities, &node_query, &ui_transforms,
+        event_target,
+        EventKind::Scroll,
+        pointer,
+        &engine,
+        &id_map,
+        &parent_query,
+        &subs_query,
+        &byo_entities,
+        &node_query,
+        &ui_transforms,
     );
 }
 
