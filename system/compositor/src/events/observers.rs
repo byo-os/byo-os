@@ -1,7 +1,7 @@
 //! Bevy observer integration — intercepts picking events and submits them
 //! to the propagation engine with pre-built spines.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::{MouseButton, MouseScrollUnit};
@@ -219,7 +219,7 @@ fn resolve_target_id(entity: Entity, id_map: &IdMap, parent_query: &Query<&Child
 }
 
 /// Compute element dimensions for a given entity in logical pixels.
-fn compute_element_size(entity: Entity, node_query: &Query<&ComputedNode>) -> (f64, f64) {
+pub(crate) fn compute_element_size(entity: Entity, node_query: &Query<&ComputedNode>) -> (f64, f64) {
     if let Ok(computed) = node_query.get(entity) {
         let isf = computed.inverse_scale_factor as f64;
         let size = computed.size();
@@ -266,7 +266,7 @@ fn read_modifiers(keys: &ButtonInput<KeyCode>) -> Modifiers {
     }
 }
 
-/// Create PointerData from a Bevy pointer event.
+/// Create PointerData from Bevy pointer event fields.
 #[allow(clippy::too_many_arguments)]
 fn make_pointer_data(
     pointer_id: &PointerId,
@@ -274,27 +274,71 @@ fn make_pointer_data(
     button: i8,
     buttons: u16,
     pressure: f32,
-    primary: bool,
     modifiers: Modifiers,
     target: String,
     target_width: f64,
     target_height: f64,
 ) -> PointerData {
-    let mut data = PointerData::mouse(
-        location.position.x as f64,
-        location.position.y as f64,
-        primary,
+    PointerData {
+        pointer_id: pointer_id_to_i64(pointer_id),
+        pointer_type: pointer_id_to_type(pointer_id),
+        client_x: location.position.x as f64,
+        client_y: location.position.y as f64,
+        button,
+        buttons,
+        pressure,
+        modifiers,
+        target,
+        target_width,
+        target_height,
+        primary: true,
+        contact_width: 1.0,
+        contact_height: 1.0,
+        tangential_pressure: 0.0,
+        tilt_x: 0,
+        tilt_y: 0,
+        twist: 0,
+        altitude: std::f64::consts::FRAC_PI_2,
+        azimuth: 0.0,
+        scroll_delta_x: 0.0,
+        scroll_delta_y: 0.0,
+        content_width: 0.0,
+        content_height: 0.0,
+        viewport_width: 0.0,
+        viewport_height: 0.0,
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        scroll_overflow_x: 0.0,
+        scroll_overflow_y: 0.0,
+    }
+}
+
+/// Build PointerData, spine, and dispatch to the engine in one step.
+/// Used by the simple pointer observers (down, up, move, out).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_pointer_event(
+    entity: Entity,
+    kind: EventKind,
+    pointer: PointerData,
+    engine: &EngineHandle,
+    id_map: &IdMap,
+    parent_query: &Query<&ChildOf>,
+    subs_query: &Query<&EventSubscriptions>,
+    byo_entities: &Query<(), ByoEntityFilter>,
+    node_query: &Query<&ComputedNode>,
+    ui_transforms: &Query<&UiGlobalTransform>,
+) {
+    let spine = build_spine(
+        entity, &kind, &pointer, id_map, parent_query, subs_query, byo_entities, node_query,
+        ui_transforms,
     );
-    data.pointer_id = pointer_id_to_i64(pointer_id);
-    data.pointer_type = pointer_id_to_type(pointer_id);
-    data.button = button;
-    data.buttons = buttons;
-    data.pressure = pressure;
-    data.modifiers = modifiers;
-    data.target = target;
-    data.target_width = target_width;
-    data.target_height = target_height;
-    data
+    if !spine.is_empty() {
+        engine.send(EngineInput::NewEvent {
+            kind,
+            pointer: Box::new(pointer),
+            spine,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,8 +359,6 @@ fn on_pointer_down(
 ) {
     event.propagate(false);
     let btn = bevy_button(event.button);
-    let modifiers = read_modifiers(&keys);
-    let target = resolve_target_id(event.entity, &id_map, &parent_query);
     let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
@@ -324,32 +366,15 @@ fn on_pointer_down(
         btn.wire_value(),
         btn.bitmask(),
         0.5, // mouse default when pressed
-        true,
-        modifiers,
-        target,
+        read_modifiers(&keys),
+        resolve_target_id(event.entity, &id_map, &parent_query),
         tw,
         th,
     );
-
-    let spine = build_spine(
-        event.entity,
-        &EventKind::PointerDown,
-        &pointer,
-        &id_map,
-        &parent_query,
-        &subs_query,
-        &byo_entities,
-        &node_query,
-        &ui_transforms,
+    dispatch_pointer_event(
+        event.entity, EventKind::PointerDown, pointer, &engine, &id_map, &parent_query,
+        &subs_query, &byo_entities, &node_query, &ui_transforms,
     );
-
-    if !spine.is_empty() {
-        engine.send(EngineInput::NewEvent {
-            kind: EventKind::PointerDown,
-            pointer: Box::new(pointer),
-            spine,
-        });
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -366,49 +391,27 @@ fn on_pointer_up(
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
     event.propagate(false);
-
     // During active capture, handle_captured_pointer synthesizes PointerUp
-    let pid = pointer_id_to_i64(&event.pointer_id);
-    if capture_state.get(pid).is_some() {
+    if capture_state.get(pointer_id_to_i64(&event.pointer_id)).is_some() {
         return;
     }
-
     let btn = bevy_button(event.button);
-    let modifiers = read_modifiers(&keys);
-    let target = resolve_target_id(event.entity, &id_map, &parent_query);
     let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
         &event.pointer_location,
         btn.wire_value(),
-        0, // buttons released
+        0,
         0.0,
-        true,
-        modifiers,
-        target,
+        read_modifiers(&keys),
+        resolve_target_id(event.entity, &id_map, &parent_query),
         tw,
         th,
     );
-
-    let spine = build_spine(
-        event.entity,
-        &EventKind::PointerUp,
-        &pointer,
-        &id_map,
-        &parent_query,
-        &subs_query,
-        &byo_entities,
-        &node_query,
-        &ui_transforms,
+    dispatch_pointer_event(
+        event.entity, EventKind::PointerUp, pointer, &engine, &id_map, &parent_query,
+        &subs_query, &byo_entities, &node_query, &ui_transforms,
     );
-
-    if !spine.is_empty() {
-        engine.send(EngineInput::NewEvent {
-            kind: EventKind::PointerUp,
-            pointer: Box::new(pointer),
-            spine,
-        });
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -425,15 +428,10 @@ fn on_pointer_move(
     ui_transforms: Query<&UiGlobalTransform>,
 ) {
     event.propagate(false);
-
     // During active capture, handle_captured_pointer synthesizes PointerMove
-    let pid = pointer_id_to_i64(&event.pointer_id);
-    if capture_state.get(pid).is_some() {
+    if capture_state.get(pointer_id_to_i64(&event.pointer_id)).is_some() {
         return;
     }
-
-    let modifiers = read_modifiers(&keys);
-    let target = resolve_target_id(event.entity, &id_map, &parent_query);
     let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
@@ -441,32 +439,15 @@ fn on_pointer_move(
         -1,
         0,
         0.0,
-        true,
-        modifiers,
-        target,
+        read_modifiers(&keys),
+        resolve_target_id(event.entity, &id_map, &parent_query),
         tw,
         th,
     );
-
-    let spine = build_spine(
-        event.entity,
-        &EventKind::PointerMove,
-        &pointer,
-        &id_map,
-        &parent_query,
-        &subs_query,
-        &byo_entities,
-        &node_query,
-        &ui_transforms,
+    dispatch_pointer_event(
+        event.entity, EventKind::PointerMove, pointer, &engine, &id_map, &parent_query,
+        &subs_query, &byo_entities, &node_query, &ui_transforms,
     );
-
-    if !spine.is_empty() {
-        engine.send(EngineInput::NewEvent {
-            kind: EventKind::PointerMove,
-            pointer: Box::new(pointer),
-            spine,
-        });
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,8 +469,6 @@ fn on_pointer_over(
     // enter state set by the previous invocation.
     event.propagate(false);
 
-    let modifiers = read_modifiers(&keys);
-    let target = resolve_target_id(event.entity, &id_map, &parent_query);
     let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
@@ -497,9 +476,8 @@ fn on_pointer_over(
         -1,
         0,
         0.0,
-        true,
-        modifiers,
-        target,
+        read_modifiers(&keys),
+        resolve_target_id(event.entity, &id_map, &parent_query),
         tw,
         th,
     );
@@ -507,16 +485,15 @@ fn on_pointer_over(
     // --- Subtree-aware enter/leave tracking ---
     // Build the full BYO ancestor chain for the new hover target.
     let ancestor_chain = build_ancestor_chain(event.entity, &id_map, &parent_query, &byo_entities);
-    let ancestor_set: HashSet<Entity> = ancestor_chain.iter().copied().collect();
 
     let pointer_id = pointer_id_to_i64(&event.pointer_id);
     let prev_chain = enter_state.chains.entry(pointer_id).or_default();
-    let prev_set: HashSet<Entity> = prev_chain.iter().copied().collect();
 
-    // Entities that left: in previous chain but not in new (leaf→root for pointerleave)
+    // Entities that left: in previous chain but not in new (leaf→root for pointerleave).
+    // Linear scan is faster than HashSet for typical UI depths (5-15 elements).
     let mut newly_left: Vec<Entity> = prev_chain
         .iter()
-        .filter(|e| !ancestor_set.contains(e))
+        .filter(|e| !ancestor_chain.contains(e))
         .copied()
         .collect();
     newly_left.reverse(); // root→leaf collected, reverse to leaf→root
@@ -524,7 +501,7 @@ fn on_pointer_over(
     // Entities that entered: in new chain but not in previous (root→leaf for pointerenter)
     let newly_entered: Vec<Entity> = ancestor_chain
         .iter()
-        .filter(|e| !prev_set.contains(e))
+        .filter(|e| !prev_chain.contains(e))
         .copied()
         .collect();
 
@@ -616,8 +593,6 @@ fn on_pointer_out(
     // Stop Bevy's built-in bubbling (same reason as on_pointer_over).
     event.propagate(false);
 
-    let modifiers = read_modifiers(&keys);
-    let target = resolve_target_id(event.entity, &id_map, &parent_query);
     let (tw, th) = compute_element_size(event.entity, &node_query);
     let pointer = make_pointer_data(
         &event.pointer_id,
@@ -625,32 +600,15 @@ fn on_pointer_out(
         -1,
         0,
         0.0,
-        true,
-        modifiers,
-        target,
+        read_modifiers(&keys),
+        resolve_target_id(event.entity, &id_map, &parent_query),
         tw,
         th,
     );
-
-    // Fire pointerout (bubbling via our engine's spine dispatch).
-    let out_spine = build_spine(
-        event.entity,
-        &EventKind::PointerOut,
-        &pointer,
-        &id_map,
-        &parent_query,
-        &subs_query,
-        &byo_entities,
-        &node_query,
-        &ui_transforms,
+    dispatch_pointer_event(
+        event.entity, EventKind::PointerOut, pointer, &engine, &id_map, &parent_query,
+        &subs_query, &byo_entities, &node_query, &ui_transforms,
     );
-    if !out_spine.is_empty() {
-        engine.send(EngineInput::NewEvent {
-            kind: EventKind::PointerOut,
-            pointer: Box::new(pointer),
-            spine: out_spine,
-        });
-    }
 
     // NOTE: We do NOT update the enter chain here. The enter/leave chain diff
     // is handled entirely by on_pointer_over — when the pointer moves to a
@@ -789,7 +747,6 @@ fn on_pointer_scroll(
         -1,
         0,
         0.0,
-        true,
         modifiers,
         target,
         tw,
@@ -809,25 +766,10 @@ fn on_pointer_scroll(
     // Build spine from the event target (root container), which has the
     // scroll event subscription. The root stays in place even during
     // overscroll, ensuring events always reach the daemon.
-    let spine = build_spine(
-        event_target,
-        &EventKind::Scroll,
-        &pointer,
-        &id_map,
-        &parent_query,
-        &subs_query,
-        &byo_entities,
-        &node_query,
-        &ui_transforms,
+    dispatch_pointer_event(
+        event_target, EventKind::Scroll, pointer, &engine, &id_map, &parent_query,
+        &subs_query, &byo_entities, &node_query, &ui_transforms,
     );
-
-    if !spine.is_empty() {
-        engine.send(EngineInput::NewEvent {
-            kind: EventKind::Scroll,
-            pointer: Box::new(pointer),
-            spine,
-        });
-    }
 }
 
 /// Walk up from `entity` to find the nearest ancestor with a Scroll event
@@ -929,16 +871,7 @@ pub fn handle_captured_pointer(
                 engine.send(EngineInput::NewEvent {
                     kind: EventKind::PointerUp,
                     pointer: Box::new(pointer),
-                    spine: vec![SpineNode {
-                        byo_id,
-                        phase: super::config::Phase::Bubble,
-                        passive: false,
-                        verbose: false,
-                        local_x: 0.0,
-                        local_y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
-                    }],
+                    spine: vec![SpineNode::direct(byo_id, 0.0, 0.0, 0.0, 0.0)],
                 });
             }
         }
@@ -970,16 +903,7 @@ pub fn handle_captured_pointer(
             &ui_transforms,
         );
 
-        let spine = vec![SpineNode {
-            byo_id: byo_id.clone(),
-            phase: super::config::Phase::Bubble,
-            passive: false,
-            verbose: false,
-            local_x,
-            local_y,
-            width: w,
-            height: h,
-        }];
+        let spine = vec![SpineNode::direct(byo_id.clone(), local_x, local_y, w, h)];
 
         if last_move_pos.is_some() {
             let mut pointer = PointerData::mouse(pos.x as f64, pos.y as f64, true);

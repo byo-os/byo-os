@@ -599,9 +599,9 @@ fn spring_toward_bounds(state: &mut EntityScrollState, dt: f64) {
 // Bevy system: tick scroll physics and dispatch synthetic events
 // ---------------------------------------------------------------------------
 
-use crate::events::config::{EventSubscriptions, Phase};
+use crate::events::config::EventSubscriptions;
 use crate::events::engine::{EngineHandle, EngineInput, PointerData, SpineNode};
-use crate::events::observers::find_scroll_event_target;
+use crate::events::observers::{compute_element_size, find_scroll_event_target};
 use crate::id_map::IdMap;
 use bevy::ui::ScrollPosition;
 use bevy::window::RequestRedraw;
@@ -687,14 +687,7 @@ pub fn tick_scroll_physics(
             continue;
         };
 
-        // Compute element size of the event target
-        let (w, h) = if let Ok(computed) = node_query.get(event_target) {
-            let isf = computed.inverse_scale_factor as f64;
-            let size = computed.size();
-            (size.x as f64 * isf, size.y as f64 * isf)
-        } else {
-            (0.0, 0.0)
-        };
+        let (w, h) = compute_element_size(event_target, &node_query);
 
         // Read authoritative clamped position and overflow (compositor owns scroll state)
         let (scroll_x, scroll_y) = physics.clamped_position(event.entity);
@@ -715,16 +708,7 @@ pub fn tick_scroll_physics(
         pointer.target_width = w;
         pointer.target_height = h;
 
-        let spine = vec![SpineNode {
-            byo_id: target_byo_id.to_string(),
-            phase: Phase::Bubble,
-            passive: false,
-            verbose: false,
-            local_x: 0.0,
-            local_y: 0.0,
-            width: w,
-            height: h,
-        }];
+        let spine = vec![SpineNode::direct(target_byo_id.to_string(), 0.0, 0.0, w, h)];
 
         engine.send(EngineInput::NewEvent {
             kind: EventKind::Scroll,

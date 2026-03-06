@@ -201,6 +201,23 @@ pub struct SpineNode {
     pub height: f64,
 }
 
+impl SpineNode {
+    /// Create a spine node for direct delivery (no capture/bubble, non-passive, non-verbose).
+    /// Used for synthetic events (capture targets, scroll momentum, etc.).
+    pub fn direct(byo_id: String, local_x: f64, local_y: f64, width: f64, height: f64) -> Self {
+        Self {
+            byo_id,
+            phase: Phase::Bubble,
+            passive: false,
+            verbose: false,
+            local_x,
+            local_y,
+            width,
+            height,
+        }
+    }
+}
+
 /// Messages sent to the propagation engine.
 pub enum EngineInput {
     /// A new pointer event from Bevy's picking system.
@@ -260,8 +277,17 @@ impl CaptureState {
     fn insert(&self, pointer_id: i64, byo_id: String) {
         self.0.lock().unwrap().insert(pointer_id, byo_id);
     }
-    fn remove(&self, pointer_id: i64) {
-        self.0.lock().unwrap().remove(&pointer_id);
+    fn remove_and_get(&self, pointer_id: i64) -> Option<String> {
+        self.0.lock().unwrap().remove(&pointer_id)
+    }
+    fn entries_targeting(&self, byo_id: &str) -> Vec<i64> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, id)| id.as_str() == byo_id)
+            .map(|(&pid, _)| pid)
+            .collect()
     }
 }
 
@@ -272,12 +298,12 @@ impl CaptureState {
 /// Per-event-type sequence counter.
 #[derive(Default)]
 struct SeqCounters {
-    counters: HashMap<String, u64>,
+    counters: HashMap<EventKind, u64>,
 }
 
 impl SeqCounters {
     fn next(&mut self, kind: &EventKind) -> u64 {
-        let counter = self.counters.entry(kind.as_str().to_string()).or_insert(0);
+        let counter = self.counters.entry(kind.clone()).or_insert(0);
         let seq = *counter;
         *counter += 1;
         seq
@@ -297,7 +323,7 @@ struct InFlightPropagation {
     /// Unique in-flight ID for this propagation (avoids cross-type seq collisions).
     inflight_id: u64,
     /// The ack_map key for the currently outstanding event (for timeout cleanup).
-    pending_ack_key: Option<(String, u64)>,
+    pending_ack_key: Option<(EventKind, u64)>,
     /// When we sent the current event (for timeout).
     sent_at: Option<Instant>,
     /// Whether propagation was stopped.
@@ -341,11 +367,9 @@ struct Engine {
     next_inflight_id: u64,
     /// In-flight propagations keyed by unique inflight_id.
     in_flight: HashMap<u64, InFlightPropagation>,
-    /// Map from (event_kind_str, wire_seq) to the inflight_id.
-    ack_map: HashMap<(String, u64), u64>,
-    /// Pointer capture: pointer_id → target BYO ID (engine-local).
-    captures: HashMap<i64, String>,
-    /// Shared capture state for ECS systems to read.
+    /// Map from (event_kind, wire_seq) to the inflight_id.
+    ack_map: HashMap<(EventKind, u64), u64>,
+    /// Pointer capture state shared with ECS.
     capture_state: CaptureState,
     /// Active press states per pointer ID.
     press_states: HashMap<i64, PressState>,
@@ -363,7 +387,6 @@ impl Engine {
             next_inflight_id: 0,
             in_flight: HashMap::new(),
             ack_map: HashMap::new(),
-            captures: HashMap::new(),
             capture_state,
             press_states: HashMap::new(),
             click_states: HashMap::new(),
@@ -397,22 +420,19 @@ impl Engine {
         }
 
         // Check pointer capture: if captured, override spine to just the target
-        let effective_spine = if let Some(capture_id) = self.captures.get(&pointer.pointer_id) {
+        let effective_spine = if let Some(capture_id) = self.capture_state.get(pointer.pointer_id) {
             // Find the capture target in the spine, or use it alone
             if let Some(node) = spine.iter().find(|n| n.byo_id == *capture_id) {
                 vec![node.clone()]
             } else {
                 // Capture target not in spine — still deliver to it
-                vec![SpineNode {
-                    byo_id: capture_id.clone(),
-                    phase: Phase::Bubble,
-                    passive: false,
-                    verbose: false,
-                    local_x: pointer.client_x,
-                    local_y: pointer.client_y,
-                    width: 0.0,
-                    height: 0.0,
-                }]
+                vec![SpineNode::direct(
+                    capture_id.clone(),
+                    pointer.client_x,
+                    pointer.client_y,
+                    0.0,
+                    0.0,
+                )]
             }
         } else {
             spine
@@ -498,13 +518,13 @@ impl Engine {
         let props = build_event_props(&prop.pointer, node, node.verbose);
 
         // Emit the event
-        let kind_str = prop.kind.as_str().to_string();
+        let kind_str = prop.kind.as_str();
         let id = node.byo_id.clone();
         self.emitter
-            .frame(|em| em.event(&kind_str, seq, &id, &props));
+            .frame(|em| em.event(kind_str, seq, &id, &props));
 
         // Track: ack_map maps (kind, wire_seq) → inflight_id
-        let ack_key = (kind_str, seq);
+        let ack_key = (prop.kind.clone(), seq);
         prop.pending_ack_key = Some(ack_key.clone());
         prop.sent_at = Some(Instant::now());
         self.ack_map.insert(ack_key, prop.inflight_id);
@@ -517,7 +537,7 @@ impl Engine {
     }
 
     fn handle_ack(&mut self, kind: EventKind, seq: u64, handled: bool, capture: bool) {
-        let ack_key = (kind.as_str().to_string(), seq);
+        let ack_key = (kind, seq);
         let Some(inflight_id) = self.ack_map.remove(&ack_key) else {
             return;
         };
@@ -532,13 +552,11 @@ impl Engine {
             let spine_idx = prop.dispatch_order[prop.current_step];
             let node = &prop.spine[spine_idx];
             let already_captured = self
-                .captures
-                .get(&prop.pointer.pointer_id)
-                .is_some_and(|id| *id == node.byo_id);
+                .capture_state
+                .get(prop.pointer.pointer_id)
+                .is_some_and(|id| id == node.byo_id);
 
             if !already_captured {
-                self.captures
-                    .insert(prop.pointer.pointer_id, node.byo_id.clone());
                 self.capture_state
                     .insert(prop.pointer.pointer_id, node.byo_id.clone());
 
@@ -579,13 +597,13 @@ impl Engine {
 
     fn emit_non_bubbling(&mut self, kind: &EventKind, pointer: &PointerData, spine: &[SpineNode]) {
         // For non-bubbling events, just fire on each subscribed node directly
+        let kind_str = kind.as_str();
         for node in spine {
             let seq = self.seq.next(kind);
             let props = build_event_props(pointer, node, node.verbose);
-            let kind_str = kind.as_str().to_string();
             let id = node.byo_id.clone();
             self.emitter
-                .frame(|em| em.event(&kind_str, seq, &id, &props));
+                .frame(|em| em.event(kind_str, seq, &id, &props));
         }
     }
 
@@ -630,6 +648,10 @@ impl Engine {
                 }
             }
         }
+
+        // Evict stale click_states (entries older than dblclick threshold + margin)
+        self.click_states
+            .retain(|_, cs| cs.clicked_at.elapsed() < DBLCLICK_TIME_THRESHOLD * 2);
 
         // Drain any deferred events from completions
         self.drain_deferred();
@@ -725,8 +747,7 @@ impl Engine {
 
     /// Release pointer capture for a given pointer ID.
     fn release_capture(&mut self, pointer_id: i64) {
-        self.capture_state.remove(pointer_id);
-        if let Some(target_id) = self.captures.remove(&pointer_id) {
+        if let Some(target_id) = self.capture_state.remove_and_get(pointer_id) {
             let seq = self.seq.next(&EventKind::LostPointerCapture);
             self.emitter.frame(|em| {
                 em.event(
@@ -898,8 +919,15 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
             let mut engine = Engine::new(emitter, capture_state);
 
             loop {
-                // Use recv_timeout to periodically check for ACK timeouts
-                match rx.recv_timeout(Duration::from_millis(50)) {
+                // Block indefinitely when idle; use timeout only when
+                // ACKs are outstanding (need periodic timeout checks).
+                let result = if engine.in_flight.is_empty() {
+                    rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                } else {
+                    rx.recv_timeout(Duration::from_millis(50))
+                };
+
+                match result {
                     Ok(EngineInput::NewEvent {
                         kind,
                         pointer,
@@ -925,13 +953,7 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                     }
                     Ok(EngineInput::EntityDestroyed { byo_id }) => {
                         // Release any captures targeting the destroyed entity.
-                        let stale: Vec<i64> = engine
-                            .captures
-                            .iter()
-                            .filter(|(_, id)| **id == byo_id)
-                            .map(|(&pid, _)| pid)
-                            .collect();
-                        for pid in stale {
+                        for pid in engine.capture_state.entries_targeting(&byo_id) {
                             engine.release_capture(pid);
                         }
                     }
@@ -946,7 +968,9 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                     }
                 }
 
-                engine.check_timeouts();
+                if !engine.in_flight.is_empty() {
+                    engine.check_timeouts();
+                }
             }
         })
         .expect("failed to spawn propagation engine thread");

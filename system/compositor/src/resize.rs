@@ -36,6 +36,19 @@ impl ResizeSeqCounter {
 /// Avoids noise from sub-pixel rounding.
 const MIN_CHANGE: f64 = 0.5;
 
+/// Extract (width, height, content_width, content_height) in logical pixels.
+fn compute_dimensions(computed: &ComputedNode) -> (f64, f64, f64, f64) {
+    let isf = computed.inverse_scale_factor as f64;
+    let size = computed.size();
+    let content = computed.content_size();
+    (
+        size.x as f64 * isf,
+        size.y as f64 * isf,
+        content.x as f64 * isf,
+        content.y as f64 * isf,
+    )
+}
+
 /// PostUpdate system: detect `ComputedNode` size changes and emit `!resize`
 /// events for entities subscribed to `Resize`.
 pub fn emit_resize_events(
@@ -65,13 +78,7 @@ pub fn emit_resize_events(
             continue;
         };
 
-        let isf = computed.inverse_scale_factor as f64;
-        let size = computed.size();
-        let w = size.x as f64 * isf;
-        let h = size.y as f64 * isf;
-        let content = computed.content_size();
-        let cw = content.x as f64 * isf;
-        let ch = content.y as f64 * isf;
+        let (w, h, cw, ch) = compute_dimensions(computed);
 
         commands.entity(entity).insert(PreviousSize {
             width: w,
@@ -95,13 +102,7 @@ pub fn emit_resize_events(
             continue;
         };
 
-        let isf = computed.inverse_scale_factor as f64;
-        let size = computed.size();
-        let w = size.x as f64 * isf;
-        let h = size.y as f64 * isf;
-        let content = computed.content_size();
-        let cw = content.x as f64 * isf;
-        let ch = content.y as f64 * isf;
+        let (w, h, cw, ch) = compute_dimensions(computed);
 
         let changed = (w - prev.width).abs() > MIN_CHANGE
             || (h - prev.height).abs() > MIN_CHANGE
