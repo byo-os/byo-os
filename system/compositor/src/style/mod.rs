@@ -349,7 +349,16 @@ pub fn reconcile_views(
         // When scroll_x/scroll_y props are set, they "lock" that axis (controlled mode).
         // When removed (~scroll-x/~scroll-y), physics resumes from current position.
         // default-scroll-x/y only apply on initial insertion.
-        if existing_scroll.is_none() {
+        if let Some(sp) = existing_scroll {
+            if resolved.scroll_x.is_some() || resolved.scroll_y.is_some() {
+                // Controlled: write prop values, preserve other axis from existing SP
+                let sx = resolved.scroll_x.unwrap_or(sp.x);
+                let sy = resolved.scroll_y.unwrap_or(sp.y);
+                commands
+                    .entity(entity)
+                    .insert(ScrollPosition(Vec2::new(sx, sy)));
+            }
+        } else {
             // Initial insertion: scroll_x > default_scroll_x > 0
             let sx = resolved
                 .scroll_x
@@ -364,11 +373,6 @@ pub fn reconcile_views(
                     .entity(entity)
                     .insert(ScrollPosition(Vec2::new(sx, sy)));
             }
-        } else if resolved.scroll_x.is_some() || resolved.scroll_y.is_some() {
-            // Controlled: write prop values, preserve other axis from existing SP
-            let sp = existing_scroll.unwrap();
-            let sx = resolved.scroll_x.unwrap_or(sp.x);
-            let sy = resolved.scroll_y.unwrap_or(sp.y);
             commands
                 .entity(entity)
                 .insert(ScrollPosition(Vec2::new(sx, sy)));

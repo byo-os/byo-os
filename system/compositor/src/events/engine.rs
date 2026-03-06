@@ -206,7 +206,7 @@ pub enum EngineInput {
     /// A new pointer event from Bevy's picking system.
     NewEvent {
         kind: EventKind,
-        pointer: PointerData,
+        pointer: Box<PointerData>,
         /// Spine ordered root → leaf.
         spine: Vec<SpineNode>,
     },
@@ -909,9 +909,10 @@ pub fn spawn_engine(emitter: StdoutEmitter, capture_state: CaptureState) -> Engi
                         // then release capture afterwards.
                         let should_release =
                             matches!(kind, EventKind::PointerUp | EventKind::PointerCancel);
-                        engine.handle_new_event(kind, pointer.clone(), spine);
+                        let pointer_id = pointer.pointer_id;
+                        engine.handle_new_event(kind, *pointer, spine);
                         if should_release {
-                            engine.release_capture(pointer.pointer_id);
+                            engine.release_capture(pointer_id);
                         }
                     }
                     Ok(EngineInput::Ack {

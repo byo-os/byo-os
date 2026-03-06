@@ -346,7 +346,7 @@ fn on_pointer_down(
     if !spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerDown,
-            pointer,
+            pointer: Box::new(pointer),
             spine,
         });
     }
@@ -405,7 +405,7 @@ fn on_pointer_up(
     if !spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerUp,
-            pointer,
+            pointer: Box::new(pointer),
             spine,
         });
     }
@@ -463,7 +463,7 @@ fn on_pointer_move(
     if !spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerMove,
-            pointer,
+            pointer: Box::new(pointer),
             spine,
         });
     }
@@ -552,7 +552,7 @@ fn on_pointer_over(
     if !leave_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerLeave,
-            pointer: pointer.clone(),
+            pointer: Box::new(pointer.clone()),
             spine: leave_spine,
         });
     }
@@ -572,7 +572,7 @@ fn on_pointer_over(
     if !over_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerOver,
-            pointer: pointer.clone(),
+            pointer: Box::new(pointer.clone()),
             spine: over_spine,
         });
     }
@@ -595,7 +595,7 @@ fn on_pointer_over(
     if !enter_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerEnter,
-            pointer,
+            pointer: Box::new(pointer),
             spine: enter_spine,
         });
     }
@@ -647,7 +647,7 @@ fn on_pointer_out(
     if !out_spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::PointerOut,
-            pointer,
+            pointer: Box::new(pointer),
             spine: out_spine,
         });
     }
@@ -824,7 +824,7 @@ fn on_pointer_scroll(
     if !spine.is_empty() {
         engine.send(EngineInput::NewEvent {
             kind: EventKind::Scroll,
-            pointer,
+            pointer: Box::new(pointer),
             spine,
         });
     }
@@ -928,7 +928,7 @@ pub fn handle_captured_pointer(
                 pointer.target = byo_id.clone();
                 engine.send(EngineInput::NewEvent {
                     kind: EventKind::PointerUp,
-                    pointer,
+                    pointer: Box::new(pointer),
                     spine: vec![SpineNode {
                         byo_id,
                         phase: super::config::Phase::Bubble,
@@ -994,7 +994,7 @@ pub fn handle_captured_pointer(
 
             engine.send(EngineInput::NewEvent {
                 kind: EventKind::PointerMove,
-                pointer,
+                pointer: Box::new(pointer),
                 spine: spine.clone(),
             });
         }
@@ -1012,7 +1012,7 @@ pub fn handle_captured_pointer(
 
             engine.send(EngineInput::NewEvent {
                 kind: EventKind::PointerUp,
-                pointer,
+                pointer: Box::new(pointer),
                 spine,
             });
         }
@@ -1060,7 +1060,7 @@ pub fn handle_cursor_left(
             if !leave_spine.is_empty() {
                 engine.send(EngineInput::NewEvent {
                     kind: EventKind::PointerLeave,
-                    pointer,
+                    pointer: Box::new(pointer),
                     spine: leave_spine,
                 });
             }

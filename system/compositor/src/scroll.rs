@@ -728,7 +728,7 @@ pub fn tick_scroll_physics(
 
         engine.send(EngineInput::NewEvent {
             kind: EventKind::Scroll,
-            pointer,
+            pointer: Box::new(pointer),
             spine,
         });
     }
