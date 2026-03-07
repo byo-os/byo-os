@@ -120,7 +120,7 @@ fn pragma() {
     assert_eq!(cmds.len(), 1);
     assert!(matches!(
         &cmds[0],
-        Command::Pragma { kind: PragmaKind::Claim, targets }
+        Command::Pragma(PragmaKind::Claim(targets))
         if targets.len() == 2
     ));
 }
@@ -131,7 +131,7 @@ fn observe_pragma() {
     assert_eq!(cmds.len(), 1);
     assert!(matches!(
         &cmds[0],
-        Command::Pragma { kind: PragmaKind::Observe, targets }
+        Command::Pragma(PragmaKind::Observe(targets))
         if targets.len() == 1 && targets[0].as_ref() == "timer"
     ));
 }

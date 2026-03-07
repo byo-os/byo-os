@@ -4,7 +4,7 @@ use std::process;
 use byo::emitter::{Emitter, write_props};
 use byo::lexer::{Token, tokenize};
 use byo::parser::parse;
-use byo::protocol::{APC_START, Command, PROTOCOL_ID, Prop, ST};
+use byo::protocol::{APC_START, Command, PROTOCOL_ID, PragmaKind, Prop, ST};
 use byo::scanner::{Handler, Scanner};
 
 fn main() {
@@ -414,9 +414,8 @@ fn write_tsv_record(
                 serialize_props(props)
             )
         }
-        Command::Pragma { kind, targets } => {
-            let t = targets.join(",");
-            writeln!(out, "#\t{}\t\t{t}\t\t", kind.as_str())
+        Command::Pragma(pragma) => {
+            writeln!(out, "#\t{}\t\t\t\t", pragma.as_str())
         }
         Command::Push { .. } | Command::Pop => Ok(()),
     }
@@ -529,15 +528,40 @@ fn write_json_obj(
                 write_json_body_field(out, body)?;
             }
         }
-        Command::Pragma { kind, targets } => {
+        Command::Pragma(pragma) => {
+            use PragmaKind::*;
             out.write_all(b"\"op\":\"#\",\"kind\":")?;
-            write_json_str(out, kind.as_str())?;
+            write_json_str(out, pragma.as_str())?;
             out.write_all(b",\"targets\":[")?;
-            for (i, t) in targets.iter().enumerate() {
-                if i > 0 {
-                    out.write_all(b",")?;
+            match pragma {
+                Claim(types) | Unclaim(types) | Observe(types) | Unobserve(types) => {
+                    for (i, t) in types.iter().enumerate() {
+                        if i > 0 {
+                            out.write_all(b",")?;
+                        }
+                        write_json_str(out, t)?;
+                    }
                 }
-                write_json_str(out, t)?;
+                Handle(targets) | Unhandle(targets) => {
+                    for (i, (t, r)) in targets.iter().enumerate() {
+                        if i > 0 {
+                            out.write_all(b",")?;
+                        }
+                        write_json_str(out, &format!("{t}?{r}"))?;
+                    }
+                }
+                Redirect(target) => {
+                    write_json_str(out, target)?;
+                }
+                Unredirect => {}
+                Other { targets, .. } => {
+                    for (i, t) in targets.iter().enumerate() {
+                        if i > 0 {
+                            out.write_all(b",")?;
+                        }
+                        write_json_str(out, t)?;
+                    }
+                }
             }
             out.write_all(b"]")?;
         }

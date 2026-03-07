@@ -185,11 +185,8 @@ pub enum Command {
         seq: u64,
         props: Vec<Prop>,
     },
-    /// `#kind targets...` — Stream pragma (fire-and-forget, no seq).
-    Pragma {
-        kind: PragmaKind,
-        targets: Vec<ByteStr>,
-    },
+    /// `#kind ...` — Stream pragma (fire-and-forget, no seq).
+    Pragma(PragmaKind),
     /// `?kind seq target props...` — Request (expand, custom).
     Request {
         kind: RequestKind,
@@ -355,60 +352,46 @@ impl EventKind {
 /// Known pragma types for `#` commands.
 ///
 /// Pragmas are fire-and-forget stream directives (no sequence number,
-/// no response expected). `Claim`/`Unclaim` register/release type
-/// ownership. `Observe`/`Unobserve` subscribe to final output.
-/// `Redirect`/`Unredirect` control passthrough routing.
+/// no response expected). Each variant carries its own data, matching
+/// the semantics of that pragma kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PragmaKind {
-    /// `#claim` — claim ownership of object type(s)
-    Claim,
-    /// `#unclaim` — release claim on object type(s)
-    Unclaim,
-    /// `#observe` — observe final output for object type(s)
-    Observe,
-    /// `#unobserve` — stop observing object type(s)
-    Unobserve,
-    /// `#redirect` — route passthrough to named tty
-    Redirect,
+    /// `#claim type,...` — claim ownership of object type(s)
+    Claim(Vec<ByteStr>),
+    /// `#unclaim type,...` — release claim on object type(s)
+    Unclaim(Vec<ByteStr>),
+    /// `#observe type,...` — observe final output for object type(s)
+    Observe(Vec<ByteStr>),
+    /// `#unobserve type,...` — stop observing object type(s)
+    Unobserve(Vec<ByteStr>),
+    /// `#redirect id` — route passthrough to named tty
+    Redirect(ByteStr),
     /// `#unredirect` — restore default passthrough routing
     Unredirect,
-    /// `#handle` — register as handler for (type, request) pairs
-    Handle,
-    /// `#unhandle` — release handler registration
-    Unhandle,
-    /// Custom pragma
-    Other(ByteStr),
+    /// `#handle type?request,...` — register as handler for (type, request) pairs
+    Handle(Vec<(ByteStr, ByteStr)>),
+    /// `#unhandle type?request,...` — release handler registration
+    Unhandle(Vec<(ByteStr, ByteStr)>),
+    /// Custom pragma with raw targets
+    Other {
+        name: ByteStr,
+        targets: Vec<ByteStr>,
+    },
 }
 
 impl PragmaKind {
-    /// Returns the wire-format string for this pragma kind.
+    /// Returns the wire-format name for this pragma kind.
     pub fn as_str(&self) -> &str {
         match self {
-            PragmaKind::Claim => "claim",
-            PragmaKind::Unclaim => "unclaim",
-            PragmaKind::Observe => "observe",
-            PragmaKind::Unobserve => "unobserve",
-            PragmaKind::Redirect => "redirect",
+            PragmaKind::Claim(_) => "claim",
+            PragmaKind::Unclaim(_) => "unclaim",
+            PragmaKind::Observe(_) => "observe",
+            PragmaKind::Unobserve(_) => "unobserve",
+            PragmaKind::Redirect(_) => "redirect",
             PragmaKind::Unredirect => "unredirect",
-            PragmaKind::Handle => "handle",
-            PragmaKind::Unhandle => "unhandle",
-            PragmaKind::Other(s) => s,
-        }
-    }
-
-    /// Maps a wire-format pragma name to the corresponding variant.
-    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
-        let s = s.into();
-        match s.as_ref() {
-            "claim" => PragmaKind::Claim,
-            "unclaim" => PragmaKind::Unclaim,
-            "observe" => PragmaKind::Observe,
-            "unobserve" => PragmaKind::Unobserve,
-            "redirect" => PragmaKind::Redirect,
-            "unredirect" => PragmaKind::Unredirect,
-            "handle" => PragmaKind::Handle,
-            "unhandle" => PragmaKind::Unhandle,
-            _ => PragmaKind::Other(s),
+            PragmaKind::Handle(_) => "handle",
+            PragmaKind::Unhandle(_) => "unhandle",
+            PragmaKind::Other { name, .. } => name,
         }
     }
 }

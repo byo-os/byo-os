@@ -597,16 +597,15 @@ impl<W: io::Write> Emitter<W> {
                     write!(self.writer, "\n!ack {} {seq}", kind.as_str())?;
                     props.emit_props(&mut self.writer)?;
                 }
-                Command::Pragma { kind, targets } => {
-                    write!(self.writer, "\n#{}", kind.as_str())?;
-                    match kind {
-                        crate::protocol::PragmaKind::Claim
-                        | crate::protocol::PragmaKind::Unclaim
-                        | crate::protocol::PragmaKind::Observe
-                        | crate::protocol::PragmaKind::Unobserve
-                        | crate::protocol::PragmaKind::Handle
-                        | crate::protocol::PragmaKind::Unhandle => {
-                            for (i, t) in targets.iter().enumerate() {
+                Command::Pragma(pragma) => {
+                    use crate::protocol::PragmaKind;
+                    match pragma {
+                        PragmaKind::Claim(types)
+                        | PragmaKind::Unclaim(types)
+                        | PragmaKind::Observe(types)
+                        | PragmaKind::Unobserve(types) => {
+                            write!(self.writer, "\n#{}", pragma.as_str())?;
+                            for (i, t) in types.iter().enumerate() {
                                 if i > 0 {
                                     write!(self.writer, ",")?;
                                 } else {
@@ -615,12 +614,25 @@ impl<W: io::Write> Emitter<W> {
                                 write!(self.writer, "{t}")?;
                             }
                         }
-                        crate::protocol::PragmaKind::Redirect => {
-                            if let Some(target) = targets.first() {
-                                write!(self.writer, " {target}")?;
+                        PragmaKind::Handle(targets) | PragmaKind::Unhandle(targets) => {
+                            write!(self.writer, "\n#{}", pragma.as_str())?;
+                            for (i, (t, r)) in targets.iter().enumerate() {
+                                if i > 0 {
+                                    write!(self.writer, ",")?;
+                                } else {
+                                    write!(self.writer, " ")?;
+                                }
+                                write!(self.writer, "{t}?{r}")?;
                             }
                         }
-                        _ => {
+                        PragmaKind::Redirect(target) => {
+                            write!(self.writer, "\n#redirect {target}")?;
+                        }
+                        PragmaKind::Unredirect => {
+                            write!(self.writer, "\n#unredirect")?;
+                        }
+                        PragmaKind::Other { name, targets } => {
+                            write!(self.writer, "\n#{name}")?;
                             for (i, t) in targets.iter().enumerate() {
                                 if i > 0 {
                                     write!(self.writer, ",")?;
@@ -1041,14 +1053,23 @@ mod tests {
     fn pragma_kind_as_str() {
         use crate::byte_str::ByteStr;
         use crate::protocol::PragmaKind;
-        assert_eq!(PragmaKind::Claim.as_str(), "claim");
-        assert_eq!(PragmaKind::Unclaim.as_str(), "unclaim");
-        assert_eq!(PragmaKind::Observe.as_str(), "observe");
-        assert_eq!(PragmaKind::Unobserve.as_str(), "unobserve");
-        assert_eq!(PragmaKind::Redirect.as_str(), "redirect");
-        assert_eq!(PragmaKind::Unredirect.as_str(), "unredirect");
+        assert_eq!(PragmaKind::Claim(vec![]).as_str(), "claim");
+        assert_eq!(PragmaKind::Unclaim(vec![]).as_str(), "unclaim");
+        assert_eq!(PragmaKind::Observe(vec![]).as_str(), "observe");
+        assert_eq!(PragmaKind::Unobserve(vec![]).as_str(), "unobserve");
         assert_eq!(
-            PragmaKind::Other(ByteStr::from("custom")).as_str(),
+            PragmaKind::Redirect(ByteStr::from("x")).as_str(),
+            "redirect"
+        );
+        assert_eq!(PragmaKind::Unredirect.as_str(), "unredirect");
+        assert_eq!(PragmaKind::Handle(vec![]).as_str(), "handle");
+        assert_eq!(PragmaKind::Unhandle(vec![]).as_str(), "unhandle");
+        assert_eq!(
+            PragmaKind::Other {
+                name: ByteStr::from("custom"),
+                targets: vec![]
+            }
+            .as_str(),
             "custom"
         );
     }
@@ -1152,10 +1173,7 @@ mod tests {
         let cmds2 = parse(payload).unwrap();
         assert_eq!(cmds.len(), cmds2.len());
         match &cmds2[0] {
-            Command::Pragma {
-                kind: crate::protocol::PragmaKind::Observe,
-                targets,
-            } => {
+            Command::Pragma(crate::protocol::PragmaKind::Observe(targets)) => {
                 assert_eq!(targets.len(), 3);
                 assert_eq!(targets[0], "view");
                 assert_eq!(targets[1], "text");

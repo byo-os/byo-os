@@ -383,10 +383,9 @@ impl PendingBatch {
                         });
                     }
                 }
-                byo::Command::Pragma {
-                    kind: byo::PragmaKind::Redirect | byo::PragmaKind::Unredirect,
-                    ..
-                } => {
+                byo::Command::Pragma(
+                    byo::PragmaKind::Redirect(_) | byo::PragmaKind::Unredirect,
+                ) => {
                     // Redirect/unredirect are consumed by the orchestrator —
                     // it injects its own redirect frames before passthrough.
                 }
@@ -394,7 +393,7 @@ impl PendingBatch {
                 | byo::Command::Ack { .. }
                 | byo::Command::Request { .. }
                 | byo::Command::Response { .. }
-                | byo::Command::Pragma { .. } => {
+                | byo::Command::Pragma(_) => {
                     // Events/requests/responses/pragmas in a batch are handled
                     // separately by the router. Pass through as-is.
                     out.push(cmd.clone());
@@ -459,17 +458,14 @@ pub fn qualify_and_serialize(commands: &[byo::Command], client: &str) -> Vec<u8>
                 qualify_into(&mut qid_buf, client, id);
                 write_patch(&mut buf, kind, &qid_buf, props);
             }
-            byo::Command::Pragma {
-                kind: byo::PragmaKind::Redirect | byo::PragmaKind::Unredirect,
-                ..
-            } => {
+            byo::Command::Pragma(byo::PragmaKind::Redirect(_) | byo::PragmaKind::Unredirect) => {
                 // Consumed by the orchestrator — not forwarded.
             }
             byo::Command::Event { .. }
             | byo::Command::Ack { .. }
             | byo::Command::Request { .. }
             | byo::Command::Response { .. }
-            | byo::Command::Pragma { .. } => {
+            | byo::Command::Pragma(_) => {
                 let mut em = byo::emitter::Emitter::new(&mut buf);
                 let _ = em.commands(std::slice::from_ref(cmd));
             }

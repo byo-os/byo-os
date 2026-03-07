@@ -91,17 +91,15 @@ impl Handler for StdinHandler {
 
                 // Scan for redirect/unredirect pragmas and update pipe_target.
                 for cmd in &commands {
-                    if let byo::Command::Pragma { kind, targets } = cmd {
-                        match kind {
-                            PragmaKind::Redirect => {
-                                if let Some(target) = targets.first() {
-                                    if target.as_ref() == "_" {
-                                        self.pipe_target.clear(); // discard
-                                    } else {
-                                        self.pipe_target = target.to_string();
-                                    }
-                                    debug!("redirect passthrough to {:?}", self.pipe_target);
+                    if let byo::Command::Pragma(pragma) = cmd {
+                        match pragma {
+                            PragmaKind::Redirect(target) => {
+                                if target.as_ref() == "_" {
+                                    self.pipe_target.clear(); // discard
+                                } else {
+                                    self.pipe_target = target.to_string();
                                 }
+                                debug!("redirect passthrough to {:?}", self.pipe_target);
                             }
                             PragmaKind::Unredirect => {
                                 self.pipe_target = "/".to_string();

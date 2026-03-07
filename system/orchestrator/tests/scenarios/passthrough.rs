@@ -50,9 +50,8 @@ async fn redirect_injects_frame() {
     let redirect = recv_byo_raw(&mut compositor_rx);
     let cmds = byo::parser::parse(&redirect).unwrap();
     assert!(
-        matches!(&cmds[0], Command::Pragma { kind, targets }
-            if matches!(kind, byo::PragmaKind::Redirect)
-               && targets.first().map(|t| t.as_ref()) == Some("app:term-a")
+        matches!(&cmds[0], Command::Pragma(byo::PragmaKind::Redirect(target))
+            if target.as_ref() == "app:term-a"
         ),
         "expected #redirect app:term-a, got: {redirect}"
     );
@@ -175,9 +174,7 @@ async fn unredirect_restores_root() {
     let unredirect = recv_byo_raw(&mut compositor_rx);
     let cmds = byo::parser::parse(&unredirect).unwrap();
     assert!(
-        matches!(&cmds[0], Command::Pragma { kind, .. }
-            if matches!(kind, byo::PragmaKind::Unredirect)
-        ),
+        matches!(&cmds[0], Command::Pragma(byo::PragmaKind::Unredirect)),
         "expected #unredirect, got: {unredirect}"
     );
     let data = recv_passthrough_raw(&mut compositor_rx);
@@ -202,13 +199,8 @@ async fn redirect_pragma_not_forwarded_to_observers() {
     let s = recv_byo_raw(&mut compositor_rx);
     let cmds = byo::parser::parse(&s).unwrap();
     assert!(
-        cmds.iter().all(|c| !matches!(
-            c,
-            Command::Pragma {
-                kind: byo::PragmaKind::Redirect,
-                ..
-            }
-        )),
+        cmds.iter()
+            .all(|c| !matches!(c, Command::Pragma(byo::PragmaKind::Redirect(_)))),
         "redirect pragma should not be forwarded: {s}"
     );
     assert!(
@@ -254,9 +246,7 @@ async fn default_and_redirected_interleave() {
     let unredirect = recv_byo_raw(&mut compositor_rx);
     let cmds = byo::parser::parse(&unredirect).unwrap();
     assert!(
-        matches!(&cmds[0], Command::Pragma { kind, .. }
-            if matches!(kind, byo::PragmaKind::Unredirect)
-        ),
+        matches!(&cmds[0], Command::Pragma(byo::PragmaKind::Unredirect)),
         "expected #unredirect when switching back to root: {unredirect}"
     );
     let data = recv_passthrough_raw(&mut compositor_rx);

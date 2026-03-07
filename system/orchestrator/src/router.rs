@@ -207,77 +207,51 @@ impl Router {
         let mut resync_pids: Vec<ProcessId> = Vec::new();
         for cmd in &commands {
             match cmd {
-                Command::Pragma {
-                    kind: PragmaKind::Claim,
-                    targets,
-                } => {
-                    for target in targets {
+                Command::Pragma(PragmaKind::Claim(types)) => {
+                    for target in types {
                         self.handle_claim(from, &client, target).await;
                     }
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Unclaim,
-                    targets,
-                } => {
-                    for target in targets {
+                Command::Pragma(PragmaKind::Unclaim(types)) => {
+                    for target in types {
                         self.handle_unclaim(from, &client, target).await;
                     }
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Observe,
-                    targets,
-                } => {
-                    for target in targets {
+                Command::Pragma(PragmaKind::Observe(types)) => {
+                    for target in types {
                         self.handle_observe(from, &client, target);
                     }
                     resync_pids.push(from);
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Unobserve,
-                    targets,
-                } => {
-                    for target in targets {
+                Command::Pragma(PragmaKind::Unobserve(types)) => {
+                    for target in types {
                         self.handle_unobserve(from, &client, target);
                     }
                     resync_pids.push(from);
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Redirect,
-                    targets,
-                } => {
-                    if let Some(target) = targets.first() {
-                        if target.as_ref() == "_" {
-                            self.passthrough_targets.insert(from, String::new());
-                        } else {
-                            self.passthrough_targets.insert(from, target.to_string());
-                        }
-                        tracing::debug!(
-                            "{client} redirect passthrough to {:?}",
-                            self.passthrough_targets[&from]
-                        );
+                Command::Pragma(PragmaKind::Redirect(target)) => {
+                    if target.as_ref() == "_" {
+                        self.passthrough_targets.insert(from, String::new());
+                    } else {
+                        self.passthrough_targets.insert(from, target.to_string());
                     }
+                    tracing::debug!(
+                        "{client} redirect passthrough to {:?}",
+                        self.passthrough_targets[&from]
+                    );
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Unredirect,
-                    ..
-                } => {
+                Command::Pragma(PragmaKind::Unredirect) => {
                     self.passthrough_targets.insert(from, "/".to_owned());
                     tracing::debug!("{client} unredirect passthrough to root tty");
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Handle,
-                    targets,
-                } => {
-                    for target in targets {
-                        self.register_handler(from, &client, target);
+                Command::Pragma(PragmaKind::Handle(targets)) => {
+                    for (type_name, request_kind) in targets {
+                        self.register_handler(from, &client, type_name, request_kind);
                     }
                 }
-                Command::Pragma {
-                    kind: PragmaKind::Unhandle,
-                    targets,
-                } => {
-                    for target in targets {
-                        self.unregister_handler(from, &client, target);
+                Command::Pragma(PragmaKind::Unhandle(targets)) => {
+                    for (type_name, request_kind) in targets {
+                        self.unregister_handler(from, &client, type_name, request_kind);
                     }
                 }
                 Command::Response {
@@ -920,25 +894,14 @@ impl Router {
         }
     }
 
-    /// Split a `type?request` target string, logging a warning on failure.
-    fn split_handler_target<'a>(
+    /// Register a handler for a (type, request) pair.
+    fn register_handler(
+        &mut self,
+        from: ProcessId,
         client: &str,
-        pragma: &str,
-        target: &'a str,
-    ) -> Option<(&'a str, &'a str)> {
-        let result = target.split_once('?');
-        if result.is_none() {
-            tracing::warn!("{client} #{pragma}: invalid target {target:?} (missing '?')");
-        }
-        result
-    }
-
-    /// Register a handler for a `type?request` pair.
-    fn register_handler(&mut self, from: ProcessId, client: &str, target: &str) {
-        let Some((type_name, request_kind)) = Self::split_handler_target(client, "handle", target)
-        else {
-            return;
-        };
+        type_name: &str,
+        request_kind: &str,
+    ) {
         if RequestKind::is_reserved(request_kind) {
             tracing::warn!(
                 "{client} #handle: rejecting reserved request kind '{request_kind}' — use #claim instead"
@@ -950,13 +913,14 @@ impl Router {
             .insert((type_name.to_owned(), request_kind.to_owned()), from);
     }
 
-    /// Unregister a handler for a `type?request` pair.
-    fn unregister_handler(&mut self, from: ProcessId, client: &str, target: &str) {
-        let Some((type_name, request_kind)) =
-            Self::split_handler_target(client, "unhandle", target)
-        else {
-            return;
-        };
+    /// Unregister a handler for a (type, request) pair.
+    fn unregister_handler(
+        &mut self,
+        from: ProcessId,
+        client: &str,
+        type_name: &str,
+        request_kind: &str,
+    ) {
         if self.lookup_handler(type_name, request_kind) == Some(from) {
             tracing::info!("{client} unregisters handler for {type_name}?{request_kind}");
             self.handlers
@@ -2507,7 +2471,7 @@ mod tests {
     fn register_handler() {
         let mut router = Router::new();
         let pid = ProcessId(1);
-        router.register_handler(pid, "compositor", "view?measure");
+        router.register_handler(pid, "compositor", "view", "measure");
         assert_eq!(
             router
                 .handlers
@@ -2520,7 +2484,7 @@ mod tests {
     fn register_handler_rejects_expand() {
         let mut router = Router::new();
         let pid = ProcessId(1);
-        router.register_handler(pid, "compositor", "button?expand");
+        router.register_handler(pid, "compositor", "button", "expand");
         assert!(router.handlers.is_empty());
     }
 
@@ -2528,8 +2492,8 @@ mod tests {
     fn unregister_handler() {
         let mut router = Router::new();
         let pid = ProcessId(1);
-        router.register_handler(pid, "compositor", "view?measure");
-        router.unregister_handler(pid, "compositor", "view?measure");
+        router.register_handler(pid, "compositor", "view", "measure");
+        router.unregister_handler(pid, "compositor", "view", "measure");
         assert!(router.handlers.is_empty());
     }
 
@@ -2538,8 +2502,8 @@ mod tests {
         let mut router = Router::new();
         let pid1 = ProcessId(1);
         let pid2 = ProcessId(2);
-        router.register_handler(pid1, "compositor", "view?measure");
-        router.unregister_handler(pid2, "other", "view?measure");
+        router.register_handler(pid1, "compositor", "view", "measure");
+        router.unregister_handler(pid2, "other", "view", "measure");
         // Should not remove since pid2 doesn't own it.
         assert_eq!(
             router
@@ -2593,8 +2557,8 @@ mod tests {
     fn handler_cleanup_on_disconnect() {
         let mut router = Router::new();
         let pid = ProcessId(1);
-        router.register_handler(pid, "compositor", "view?measure");
-        router.register_handler(pid, "compositor", "text?measure");
+        router.register_handler(pid, "compositor", "view", "measure");
+        router.register_handler(pid, "compositor", "text", "measure");
         // Simulate disconnect cleanup.
         router.handlers.retain(|_, &mut p| p != pid);
         assert!(router.handlers.is_empty());

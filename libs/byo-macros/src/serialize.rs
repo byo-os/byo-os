@@ -112,7 +112,7 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
             let kind_str = expect_literal(kind, "pragma kind")?;
             out.push_str(&kind_str);
             match kind_str.as_str() {
-                "claim" | "unclaim" | "observe" | "unobserve" => {
+                "claim" | "unclaim" | "observe" | "unobserve" | "handle" | "unhandle" => {
                     out.push(' ');
                     for (i, t) in targets.iter().enumerate() {
                         if i > 0 {

@@ -197,14 +197,9 @@ impl Codegen {
                 }
             }
             IrCommand::Pragma { kind, targets } => {
-                let kind_expr = self.gen_pragma_kind(kind);
-                let target_exprs: Vec<TokenStream> =
-                    targets.iter().map(|t| self.gen_bytestr_value(t)).collect();
+                let pragma_expr = self.gen_pragma_expr(kind, targets);
                 quote! {
-                    #acc.push(::byo::protocol::Command::Pragma {
-                        kind: #kind_expr,
-                        targets: ::std::vec![#(#target_exprs),*],
-                    });
+                    #acc.push(::byo::protocol::Command::Pragma(#pragma_expr));
                 }
             }
             IrCommand::Request {
@@ -370,14 +365,9 @@ impl Codegen {
                 }
             }
             IrCommand::Pragma { kind, targets } => {
-                let kind_expr = self.gen_pragma_kind(kind);
-                let target_exprs: Vec<TokenStream> =
-                    targets.iter().map(|t| self.gen_bytestr_value(t)).collect();
+                let pragma_expr = self.gen_pragma_expr(kind, targets);
                 quote! {
-                    ::byo::protocol::Command::Pragma {
-                        kind: #kind_expr,
-                        targets: ::std::vec![#(#target_exprs),*],
-                    }
+                    ::byo::protocol::Command::Pragma(#pragma_expr)
                 }
             }
             IrCommand::Request {
@@ -507,19 +497,75 @@ impl Codegen {
         }
     }
 
-    /// Generate a PragmaKind expression from an IrValue.
-    fn gen_pragma_kind(&mut self, val: &IrValue) -> TokenStream {
-        match val {
-            IrValue::Literal(s) => {
-                quote! { ::byo::protocol::PragmaKind::from_wire(#s) }
-            }
-            IrValue::Interpolation(expr) => {
-                let v = self.fresh_ident("v");
-                quote! {
-                    {
-                        let #v = #expr;
-                        ::byo::protocol::PragmaKind::from_wire(#v.to_string())
+    /// Generate a `PragmaKind` expression from IR-level kind and targets.
+    fn gen_pragma_expr(&mut self, kind: &IrValue, targets: &[IrValue]) -> TokenStream {
+        if let IrValue::Literal(k) = kind {
+            let target_exprs: Vec<TokenStream> =
+                targets.iter().map(|t| self.gen_bytestr_value(t)).collect();
+            match k.as_str() {
+                "claim" => {
+                    quote! { ::byo::protocol::PragmaKind::Claim(::std::vec![#(#target_exprs),*]) }
+                }
+                "unclaim" => {
+                    quote! { ::byo::protocol::PragmaKind::Unclaim(::std::vec![#(#target_exprs),*]) }
+                }
+                "observe" => {
+                    quote! { ::byo::protocol::PragmaKind::Observe(::std::vec![#(#target_exprs),*]) }
+                }
+                "unobserve" => {
+                    quote! { ::byo::protocol::PragmaKind::Unobserve(::std::vec![#(#target_exprs),*]) }
+                }
+                "redirect" => {
+                    let target = &target_exprs[0];
+                    quote! { ::byo::protocol::PragmaKind::Redirect(#target) }
+                }
+                "unredirect" => quote! { ::byo::protocol::PragmaKind::Unredirect },
+                "handle" | "unhandle" => {
+                    // Handle targets are combined "type?request" strings in the IR.
+                    // Split them at compile time into (ByteStr, ByteStr) tuples.
+                    let pair_exprs: Vec<TokenStream> = targets.iter().map(|t| {
+                        match t {
+                            IrValue::Literal(s) => {
+                                let (ty, req) = s.split_once('?').expect("handle target must contain '?'");
+                                quote! { (::byo::byte_str::ByteStr::from(#ty), ::byo::byte_str::ByteStr::from(#req)) }
+                            }
+                            IrValue::Interpolation(expr) => {
+                                let v = self.fresh_ident("v");
+                                quote! {
+                                    {
+                                        let #v: &str = (#expr).as_ref();
+                                        let (t, r) = #v.split_once('?').expect("handle target must contain '?'");
+                                        (::byo::byte_str::ByteStr::from(t), ::byo::byte_str::ByteStr::from(r))
+                                    }
+                                }
+                            }
+                        }
+                    }).collect();
+                    if k == "handle" {
+                        quote! { ::byo::protocol::PragmaKind::Handle(::std::vec![#(#pair_exprs),*]) }
+                    } else {
+                        quote! { ::byo::protocol::PragmaKind::Unhandle(::std::vec![#(#pair_exprs),*]) }
                     }
+                }
+                _ => {
+                    let name_expr = self.gen_bytestr_value(kind);
+                    quote! {
+                        ::byo::protocol::PragmaKind::Other {
+                            name: #name_expr,
+                            targets: ::std::vec![#(#target_exprs),*],
+                        }
+                    }
+                }
+            }
+        } else {
+            // Dynamic kind — must use Other variant
+            let name_expr = self.gen_bytestr_value(kind);
+            let target_exprs: Vec<TokenStream> =
+                targets.iter().map(|t| self.gen_bytestr_value(t)).collect();
+            quote! {
+                ::byo::protocol::PragmaKind::Other {
+                    name: #name_expr,
+                    targets: ::std::vec![#(#target_exprs),*],
                 }
             }
         }
