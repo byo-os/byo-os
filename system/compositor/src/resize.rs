@@ -37,7 +37,7 @@ impl ResizeSeqCounter {
 const MIN_CHANGE: f64 = 0.5;
 
 /// Extract (width, height, content_width, content_height) in logical pixels.
-fn compute_dimensions(computed: &ComputedNode) -> (f64, f64, f64, f64) {
+pub fn compute_dimensions(computed: &ComputedNode) -> (f64, f64, f64, f64) {
     let isf = computed.inverse_scale_factor as f64;
     let size = computed.size();
     let content = computed.content_size();

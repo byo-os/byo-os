@@ -5,6 +5,7 @@ mod font;
 mod id_map;
 mod io;
 mod kitty_gfx;
+mod measure;
 mod plugin;
 mod props;
 mod render;

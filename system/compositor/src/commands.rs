@@ -9,6 +9,7 @@ use crate::components::*;
 use crate::events::engine::{EngineHandle, EngineInput};
 use crate::id_map::IdMap;
 use crate::io::ByoBatch;
+use crate::measure::MeasureRequest;
 use crate::plugin::WorldScale;
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
@@ -38,6 +39,7 @@ pub fn process_commands(
     layer_renders: Query<&LayerRender>,
     primary_window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     world_scale: Res<WorldScale>,
+    mut measure_requests: MessageWriter<MeasureRequest>,
     engine: Option<Res<EngineHandle>>,
 ) {
     let scale_factor = primary_window
@@ -212,6 +214,17 @@ pub fn process_commands(
                             seq: *seq,
                             handled,
                             capture,
+                        });
+                    }
+                }
+
+                byo::Command::Request {
+                    kind, seq, targets, ..
+                } if kind.as_str() == "measure" => {
+                    if let Some(target) = targets.first() {
+                        measure_requests.write(MeasureRequest {
+                            target: target.as_ref().to_string(),
+                            seq: *seq,
                         });
                     }
                 }

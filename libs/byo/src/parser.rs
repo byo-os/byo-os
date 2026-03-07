@@ -1389,6 +1389,84 @@ mod tests {
     }
 
     #[test]
+    fn handle_mixed_request_kinds() {
+        let cmds = parse("#handle view?measure,text?accessibleDescription").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Handle(targets)) => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "measure");
+                assert_eq!(targets[1].0, "text");
+                assert_eq!(targets[1].1, "accessibleDescription");
+            }
+            _ => panic!("expected Handle pragma"),
+        }
+    }
+
+    #[test]
+    fn handle_dot_qualified_type() {
+        let cmds = parse("#handle org.example.Widget?measure").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Handle(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "org.example.Widget");
+                assert_eq!(targets[0].1, "measure");
+            }
+            _ => panic!("expected Handle pragma"),
+        }
+    }
+
+    #[test]
+    fn handle_round_trip() {
+        use crate::emitter::Emitter;
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        em.frame(|em| {
+            em.handle("view?measure")?;
+            em.handle_many(&["text?measure", "layer?measure"])?;
+            em.unhandle("view?measure")
+        })
+        .unwrap();
+
+        let wire = String::from_utf8(buf).unwrap();
+        let payload = wire
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 3);
+
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Handle(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "measure");
+            }
+            _ => panic!("expected Handle"),
+        }
+        match &cmds[1] {
+            Command::Pragma(PragmaKind::Handle(targets)) => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, "text");
+                assert_eq!(targets[1].0, "layer");
+            }
+            _ => panic!("expected Handle"),
+        }
+        match &cmds[2] {
+            Command::Pragma(PragmaKind::Unhandle(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+            }
+            _ => panic!("expected Unhandle"),
+        }
+    }
+
+    #[test]
     fn handle_missing_question() {
         assert!(parse("#handle view").is_err());
     }
@@ -1396,6 +1474,55 @@ mod tests {
     #[test]
     fn handle_missing_request_kind() {
         assert!(parse("#handle view?").is_err());
+    }
+
+    #[test]
+    fn handle_missing_type_name() {
+        assert!(parse("#handle ?measure").is_err());
+    }
+
+    #[test]
+    fn request_measure() {
+        let cmds = parse("?measure 0 app:sidebar").unwrap();
+        match &cmds[0] {
+            Command::Request {
+                kind,
+                seq,
+                targets,
+                props,
+            } => {
+                assert_eq!(*kind, RequestKind::Other("measure".into()));
+                assert_eq!(*seq, 0);
+                assert_eq!(targets[0], "app:sidebar");
+                assert!(props.is_empty());
+            }
+            _ => panic!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn response_measure() {
+        let cmds =
+            parse(".measure 0 width=120.0 height=80.0 content-width=100.0 content-height=60.0")
+                .unwrap();
+        match &cmds[0] {
+            Command::Response {
+                kind,
+                seq,
+                props,
+                body,
+            } => {
+                assert_eq!(*kind, ResponseKind::Other("measure".into()));
+                assert_eq!(*seq, 0);
+                assert_eq!(props.len(), 4);
+                assert_eq!(props[0], Prop::val("width", "120.0"));
+                assert_eq!(props[1], Prop::val("height", "80.0"));
+                assert_eq!(props[2], Prop::val("content-width", "100.0"));
+                assert_eq!(props[3], Prop::val("content-height", "60.0"));
+                assert!(body.is_none());
+            }
+            _ => panic!("expected Response"),
+        }
     }
 
     #[test]

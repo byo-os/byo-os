@@ -399,82 +399,91 @@ impl<W: io::Write> Emitter<W> {
 
     // -- Pragmas (#) ---------------------------------------------------------
 
+    /// Write `#name target` — single-target pragma.
+    fn pragma(&mut self, name: &str, target: &str) -> io::Result<()> {
+        write!(self.writer, "\n#{name} {target}")
+    }
+
+    /// Write `#name t1,t2,...` — multi-target pragma.
+    fn pragma_many(&mut self, name: &str, targets: &[&str]) -> io::Result<()> {
+        write!(self.writer, "\n#{name} ")?;
+        for (i, t) in targets.iter().enumerate() {
+            if i > 0 {
+                self.writer.write_all(b",")?;
+            }
+            self.writer.write_all(t.as_bytes())?;
+        }
+        Ok(())
+    }
+
     /// `#claim type` — Claim ownership of an object type.
     pub fn claim(&mut self, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n#claim {target_type}")
+        self.pragma("claim", target_type)
     }
 
     /// `#claim type,type,...` — Claim multiple types.
     pub fn claim_many(&mut self, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n#claim ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
+        self.pragma_many("claim", types)
     }
 
     /// `#unclaim type` — Release claim on an object type.
     pub fn unclaim(&mut self, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n#unclaim {target_type}")
+        self.pragma("unclaim", target_type)
     }
 
     /// `#unclaim type,type,...` — Release claim on multiple types.
     pub fn unclaim_many(&mut self, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n#unclaim ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
+        self.pragma_many("unclaim", types)
     }
 
     /// `#observe type` — Observe final output for an object type.
     pub fn observe(&mut self, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n#observe {target_type}")
+        self.pragma("observe", target_type)
     }
 
     /// `#observe type,type,...` — Observe multiple types.
     pub fn observe_many(&mut self, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n#observe ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
+        self.pragma_many("observe", types)
     }
 
     /// `#unobserve type` — Stop observing an object type.
     pub fn unobserve(&mut self, target_type: &str) -> io::Result<()> {
-        write!(self.writer, "\n#unobserve {target_type}")
+        self.pragma("unobserve", target_type)
     }
 
     /// `#unobserve type,type,...` — Stop observing multiple types.
     pub fn unobserve_many(&mut self, types: &[&str]) -> io::Result<()> {
-        write!(self.writer, "\n#unobserve ")?;
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                write!(self.writer, ",")?;
-            }
-            write!(self.writer, "{t}")?;
-        }
-        Ok(())
+        self.pragma_many("unobserve", types)
     }
 
     /// `#redirect target` — Route passthrough to named tty.
     pub fn redirect(&mut self, target: &str) -> io::Result<()> {
-        write!(self.writer, "\n#redirect {target}")
+        self.pragma("redirect", target)
     }
 
     /// `#unredirect` — Restore default passthrough routing.
     pub fn unredirect(&mut self) -> io::Result<()> {
         write!(self.writer, "\n#unredirect")
+    }
+
+    /// `#handle type?request` — Register as handler for a request type.
+    pub fn handle(&mut self, target: &str) -> io::Result<()> {
+        self.pragma("handle", target)
+    }
+
+    /// `#handle type?request,...` — Register as handler for multiple request types.
+    pub fn handle_many(&mut self, targets: &[&str]) -> io::Result<()> {
+        self.pragma_many("handle", targets)
+    }
+
+    /// `#unhandle type?request` — Unregister as handler for a request type.
+    pub fn unhandle(&mut self, target: &str) -> io::Result<()> {
+        self.pragma("unhandle", target)
+    }
+
+    /// `#unhandle type?request,...` — Unregister as handler for multiple request types.
+    pub fn unhandle_many(&mut self, targets: &[&str]) -> io::Result<()> {
+        self.pragma_many("unhandle", targets)
     }
 
     // -- Requests/Responses ---------------------------------------------------
@@ -1155,6 +1164,169 @@ mod tests {
     fn claim_many_output() {
         let out = emit(|em| em.claim_many(&["button", "slider"]));
         assert_eq!(out, "\x1b_B\n#claim button,slider\n\x1b\\");
+    }
+
+    #[test]
+    fn handle_single_output() {
+        let out = emit(|em| em.handle("view?measure"));
+        assert_eq!(out, "\x1b_B\n#handle view?measure\n\x1b\\");
+    }
+
+    #[test]
+    fn handle_many_output() {
+        let out = emit(|em| em.handle_many(&["view?measure", "text?measure"]));
+        assert_eq!(out, "\x1b_B\n#handle view?measure,text?measure\n\x1b\\");
+    }
+
+    #[test]
+    fn unhandle_output() {
+        let out = emit(|em| em.unhandle("view?measure"));
+        assert_eq!(out, "\x1b_B\n#unhandle view?measure\n\x1b\\");
+    }
+
+    #[test]
+    fn unhandle_many_output() {
+        let out = emit(|em| em.unhandle_many(&["view?measure", "text?measure"]));
+        assert_eq!(out, "\x1b_B\n#unhandle view?measure,text?measure\n\x1b\\");
+    }
+
+    #[test]
+    fn measure_request_output() {
+        let out = emit(|em| em.request("measure", 0, "app:sidebar", &[]));
+        assert_eq!(out, "\x1b_B\n?measure 0 app:sidebar\n\x1b\\");
+    }
+
+    #[test]
+    fn measure_response_output() {
+        let out = emit(|em| {
+            em.response(
+                "measure",
+                0,
+                &[
+                    Prop::val("width", "120.0"),
+                    Prop::val("height", "80.0"),
+                    Prop::val("content-width", "100.0"),
+                    Prop::val("content-height", "60.0"),
+                ],
+            )
+        });
+        assert_eq!(
+            out,
+            "\x1b_B\n.measure 0 width=120.0 height=80.0 content-width=100.0 content-height=60.0\n\x1b\\"
+        );
+    }
+
+    #[test]
+    fn handle_commands_round_trip() {
+        use crate::parser::parse;
+
+        let cmds = parse("#handle view?measure,text?measure").unwrap();
+        let out = emit(|em| em.commands(&cmds));
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds2 = parse(payload).unwrap();
+        assert_eq!(cmds.len(), cmds2.len());
+        match &cmds2[0] {
+            Command::Pragma(crate::protocol::PragmaKind::Handle(targets)) => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "measure");
+                assert_eq!(targets[1].0, "text");
+                assert_eq!(targets[1].1, "measure");
+            }
+            _ => panic!("expected Handle"),
+        }
+    }
+
+    #[test]
+    fn unhandle_commands_round_trip() {
+        use crate::parser::parse;
+
+        let cmds = parse("#unhandle view?measure").unwrap();
+        let out = emit(|em| em.commands(&cmds));
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds2 = parse(payload).unwrap();
+        assert_eq!(cmds.len(), cmds2.len());
+        match &cmds2[0] {
+            Command::Pragma(crate::protocol::PragmaKind::Unhandle(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "measure");
+            }
+            _ => panic!("expected Unhandle"),
+        }
+    }
+
+    #[test]
+    fn measure_request_round_trip() {
+        use crate::parser::parse;
+        use crate::protocol::RequestKind;
+
+        let out = emit(|em| em.request("measure", 42, "app:sidebar", &[]));
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Request {
+                kind, seq, targets, ..
+            } => {
+                assert_eq!(*kind, RequestKind::Other("measure".into()));
+                assert_eq!(*seq, 42);
+                assert_eq!(targets[0], "app:sidebar");
+            }
+            _ => panic!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn measure_response_round_trip() {
+        use crate::parser::parse;
+        use crate::protocol::ResponseKind;
+
+        let out = emit(|em| {
+            em.response(
+                "measure",
+                7,
+                &[Prop::val("width", "120.0"), Prop::val("height", "80.0")],
+            )
+        });
+        let payload = out
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Response {
+                kind, seq, props, ..
+            } => {
+                assert_eq!(*kind, ResponseKind::Other("measure".into()));
+                assert_eq!(*seq, 7);
+                assert_eq!(props[0], Prop::val("width", "120.0"));
+                assert_eq!(props[1], Prop::val("height", "80.0"));
+            }
+            _ => panic!("expected Response"),
+        }
     }
 
     #[test]

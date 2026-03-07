@@ -293,7 +293,7 @@ impl Codegen {
         // Optimize known literal kinds to direct emitter methods
         if let IrValue::Literal(k) = kind {
             match k.as_str() {
-                "claim" | "unclaim" | "observe" | "unobserve" => {
+                "claim" | "unclaim" | "observe" | "unobserve" | "handle" | "unhandle" => {
                     let method = format_ident!("{k}");
                     let many_method = format_ident!("{k}_many");
 

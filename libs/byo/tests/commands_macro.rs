@@ -219,6 +219,113 @@ fn byo_commands_splice() {
 }
 
 #[test]
+fn handle_pragma() {
+    let cmds = byo_vec! { #handle view?measure };
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Pragma(PragmaKind::Handle(targets)) => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].0.as_ref(), "view");
+            assert_eq!(targets[0].1.as_ref(), "measure");
+        }
+        _ => panic!("expected Handle pragma"),
+    }
+}
+
+#[test]
+fn handle_pragma_multiple() {
+    let cmds = byo_vec! { #handle view?measure,text?measure,layer?measure };
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Pragma(PragmaKind::Handle(targets)) => {
+            assert_eq!(targets.len(), 3);
+            assert_eq!(targets[0].0.as_ref(), "view");
+            assert_eq!(targets[1].0.as_ref(), "text");
+            assert_eq!(targets[2].0.as_ref(), "layer");
+            // All request kinds are "measure"
+            for t in targets {
+                assert_eq!(t.1.as_ref(), "measure");
+            }
+        }
+        _ => panic!("expected Handle pragma"),
+    }
+}
+
+#[test]
+fn unhandle_pragma() {
+    let cmds = byo_vec! { #unhandle view?measure };
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Pragma(PragmaKind::Unhandle(targets)) => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].0.as_ref(), "view");
+            assert_eq!(targets[0].1.as_ref(), "measure");
+        }
+        _ => panic!("expected Unhandle pragma"),
+    }
+}
+
+#[test]
+fn measure_request() {
+    let cmds = byo_vec! { ?measure 0 sidebar };
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Request {
+            kind, seq, targets, ..
+        } => {
+            assert_eq!(*kind, RequestKind::Other("measure".into()));
+            assert_eq!(*seq, 0);
+            assert_eq!(targets[0].as_ref(), "sidebar");
+        }
+        _ => panic!("expected Request"),
+    }
+}
+
+#[test]
+fn measure_response() {
+    let w = "120.0";
+    let h = "80.0";
+    let cmds = byo_vec! { .measure 0 width={w} height={h} };
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Response {
+            kind,
+            seq,
+            props,
+            body,
+        } => {
+            assert_eq!(*kind, ResponseKind::Other("measure".into()));
+            assert_eq!(*seq, 0);
+            assert_eq!(props[0], Prop::val("width", "120.0"));
+            assert_eq!(props[1], Prop::val("height", "80.0"));
+            assert!(body.is_none());
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn handle_round_trip() {
+    let cmds = byo_vec! {
+        #handle view?measure,text?measure
+        #unhandle layer?measure
+    };
+    assert_eq!(cmds.len(), 2);
+
+    let serialized = cmds_to_string(&cmds);
+    let reparsed = byo::parser::parse(&serialized).unwrap();
+    assert_eq!(cmds, reparsed);
+}
+
+#[test]
+fn measure_round_trip() {
+    let cmds = byo_vec! { .measure 42 width=100.0 height=50.0 };
+    let serialized = cmds_to_string(&cmds);
+    let reparsed = byo::parser::parse(&serialized).unwrap();
+    assert_eq!(cmds, reparsed);
+}
+
+#[test]
 fn round_trip_parity() {
     // byo_vec! → Emitter::commands() → parse() should round-trip.
     let cmds = byo_vec! {

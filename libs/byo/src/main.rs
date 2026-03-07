@@ -93,6 +93,7 @@ fn cmd_emit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 struct RecordWriter<'a> {
     out: &'a mut dyn Write,
     json: bool,
+    empty: &'a str,
     err: Option<io::Error>,
 }
 
@@ -115,7 +116,7 @@ impl Handler for RecordWriter<'_> {
                 return;
             }
         };
-        if let Err(e) = write_records(&cmds, self.out, self.json) {
+        if let Err(e) = write_records(&cmds, self.out, self.json, self.empty) {
             self.err = Some(e);
         }
     }
@@ -124,20 +125,35 @@ impl Handler for RecordWriter<'_> {
 fn cmd_parse(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = false;
     let mut json = false;
-    for arg in args {
+    let mut empty: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--raw" => raw = true,
             "--json" => json = true,
+            "--empty" => {
+                empty = Some(
+                    iter.next()
+                        .ok_or("parse: --empty requires a value")?
+                        .clone(),
+                );
+            }
+            other if other.starts_with("--empty=") => {
+                empty = Some(other["--empty=".len()..].to_string());
+            }
             other => return Err(format!("parse: unknown flag '{other}'").into()),
         }
     }
+    // Resolve: --empty flag > BYO_EMPTY env > default "_"
+    let empty =
+        empty.unwrap_or_else(|| std::env::var("BYO_EMPTY").unwrap_or_else(|_| "_".to_string()));
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     if raw {
         let mut input = String::new();
         io::stdin().read_to_string(&mut input)?;
         let cmds = parse(&input)?;
-        write_records(&cmds, &mut out, json)?;
+        write_records(&cmds, &mut out, json, &empty)?;
     } else {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -152,6 +168,7 @@ fn cmd_parse(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let mut handler = RecordWriter {
                     out: &mut out,
                     json,
+                    empty: &empty,
                     err: None,
                 };
                 scanner.feed(&buf[..n], &mut handler);
@@ -283,25 +300,44 @@ fn cmd_props(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_children(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
-    for arg in args {
+    let mut empty: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--empty" => {
+                empty = Some(
+                    iter.next()
+                        .ok_or("children: --empty requires a value")?
+                        .clone(),
+                );
+            }
+            other if other.starts_with("--empty=") => {
+                empty = Some(other["--empty=".len()..].to_string());
+            }
             other => return Err(format!("children: unknown flag '{other}'").into()),
         }
     }
+    let empty =
+        empty.unwrap_or_else(|| std::env::var("BYO_EMPTY").unwrap_or_else(|_| "_".to_string()));
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let cmds = parse(&input)?;
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-    write_records(&cmds, &mut out, json)?;
+    write_records(&cmds, &mut out, json, &empty)?;
     out.flush()?;
     Ok(())
 }
 
 // -- record formatting --------------------------------------------------------
 
-fn write_records(cmds: &[Command], out: &mut (impl Write + ?Sized), json: bool) -> io::Result<()> {
+fn write_records(
+    cmds: &[Command],
+    out: &mut (impl Write + ?Sized),
+    json: bool,
+    empty: &str,
+) -> io::Result<()> {
     let mut i = 0;
     while i < cmds.len() {
         if matches!(cmds[i], Command::Push { .. } | Command::Pop) {
@@ -313,7 +349,7 @@ fn write_records(cmds: &[Command], out: &mut (impl Write + ?Sized), json: bool) 
             write_json_obj(&cmds[i], body, out)?;
             out.write_all(b"\n")?;
         } else {
-            write_tsv_record(&cmds[i], body, out)?;
+            write_tsv_record(&cmds[i], body, empty, out)?;
         }
         i = next;
     }
@@ -355,18 +391,34 @@ fn collect_children(cmds: &[Command], i: usize) -> (Option<&[Command]>, usize) {
 fn write_tsv_record(
     cmd: &Command,
     body_cmds: Option<&[Command]>,
+    empty: &str,
     out: &mut (impl Write + ?Sized),
 ) -> io::Result<()> {
-    let body = body_cmds.map(serialize_body).unwrap_or_default();
+    // Fields: OP  KIND  SEQ  ID  PROPS  BODY
+    // Empty fields use the placeholder to prevent bash `read` IFS tab-collapsing.
+    let e = empty;
+    let f = |s: String| -> String { if s.is_empty() { e.to_string() } else { s } };
+    let body = body_cmds
+        .map(serialize_body)
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| e.to_string());
     match cmd {
         Command::Upsert { kind, id, props } => {
-            writeln!(out, "+\t{kind}\t\t{id}\t{}\t{body}", serialize_props(props))
+            writeln!(
+                out,
+                "+\t{kind}\t{e}\t{id}\t{}\t{body}",
+                f(serialize_props(props))
+            )
         }
         Command::Destroy { kind, id } => {
-            writeln!(out, "-\t{kind}\t\t{id}\t\t")
+            writeln!(out, "-\t{kind}\t{e}\t{id}\t{e}\t{e}")
         }
         Command::Patch { kind, id, props } => {
-            writeln!(out, "@\t{kind}\t\t{id}\t{}\t{body}", serialize_props(props))
+            writeln!(
+                out,
+                "@\t{kind}\t{e}\t{id}\t{}\t{body}",
+                f(serialize_props(props))
+            )
         }
         Command::Event {
             kind,
@@ -375,28 +427,30 @@ fn write_tsv_record(
             props,
         } => writeln!(
             out,
-            "!\t{}\t{seq}\t{id}\t{}\t",
+            "!\t{}\t{seq}\t{id}\t{}\t{e}",
             kind.as_str(),
-            serialize_props(props)
+            f(serialize_props(props))
         ),
         Command::Ack { kind, seq, props } => writeln!(
             out,
-            "!ack\t{}\t{seq}\t\t{}\t",
+            "!ack\t{}\t{seq}\t{e}\t{}\t{e}",
             kind.as_str(),
-            serialize_props(props)
+            f(serialize_props(props))
         ),
         Command::Request {
             kind,
             seq,
             targets,
             props,
-        } => writeln!(
-            out,
-            "?\t{}\t{seq}\t{}\t{}\t",
-            kind.as_str(),
-            targets.join(","),
-            serialize_props(props)
-        ),
+        } => {
+            writeln!(
+                out,
+                "?\t{}\t{seq}\t{}\t{}\t{e}",
+                kind.as_str(),
+                f(targets.join(",")),
+                f(serialize_props(props))
+            )
+        }
         Command::Response {
             kind,
             seq,
@@ -406,16 +460,17 @@ fn write_tsv_record(
             let b = resp_body
                 .as_ref()
                 .map(|b| serialize_body(b))
-                .unwrap_or_default();
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| e.to_string());
             writeln!(
                 out,
-                ".\t{}\t{seq}\t\t{}\t{b}",
+                ".\t{}\t{seq}\t{e}\t{}\t{b}",
                 kind.as_str(),
-                serialize_props(props)
+                f(serialize_props(props))
             )
         }
         Command::Pragma(pragma) => {
-            writeln!(out, "#\t{}\t\t\t\t", pragma.as_str())
+            writeln!(out, "#\t{}\t{e}\t{e}\t{e}\t{e}", pragma.as_str())
         }
         Command::Push { .. } | Command::Pop => Ok(()),
     }

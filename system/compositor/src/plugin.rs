@@ -9,6 +9,7 @@ use crate::font;
 use crate::id_map::IdMap;
 use crate::io::{self, ByoBatch};
 use crate::kitty_gfx;
+use crate::measure;
 use crate::resize;
 use crate::scroll;
 use crate::style;
@@ -84,6 +85,7 @@ impl Plugin for ByoPlugin {
                     .chain()
                     .before(UiSystems::Prepare),
             )
+            .add_plugins(measure::MeasurePlugin)
             .add_systems(
                 PostUpdate,
                 resize::emit_resize_events.after(UiSystems::Prepare),
