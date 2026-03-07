@@ -143,6 +143,9 @@ while IFS=$'\t' read -r OP KIND SEQ ID PROPS BODY; do
               class=\"text-sm text-zinc-400 font-mono\"
           }
         }"
+
+        # Scroll to bottom (large value gets clamped to max)
+        send "@scroll-view results-scroll scroll-y=999999"
       fi
       ;;
 
