@@ -73,6 +73,8 @@ pub struct Router {
     processes: HashMap<ProcessId, Process>,
     /// Type name → ONE claiming daemon (expansion ownership).
     claims: HashMap<String, ProcessId>,
+    /// (type_name, request_kind) → ONE handler process.
+    handlers: HashMap<(String, String), ProcessId>,
     /// Type name → MULTIPLE observer processes (final output consumers).
     observers: HashMap<String, Vec<ProcessId>>,
     /// Reverse index: observer PID → set of observed type names.
@@ -119,6 +121,7 @@ impl Default for Router {
         Self {
             processes: HashMap::new(),
             claims: HashMap::new(),
+            handlers: HashMap::new(),
             observers: HashMap::new(),
             observer_types: HashMap::new(),
             state: ObjectTree::new(),
@@ -260,6 +263,22 @@ impl Router {
                 } => {
                     self.passthrough_targets.insert(from, "/".to_owned());
                     tracing::debug!("{client} unredirect passthrough to root tty");
+                }
+                Command::Pragma {
+                    kind: PragmaKind::Handle,
+                    targets,
+                } => {
+                    for target in targets {
+                        self.register_handler(from, &client, target);
+                    }
+                }
+                Command::Pragma {
+                    kind: PragmaKind::Unhandle,
+                    targets,
+                } => {
+                    for target in targets {
+                        self.unregister_handler(from, &client, target);
+                    }
                 }
                 Command::Response {
                     kind: ResponseKind::Expand,
@@ -722,6 +741,9 @@ impl Router {
         // Remove all claims for this process.
         self.claims.retain(|_, &mut pid| pid != process);
 
+        // Remove all handler registrations for this process.
+        self.handlers.retain(|_, &mut pid| pid != process);
+
         // Remove all observer entries for this process.
         for observers in self.observers.values_mut() {
             observers.retain(|&pid| pid != process);
@@ -896,6 +918,134 @@ impl Router {
         if self.claims.get(target_type) == Some(&from) {
             self.claims.remove(target_type);
         }
+    }
+
+    /// Split a `type?request` target string, logging a warning on failure.
+    fn split_handler_target<'a>(
+        client: &str,
+        pragma: &str,
+        target: &'a str,
+    ) -> Option<(&'a str, &'a str)> {
+        let result = target.split_once('?');
+        if result.is_none() {
+            tracing::warn!("{client} #{pragma}: invalid target {target:?} (missing '?')");
+        }
+        result
+    }
+
+    /// Register a handler for a `type?request` pair.
+    fn register_handler(&mut self, from: ProcessId, client: &str, target: &str) {
+        let Some((type_name, request_kind)) = Self::split_handler_target(client, "handle", target)
+        else {
+            return;
+        };
+        if RequestKind::is_reserved(request_kind) {
+            tracing::warn!(
+                "{client} #handle: rejecting reserved request kind '{request_kind}' — use #claim instead"
+            );
+            return;
+        }
+        tracing::info!("{client} registers handler for {type_name}?{request_kind}");
+        self.handlers
+            .insert((type_name.to_owned(), request_kind.to_owned()), from);
+    }
+
+    /// Unregister a handler for a `type?request` pair.
+    fn unregister_handler(&mut self, from: ProcessId, client: &str, target: &str) {
+        let Some((type_name, request_kind)) =
+            Self::split_handler_target(client, "unhandle", target)
+        else {
+            return;
+        };
+        if self.lookup_handler(type_name, request_kind) == Some(from) {
+            tracing::info!("{client} unregisters handler for {type_name}?{request_kind}");
+            self.handlers
+                .remove(&(type_name.to_owned(), request_kind.to_owned()));
+        }
+    }
+
+    /// Look up a handler by borrowed key, avoiding allocation for HashMap lookup.
+    fn lookup_handler(&self, type_name: &str, request_kind: &str) -> Option<ProcessId> {
+        // Linear scan avoids allocating owned Strings for HashMap::get.
+        // The handlers map is expected to be small (tens of entries).
+        self.handlers
+            .iter()
+            .find(|((t, r), _)| t == type_name && r == request_kind)
+            .map(|(_, &pid)| pid)
+    }
+
+    /// BFS through expansion children to find a handler for the given request kind.
+    ///
+    /// Walks the expansion subtree of `qid` breadth-first, checking if any
+    /// child's type has an explicit handler registered for `request_kind`.
+    fn resolve_handler(&self, qid: &QualifiedId, request_kind: &str) -> Option<ProcessId> {
+        use std::collections::VecDeque;
+
+        let obj = self.state.get(qid)?;
+        let mut queue: VecDeque<&QualifiedId> = obj.children.iter().collect();
+        let mut visited: HashSet<&QualifiedId> = HashSet::new();
+
+        while let Some(child_qid) = queue.pop_front() {
+            if !visited.insert(child_qid) {
+                continue;
+            }
+
+            let Some(child_obj) = self.state.get(child_qid) else {
+                continue;
+            };
+
+            let child_type = match &child_obj.kind {
+                ObjectKind::Type(t) => t.as_str(),
+                ObjectKind::SlotContent | ObjectKind::Slot => {
+                    // Follow slot_ref links for slots.
+                    if let Some(ref slot_ref) = child_obj.slot_ref
+                        && let Some(linked) = self.state.get(slot_ref)
+                    {
+                        queue.extend(linked.children.iter());
+                    }
+                    // Also traverse direct children of slot nodes.
+                    queue.extend(child_obj.children.iter());
+                    continue;
+                }
+            };
+
+            if let Some(pid) = self.lookup_handler(child_type, request_kind) {
+                return Some(pid);
+            }
+
+            queue.extend(child_obj.children.iter());
+        }
+
+        None
+    }
+
+    /// Resolve the target process for a custom request using 3-tier strategy.
+    ///
+    /// Returns `None` if no suitable handler is found or all candidates are
+    /// the sender (to prevent routing back to self).
+    fn resolve_request_handler(
+        &self,
+        from: ProcessId,
+        obj_type: &str,
+        owner_pid: ProcessId,
+        qid: &QualifiedId,
+        request_kind: &str,
+    ) -> Option<ProcessId> {
+        // Tier 1: Explicit handler for (obj_type, request_kind).
+        if let Some(pid) = self.lookup_handler(obj_type, request_kind)
+            && pid != from
+        {
+            return Some(pid);
+        }
+
+        // Tier 2: Owner of the target object.
+        if owner_pid != from {
+            return Some(owner_pid);
+        }
+
+        // Tier 3: BFS fallback through expansion children.
+        self.resolve_handler(qid, request_kind)
+            .filter(|&pid| pid != from)
     }
 
     /// Handle a `#observe` pragma — observe final output for a type (fire-and-forget).
@@ -1103,10 +1253,10 @@ impl Router {
         );
     }
 
-    /// Route a custom request to the owner of the target object.
-    ///
-    /// Same pattern as event routing: qualify target, look up owner,
-    /// remap seq per-destination, dequalify, forward, store pending response.
+    /// Route a custom request using 3-tier strategy:
+    /// 1. Explicit handler: `handlers[(obj_type, request_kind)]`
+    /// 2. Owner: the process that created the target object
+    /// 3. BFS fallback: walk expansion children for a handler match
     async fn handle_request(
         &mut self,
         from: ProcessId,
@@ -1124,14 +1274,22 @@ impl Router {
             None => return,
         };
 
-        let target_pid = match self.state.get(&qid) {
-            Some(obj) => obj.data,
+        let obj = match self.state.get(&qid) {
+            Some(o) => o,
             None => return, // Object doesn't exist — drop silently
         };
 
-        if target_pid == from {
+        let obj_type = match &obj.kind {
+            ObjectKind::Type(t) => t.as_str(),
+            _ => return,
+        };
+        let owner_pid = obj.data;
+
+        let Some(target_pid) =
+            self.resolve_request_handler(from, obj_type, owner_pid, &qid, kind_name)
+        else {
             return;
-        }
+        };
 
         let dest_client = match self.client_name(target_pid) {
             Some(n) => n.to_owned(),
@@ -2343,5 +2501,102 @@ mod tests {
             remap_value("url($img(5))/path", &map),
             "url($img(500))/path"
         );
+    }
+
+    #[test]
+    fn register_handler() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_handler(pid, "compositor", "view?measure");
+        assert_eq!(
+            router
+                .handlers
+                .get(&("view".to_owned(), "measure".to_owned())),
+            Some(&pid)
+        );
+    }
+
+    #[test]
+    fn register_handler_rejects_expand() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_handler(pid, "compositor", "button?expand");
+        assert!(router.handlers.is_empty());
+    }
+
+    #[test]
+    fn unregister_handler() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_handler(pid, "compositor", "view?measure");
+        router.unregister_handler(pid, "compositor", "view?measure");
+        assert!(router.handlers.is_empty());
+    }
+
+    #[test]
+    fn unregister_handler_wrong_owner() {
+        let mut router = Router::new();
+        let pid1 = ProcessId(1);
+        let pid2 = ProcessId(2);
+        router.register_handler(pid1, "compositor", "view?measure");
+        router.unregister_handler(pid2, "other", "view?measure");
+        // Should not remove since pid2 doesn't own it.
+        assert_eq!(
+            router
+                .handlers
+                .get(&("view".to_owned(), "measure".to_owned())),
+            Some(&pid1)
+        );
+    }
+
+    #[test]
+    fn resolve_handler_direct_match() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        let qid = QualifiedId::parse("app:root").unwrap();
+        // Insert a view object with a child that has handler.
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            ProcessId(2),
+        );
+        let child_qid = QualifiedId::parse("controls:child").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &child_qid,
+            &IndexMap::new(),
+            pid,
+        );
+        router.state.set_parent(&child_qid, &qid);
+        router
+            .handlers
+            .insert(("view".to_owned(), "measure".to_owned()), pid);
+
+        assert_eq!(router.resolve_handler(&qid, "measure"), Some(pid));
+    }
+
+    #[test]
+    fn resolve_handler_no_match() {
+        let mut router = Router::new();
+        let qid = QualifiedId::parse("app:root").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            ProcessId(1),
+        );
+        assert_eq!(router.resolve_handler(&qid, "measure"), None);
+    }
+
+    #[test]
+    fn handler_cleanup_on_disconnect() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_handler(pid, "compositor", "view?measure");
+        router.register_handler(pid, "compositor", "text?measure");
+        // Simulate disconnect cleanup.
+        router.handlers.retain(|_, &mut p| p != pid);
+        assert!(router.handlers.is_empty());
     }
 }

@@ -372,6 +372,10 @@ pub enum PragmaKind {
     Redirect,
     /// `#unredirect` — restore default passthrough routing
     Unredirect,
+    /// `#handle` — register as handler for (type, request) pairs
+    Handle,
+    /// `#unhandle` — release handler registration
+    Unhandle,
     /// Custom pragma
     Other(ByteStr),
 }
@@ -386,6 +390,8 @@ impl PragmaKind {
             PragmaKind::Unobserve => "unobserve",
             PragmaKind::Redirect => "redirect",
             PragmaKind::Unredirect => "unredirect",
+            PragmaKind::Handle => "handle",
+            PragmaKind::Unhandle => "unhandle",
             PragmaKind::Other(s) => s,
         }
     }
@@ -400,6 +406,8 @@ impl PragmaKind {
             "unobserve" => PragmaKind::Unobserve,
             "redirect" => PragmaKind::Redirect,
             "unredirect" => PragmaKind::Unredirect,
+            "handle" => PragmaKind::Handle,
+            "unhandle" => PragmaKind::Unhandle,
             _ => PragmaKind::Other(s),
         }
     }
@@ -424,6 +432,14 @@ impl RequestKind {
             RequestKind::Expand => "expand",
             RequestKind::Other(s) => s,
         }
+    }
+
+    /// Returns `true` if `name` is a reserved built-in request kind.
+    ///
+    /// Reserved request kinds (like `"expand"`) cannot be registered
+    /// via `#handle` — use `#claim` for expansion handling instead.
+    pub fn is_reserved(name: &str) -> bool {
+        matches!(name, "expand")
     }
 
     /// Maps a wire-format request name to the corresponding variant.

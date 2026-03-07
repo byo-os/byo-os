@@ -28,6 +28,7 @@ pub fn is_bare(value: &str) -> bool {
                 && b != b'\\'
                 && b != b','
                 && b != b'#'
+                && b != b'?'
         })
 }
 
@@ -602,7 +603,9 @@ impl<W: io::Write> Emitter<W> {
                         crate::protocol::PragmaKind::Claim
                         | crate::protocol::PragmaKind::Unclaim
                         | crate::protocol::PragmaKind::Observe
-                        | crate::protocol::PragmaKind::Unobserve => {
+                        | crate::protocol::PragmaKind::Unobserve
+                        | crate::protocol::PragmaKind::Handle
+                        | crate::protocol::PragmaKind::Unhandle => {
                             for (i, t) in targets.iter().enumerate() {
                                 if i > 0 {
                                     write!(self.writer, ",")?;

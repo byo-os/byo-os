@@ -224,6 +224,22 @@ impl Parser {
         self.parse_name_in("type name", &['.', '-'])
     }
 
+    /// Parse a `type?request` handle target.
+    ///
+    /// Consumes type name, `?` punct, request kind. Returns a combined
+    /// literal `"type?request"`.
+    fn parse_handle_target(&mut self) -> Result<IrValue, String> {
+        let type_name = self.parse_type()?;
+        if !self.eat_punct('?') {
+            return Err("expected '?' after type name in handle target".to_string());
+        }
+        let request_kind = self.parse_type()?;
+        match (type_name, request_kind) {
+            (IrValue::Literal(t), IrValue::Literal(r)) => Ok(IrValue::Literal(format!("{t}?{r}"))),
+            _ => Err("handle targets must be literal type?request pairs".to_string()),
+        }
+    }
+
     /// Parse an object ID. Glues `:` and `-` (grammar: `[a-zA-Z_][a-zA-Z0-9_:-]*`).
     /// Accepts `_` for anonymous objects.
     fn parse_id(&mut self) -> Result<IrValue, String> {
@@ -698,6 +714,18 @@ impl Parser {
             return Ok(IrCommand::Pragma { kind, targets });
         }
 
+        // handle/unhandle: #handle type?request[,type?request,...], etc.
+        if self.peek_keyword("handle") || self.peek_keyword("unhandle") {
+            let kind_str = self.expect_ident("expected pragma kind")?;
+            let kind = IrValue::Literal(kind_str);
+            let mut targets = vec![self.parse_handle_target()?];
+            while self.peek_punct(',') {
+                self.pos += 1; // consume ','
+                targets.push(self.parse_handle_target()?);
+            }
+            return Ok(IrCommand::Pragma { kind, targets });
+        }
+
         // redirect: #redirect target (accepts `_` for discard)
         if self.peek_keyword("redirect") {
             self.pos += 1;
@@ -1083,6 +1111,43 @@ mod tests {
                 assert!(targets.is_empty());
             }
             _ => panic!("expected Unredirect pragma"),
+        }
+    }
+
+    #[test]
+    fn parse_handle() {
+        // Note: `# handle` because `quote!` uses `#` for interpolation.
+        // The proc-macro tokenizer sees `#` then `handle` as separate tokens.
+        let cmds = parse_str("# handle view ? measure , text ? measure").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Pragma {
+                kind: IrValue::Literal(k),
+                targets,
+            } => {
+                assert_eq!(k, "handle");
+                assert_eq!(targets.len(), 2);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "view?measure"));
+                assert!(matches!(&targets[1], IrValue::Literal(t) if t == "text?measure"));
+            }
+            _ => panic!("expected Handle pragma"),
+        }
+    }
+
+    #[test]
+    fn parse_unhandle() {
+        let cmds = parse_str("# unhandle view ? measure").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IrCommand::Pragma {
+                kind: IrValue::Literal(k),
+                targets,
+            } => {
+                assert_eq!(k, "unhandle");
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(&targets[0], IrValue::Literal(t) if t == "view?measure"));
+            }
+            _ => panic!("expected Unhandle pragma"),
         }
     }
 

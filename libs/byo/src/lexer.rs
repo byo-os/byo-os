@@ -416,11 +416,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned<'_>>, ParseError> {
 /// Operator characters (`+`, `-`, `@`, `!`) are NOT included here — they
 /// are valid inside bare words (e.g. `notes-app:save`, `w-64`). They're
 /// only recognized as operators at token start via the main match arm.
+/// `?` IS included — it's not valid in type names, IDs, or prop names,
+/// and terminating it allows `type?request` to tokenize as three tokens.
 fn is_special_or_ws(b: u8) -> bool {
     b.is_ascii_whitespace()
         || matches!(
             b,
-            b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\' | b',' | b'#'
+            b'{' | b'}' | b'~' | b'=' | b'"' | b'\'' | b'\\' | b',' | b'#' | b'?'
         )
 }
 

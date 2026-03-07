@@ -299,6 +299,21 @@ impl<'a, 'tok> Parser<'a, 'tok> {
         let kind = PragmaKind::from_wire(self.byte_str_at(span));
 
         match kind {
+            PragmaKind::Handle | PragmaKind::Unhandle => {
+                let mut targets = vec![self.parse_handle_target()?];
+                while matches!(
+                    self.peek(),
+                    Some(Spanned {
+                        token: Token::Comma,
+                        ..
+                    })
+                ) {
+                    self.advance(); // consume comma
+                    targets.push(self.parse_handle_target()?);
+                }
+                cmds.push(Command::Pragma { kind, targets });
+                Ok(())
+            }
             PragmaKind::Claim
             | PragmaKind::Unclaim
             | PragmaKind::Observe
@@ -731,6 +746,37 @@ impl<'a, 'tok> Parser<'a, 'tok> {
     }
 
     // -- Expect helpers -------------------------------------------------------
+
+    /// Parse a `type?request` handle target.
+    ///
+    /// Consumes three tokens: type name, `?`, request kind. Returns a
+    /// combined `ByteStr` of `"type?request"`.
+    fn parse_handle_target(&mut self) -> Result<ByteStr, ParseError> {
+        let type_name = self.expect_type()?;
+        let span = self.here_span();
+        if matches!(
+            self.peek(),
+            Some(Spanned {
+                token: Token::Question,
+                ..
+            })
+        ) {
+            self.advance(); // consume ?
+        } else {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "'?' in handle target (type?request)",
+                    found: self
+                        .peek()
+                        .map(|t| format!("{:?}", t.token))
+                        .unwrap_or_else(|| "end of input".to_string()),
+                },
+                span,
+            });
+        }
+        let request_kind = self.expect_type()?;
+        Ok(ByteStr::from(format!("{type_name}?{request_kind}")))
+    }
 
     /// Expect a Word token matching the type pattern: `[a-zA-Z][a-zA-Z0-9._-]*`
     /// Returns a ByteStr sub-sliced from the source.
@@ -1326,6 +1372,56 @@ mod tests {
             }
             _ => panic!("expected Unredirect pragma"),
         }
+    }
+
+    #[test]
+    fn handle_single() {
+        let cmds = parse("#handle view?measure").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Handle);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0], "view?measure");
+            }
+            _ => panic!("expected Handle pragma"),
+        }
+    }
+
+    #[test]
+    fn handle_multiple() {
+        let cmds = parse("#handle view?measure,text?measure").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Handle);
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0], "view?measure");
+                assert_eq!(targets[1], "text?measure");
+            }
+            _ => panic!("expected Handle pragma"),
+        }
+    }
+
+    #[test]
+    fn unhandle() {
+        let cmds = parse("#unhandle view?measure").unwrap();
+        match &cmds[0] {
+            Command::Pragma { kind, targets } => {
+                assert_eq!(*kind, PragmaKind::Unhandle);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0], "view?measure");
+            }
+            _ => panic!("expected Unhandle pragma"),
+        }
+    }
+
+    #[test]
+    fn handle_missing_question() {
+        assert!(parse("#handle view").is_err());
+    }
+
+    #[test]
+    fn handle_missing_request_kind() {
+        assert!(parse("#handle view?").is_err());
     }
 
     #[test]

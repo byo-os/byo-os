@@ -173,6 +173,8 @@ ACK carries a handling disposition for event bubbling:
 | `#` | `#unobserve type,...` | Stop observing type(s)                 |
 | `#` | `#redirect id`        | Route passthrough to named tty         |
 | `#` | `#unredirect`         | Restore default passthrough (root tty) |
+| `#` | `#handle type?req,..` | Register as handler for request(s)     |
+| `#` | `#unhandle type?req,..`| Release handler registration           |
 
 Pragmas are fire-and-forget stream directives — they have no
 sequence numbers and no responses. They manage subscriptions and
@@ -208,6 +210,20 @@ For example, the controls daemon at startup:
 
 After this, any `+button` from any app triggers a `?expand` to
 the controls daemon.
+
+**Request handler registration:** `#handle type?request,...` registers
+the process as the handler for custom requests targeting objects of the
+specified types. Targets are `type?request` pairs (e.g. `view?measure`,
+`button?accessibleDescription`). Singular ownership per pair, like
+`#claim`. `#handle type?expand` is rejected — use `#claim` for
+expansion handling.
+
+The orchestrator routes custom requests using a **3-tier strategy**:
+1. **Explicit handler**: `handlers[(obj_type, request_kind)]`
+2. **Owner**: the process that created the target object
+3. **BFS fallback**: walk expansion children to find a type with
+   an explicit handler (e.g. `?measure` on a `button` → finds a
+   `view` child → routes to compositor)
 
 #### Requests and responses
 
@@ -260,6 +276,8 @@ the protocol extensible.
 - `unobserve` — stop observing a type
 - `redirect` — route passthrough to a named tty
 - `unredirect` — restore default passthrough routing
+- `handle` — register as handler for (type, request) pairs
+- `unhandle` — release handler registration
 
 **Requests (`?`):**
 - `expand` — request daemon expansion
