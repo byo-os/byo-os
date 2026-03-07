@@ -292,11 +292,11 @@ impl ScrollPhysics {
     pub fn apply_controlled(&mut self, entity: Entity, sx: Option<f32>, sy: Option<f32>) {
         if let Some(state) = self.states.get_mut(&entity) {
             if let Some(sx) = sx {
-                state.scroll_x = sx as f64;
+                state.scroll_x = (sx as f64).clamp(0.0, state.max_x());
                 state.velocity_x = 0.0;
             }
             if let Some(sy) = sy {
-                state.scroll_y = sy as f64;
+                state.scroll_y = (sy as f64).clamp(0.0, state.max_y());
                 state.velocity_y = 0.0;
             }
         }
@@ -335,12 +335,20 @@ impl ScrollPhysics {
         state.scroll_x_enabled = scroll_x_enabled;
         state.scroll_y_enabled = scroll_y_enabled;
 
+        // Update dimensions first — needed for max_x/max_y clamping below.
+        state.content_width = content_width;
+        state.content_height = content_height;
+        state.viewport_width = viewport_width;
+        state.viewport_height = viewport_height;
+
         // Initialize scroll position from Bevy's actual value when state is
         // freshly created, so overscroll detection works correctly at any
-        // scroll offset (not just the top).
+        // scroll offset (not just the top). Clamp to valid range to avoid
+        // massive overscroll if controlled scroll-y was set to a huge value
+        // (e.g. 999999 to mean "scroll to bottom").
         if is_new {
-            state.scroll_x = cur_scroll_x;
-            state.scroll_y = cur_scroll_y;
+            state.scroll_x = cur_scroll_x.clamp(0.0, state.max_x());
+            state.scroll_y = cur_scroll_y.clamp(0.0, state.max_y());
         }
 
         // Cancel any active momentum — user re-engaged
@@ -372,10 +380,6 @@ impl ScrollPhysics {
 
         state.last_event_time = time;
         state.phase = ScrollPhase::Active;
-        state.content_width = content_width;
-        state.content_height = content_height;
-        state.viewport_width = viewport_width;
-        state.viewport_height = viewport_height;
 
         // Apply overscroll resistance: dampen deltas when past bounds.
         // Only dampen the component pushing *further* past bounds.
