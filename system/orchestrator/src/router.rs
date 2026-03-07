@@ -1566,7 +1566,18 @@ impl Router {
                     };
 
                     seen_qids.insert(qid.clone());
+
+                    // If this object is a claimed type with a separate expansion,
+                    // protect all its state-tree descendants from being destroyed
+                    // by this reconciliation — they belong to a nested expansion.
+                    if self.claims.contains_key(kind.as_ref()) {
+                        for (desc_qid, _, _) in self.state.descendants_info(&qid) {
+                            seen_qids.insert(desc_qid);
+                        }
+                    }
+
                     let new_props = props_to_map(props);
+                    let mut slot_inlined = false;
 
                     if let Some(old_props) = old_objects.get(&qid) {
                         // Determine the new parent for this object.
@@ -1574,8 +1585,30 @@ impl Router {
                             .last()
                             .cloned()
                             .unwrap_or_else(|| source_qid.clone());
-                        let old_parent = old_parents.get(&qid).and_then(|p| p.clone());
-                        let parent_changed = old_parent.as_ref() != Some(&new_parent);
+                        let old_parent = old_parents.get(&qid).and_then(|p| p.as_ref());
+                        let raw_parent_changed = old_parent != Some(&new_parent);
+
+                        // Follow slot_ref links when computing parent change.
+                        // If the old parent is a SlotContent node linked to a Slot
+                        // whose parent matches the new parent, the object didn't
+                        // actually move — the difference is just an artifact of slot
+                        // inlining in effective_cmds vs. the SlotContent parent in
+                        // the state tree. We must also preserve the state tree parent
+                        // (keep it under SlotContent) so that collect_prior_slots
+                        // can find it on subsequent re-expansions.
+                        if raw_parent_changed
+                            && let Some(old_p) = old_parent
+                            && let Some(old_parent_obj) = self.state.get(old_p)
+                            && old_parent_obj.kind == ObjectKind::SlotContent
+                            && let Some(slot_qid) = old_parent_obj.slot_ref.as_ref()
+                            && let Some(slot_obj) = self.state.get(slot_qid)
+                            && slot_obj.kind == ObjectKind::Slot
+                            && slot_obj.parent.as_ref() == Some(&new_parent)
+                        {
+                            slot_inlined = true;
+                        }
+
+                        let parent_changed = raw_parent_changed && !slot_inlined;
 
                         if parent_changed {
                             // Parent changed — emit destroy+create (compositor
@@ -1632,10 +1665,15 @@ impl Router {
                     // Update state tree.
                     self.state
                         .upsert(kind.as_ref().into(), &qid, &new_props, daemon_pid);
-                    if let Some(parent) = parent_stack.last() {
-                        self.state.set_parent(&qid, parent);
-                    } else {
-                        self.state.set_parent(&qid, source_qid);
+                    // When parent difference is due to slot inlining, keep the
+                    // state tree parent under the SlotContent node so that
+                    // collect_prior_slots can find it on subsequent re-expansions.
+                    if !slot_inlined {
+                        if let Some(parent) = parent_stack.last() {
+                            self.state.set_parent(&qid, parent);
+                        } else {
+                            self.state.set_parent(&qid, source_qid);
+                        }
                     }
 
                     last_qid = Some(qid);
@@ -1673,6 +1711,16 @@ impl Router {
                     last_qid = parent_stack.last().cloned();
                 }
                 _ => {}
+            }
+        }
+
+        // Preserve SlotContent and Slot nodes — these are not present in
+        // effective_cmds (they get inlined by slot substitution) but must
+        // survive reconciliation so that future re-expansions and
+        // link_slot_refs can find them.
+        for (qid, kind) in &old_kinds {
+            if matches!(kind, ObjectKind::SlotContent | ObjectKind::Slot) {
+                seen_qids.insert(qid.clone());
             }
         }
 
@@ -2562,5 +2610,334 @@ mod tests {
         // Simulate disconnect cleanup.
         router.handlers.retain(|_, &mut p| p != pid);
         assert!(router.handlers.is_empty());
+    }
+
+    // ── reconcile_expansion slot parent tests ───────────────────
+
+    /// Build a state tree mimicking a scroll-view with app content in a slot:
+    ///
+    /// ```text
+    /// app:sv                          ← app-owned scroll-view
+    ///   app:sv::_                     ← SlotContent (default slot) [slot_ref → controls:vp::_]
+    ///     app:child                   ← app content inside the slot
+    ///
+    /// controls:sv-root                ← daemon expansion root
+    ///   controls:vp                   ← daemon viewport
+    ///     controls:vp::_              ← Slot placeholder [slot_ref → app:sv::_]
+    /// ```
+    fn setup_scroll_view_state(router: &mut Router) {
+        let app = ProcessId(1);
+        let daemon = ProcessId(2);
+
+        let sv = QualifiedId::parse("app:sv").unwrap();
+        let sv_slot = QualifiedId::parse("app:sv::_").unwrap();
+        let child = QualifiedId::parse("app:child").unwrap();
+        let root = QualifiedId::parse("controls:sv-root").unwrap();
+        let vp = QualifiedId::parse("controls:vp").unwrap();
+        let vp_slot = QualifiedId::parse("controls:vp::_").unwrap();
+
+        // App-side
+        router.state.upsert(
+            ObjectKind::Type("scroll-view".into()),
+            &sv,
+            &IndexMap::new(),
+            app,
+        );
+        router
+            .state
+            .upsert(ObjectKind::SlotContent, &sv_slot, &IndexMap::new(), app);
+        router.state.set_parent(&sv_slot, &sv);
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &child,
+            &IndexMap::new(),
+            app,
+        );
+        router.state.set_parent(&child, &sv_slot);
+
+        // Expansion-side
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &root,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&root, &sv);
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &vp,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&vp, &root);
+        router
+            .state
+            .upsert(ObjectKind::Slot, &vp_slot, &IndexMap::new(), daemon);
+        router.state.set_parent(&vp_slot, &vp);
+
+        // Bidirectional slot_ref links
+        router.state.set_slot_ref(&sv_slot, &vp_slot);
+        router.state.set_slot_ref(&vp_slot, &sv_slot);
+    }
+
+    #[test]
+    fn reconcile_expansion_slot_parent_no_false_destroy() {
+        // When reconciling a re-expansion with slot content inlined,
+        // app content whose old parent is a SlotContent node should NOT
+        // be treated as having changed parents — the SlotContent→Slot
+        // link means it's logically in the same position.
+        let mut router = Router::new();
+        setup_scroll_view_state(&mut router);
+
+        let sv = QualifiedId::parse("app:sv").unwrap();
+        let daemon = ProcessId(2);
+
+        // Effective commands after slot substitution: app:child is now
+        // directly under controls:vp (the slot was inlined).
+        let effective_cmds = parse(
+            "+view controls:sv-root { \
+               +view controls:vp { \
+                 +view app:child \
+               } \
+             }",
+        );
+
+        let delta = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+
+        // The delta should NOT contain a Destroy for app:child.
+        let has_destroy = delta
+            .iter()
+            .any(|cmd| matches!(cmd, Command::Destroy { id, .. } if id.as_ref() == "app:child"));
+        assert!(
+            !has_destroy,
+            "reconcile_expansion should not destroy app:child when its parent \
+             only changed due to slot inlining. Delta: {delta:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_expansion_slot_parent_preserves_slot_content_node() {
+        // The SlotContent node (app:sv::_) should survive reconciliation
+        // even though it doesn't appear in the effective_cmds (it's been
+        // inlined). It must remain in seen_qids or otherwise be preserved.
+        let mut router = Router::new();
+        setup_scroll_view_state(&mut router);
+
+        let sv = QualifiedId::parse("app:sv").unwrap();
+        let sv_slot = QualifiedId::parse("app:sv::_").unwrap();
+        let daemon = ProcessId(2);
+
+        let effective_cmds = parse(
+            "+view controls:sv-root { \
+               +view controls:vp { \
+                 +view app:child \
+               } \
+             }",
+        );
+
+        let _delta = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+
+        // The SlotContent node should still exist in the state tree.
+        assert!(
+            router.state.get(&sv_slot).is_some(),
+            "SlotContent node app:sv::_ should not be destroyed during reconciliation"
+        );
+    }
+
+    #[test]
+    fn reconcile_expansion_slot_content_parent_stable_across_reexpansions() {
+        // After reconciliation, slot-inlined content must remain parented
+        // under the SlotContent node in the state tree, so that
+        // collect_prior_slots can find it on subsequent re-expansions.
+        let mut router = Router::new();
+        setup_scroll_view_state(&mut router);
+
+        let sv = QualifiedId::parse("app:sv").unwrap();
+        let sv_slot = QualifiedId::parse("app:sv::_").unwrap();
+        let child = QualifiedId::parse("app:child").unwrap();
+        let daemon = ProcessId(2);
+
+        let effective_cmds = parse(
+            "+view controls:sv-root { \
+               +view controls:vp { \
+                 +view app:child \
+               } \
+             }",
+        );
+
+        // First re-expansion.
+        let delta1 = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+        assert!(
+            !delta1
+                .iter()
+                .any(|c| matches!(c, Command::Destroy { id, .. } if id.as_ref() == "app:child")),
+            "first reconciliation should not destroy app:child"
+        );
+
+        // Verify app:child is still parented under SlotContent.
+        let child_obj = router.state.get(&child).expect("app:child should exist");
+        assert_eq!(
+            child_obj.parent.as_ref(),
+            Some(&sv_slot),
+            "app:child should remain parented under SlotContent after reconciliation"
+        );
+
+        // Second re-expansion (simulates another @scroll-view patch).
+        let delta2 = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+        assert!(
+            !delta2
+                .iter()
+                .any(|c| matches!(c, Command::Destroy { id, .. } if id.as_ref() == "app:child")),
+            "second reconciliation should not destroy app:child either. Delta: {delta2:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_expansion_nested_claimed_type_preserved() {
+        // When a re-expansion contains a claimed type (e.g. +scrollbar inside
+        // scroll-view), the claimed type's expansion children should not be
+        // destroyed — they belong to a separate nested expansion.
+        let mut router = Router::new();
+        setup_scroll_view_state(&mut router);
+
+        let daemon = ProcessId(2);
+        let sv = QualifiedId::parse("app:sv").unwrap();
+
+        // Register "scrollbar" as a claimed type.
+        router.claims.insert("scrollbar".to_owned(), daemon);
+
+        // Add a scrollbar and its expansion children to the state tree
+        // (simulating a previous expansion that created them).
+        let sb = QualifiedId::parse("controls:sv-scrollbar-y").unwrap();
+        let sb_root = QualifiedId::parse("controls:sv-scrollbar-y-root").unwrap();
+        let sb_track = QualifiedId::parse("controls:sv-scrollbar-y-track").unwrap();
+        let sb_thumb = QualifiedId::parse("controls:sv-scrollbar-y-thumb").unwrap();
+
+        router.state.upsert(
+            ObjectKind::Type("scrollbar".into()),
+            &sb,
+            &IndexMap::new(),
+            daemon,
+        );
+        router
+            .state
+            .set_parent(&sb, &QualifiedId::parse("controls:sv-root").unwrap());
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &sb_root,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&sb_root, &sb);
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &sb_track,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&sb_track, &sb_root);
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &sb_thumb,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&sb_thumb, &sb_root);
+
+        // Effective commands after slot substitution: scrollbar appears as
+        // a raw claimed type (its expansion is handled separately).
+        let effective_cmds = parse(
+            "+view controls:sv-root { \
+               +view controls:vp { \
+                 +view app:child \
+               } \
+               +scrollbar controls:sv-scrollbar-y direction=vertical \
+             }",
+        );
+
+        let delta = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+
+        // Scrollbar expansion children should NOT be destroyed.
+        let destroyed_ids: Vec<_> = delta
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::Destroy { id, .. } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !destroyed_ids.contains(&"controls:sv-scrollbar-y-root".to_owned()),
+            "scrollbar expansion root should not be destroyed. Destroyed: {destroyed_ids:?}"
+        );
+        assert!(
+            !destroyed_ids.contains(&"controls:sv-scrollbar-y-track".to_owned()),
+            "scrollbar expansion track should not be destroyed. Destroyed: {destroyed_ids:?}"
+        );
+        assert!(
+            !destroyed_ids.contains(&"controls:sv-scrollbar-y-thumb".to_owned()),
+            "scrollbar expansion thumb should not be destroyed. Destroyed: {destroyed_ids:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_expansion_real_parent_change_still_detected() {
+        // When a daemon object genuinely moves to a different parent
+        // (not due to slot inlining), the parent change should still
+        // be detected and emit destroy+create.
+        let mut router = Router::new();
+        let daemon = ProcessId(2);
+
+        let sv = QualifiedId::parse("app:sv").unwrap();
+        let root = QualifiedId::parse("controls:root").unwrap();
+        let container = QualifiedId::parse("controls:container").unwrap();
+        let item = QualifiedId::parse("controls:item").unwrap();
+
+        router.state.upsert(
+            ObjectKind::Type("scroll-view".into()),
+            &sv,
+            &IndexMap::new(),
+            ProcessId(1),
+        );
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &root,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&root, &sv);
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &container,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&container, &root);
+        // item is currently under container
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &item,
+            &IndexMap::new(),
+            daemon,
+        );
+        router.state.set_parent(&item, &container);
+
+        // New expansion moves item from container to root.
+        let effective_cmds = parse(
+            "+view controls:root { \
+               +view controls:container \
+               +view controls:item \
+             }",
+        );
+
+        let delta = router.reconcile_expansion(&sv, daemon, &effective_cmds);
+
+        // Should detect the real parent change.
+        let has_destroy = delta.iter().any(
+            |cmd| matches!(cmd, Command::Destroy { id, .. } if id.as_ref() == "controls:item"),
+        );
+        assert!(
+            has_destroy,
+            "reconcile_expansion should detect real parent change for controls:item. Delta: {delta:?}"
+        );
     }
 }
