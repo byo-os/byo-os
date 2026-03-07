@@ -16,6 +16,20 @@ pub enum ControlKind {
     ScrollView,
 }
 
+impl ControlKind {
+    /// Expansion sub-element suffixes for this control kind.
+    /// Used for registering/removing reverse ID mappings.
+    pub fn expansion_suffixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Button => &["root", "label"],
+            Self::Checkbox => &["root", "box", "check", "label"],
+            Self::Slider => &["root", "track", "fill", "header", "label", "value"],
+            Self::Scrollbar => &["root", "track", "thumb"],
+            Self::ScrollView => &["root", "viewport", "scrollbar-y", "scrollbar-x"],
+        }
+    }
+}
+
 /// State for a single control instance.
 #[derive(Debug)]
 pub struct ControlState {
@@ -233,6 +247,28 @@ impl ControlState {
         self.app_events.contains(kind)
     }
 
+    /// Whether this control's direction is vertical (default) vs horizontal.
+    pub fn is_vertical(&self) -> bool {
+        self.props
+            .get("direction")
+            .map(|s| s.as_str())
+            .unwrap_or("vertical")
+            != "horizontal"
+    }
+
+    /// Whether each scroll axis is enabled, based on the `direction` prop.
+    /// Returns (y_enabled, x_enabled).
+    pub fn scroll_axes(&self) -> (bool, bool) {
+        let direction = self
+            .props
+            .get("direction")
+            .map(|s| s.as_str())
+            .unwrap_or("vertical");
+        let y = direction == "vertical" || direction == "both";
+        let x = direction == "horizontal" || direction == "both";
+        (y, x)
+    }
+
     /// Get the slider min value.
     pub fn slider_min(&self) -> f64 {
         self.props
@@ -255,6 +291,18 @@ impl ControlState {
             .get("step")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.0)
+    }
+
+    /// Compute the slider fill percentage (0–100) from the current value.
+    pub fn slider_pct(&self) -> f64 {
+        let value = self.value.unwrap_or(50.0);
+        let min = self.slider_min();
+        let max = self.slider_max();
+        if (max - min).abs() > f64::EPSILON {
+            ((value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
     }
 
     /// Snap a value to the step grid and clamp to range.
@@ -305,15 +353,7 @@ impl Daemon {
         let local_id = state.local_id.clone();
 
         // Register reverse mappings for all expansion IDs
-        let suffixes = match state.kind {
-            ControlKind::Button => vec!["root", "label"],
-            ControlKind::Checkbox => vec!["root", "box", "check", "label"],
-            ControlKind::Slider => vec!["root", "track", "fill", "header", "label", "value"],
-            ControlKind::Scrollbar => vec!["root", "track", "thumb"],
-            ControlKind::ScrollView => vec!["root", "viewport", "scrollbar-y", "scrollbar-x"],
-        };
-
-        for suffix in suffixes {
+        for suffix in state.kind.expansion_suffixes() {
             let expansion_id = format!("{local_id}-{suffix}");
             self.reverse.insert(expansion_id, source_qid.clone());
         }
@@ -339,18 +379,7 @@ impl Daemon {
     /// Remove a control and its reverse mappings.
     pub fn remove(&mut self, source_qid: &str) {
         if let Some(state) = self.controls.remove(source_qid) {
-            let suffixes = match state.kind {
-                ControlKind::Button => vec!["root", "label"],
-                ControlKind::Checkbox => vec!["root", "box", "check", "label"],
-                ControlKind::Slider => {
-                    vec!["root", "track", "fill", "header", "label", "value"]
-                }
-                ControlKind::Scrollbar => vec!["root", "track", "thumb"],
-                ControlKind::ScrollView => {
-                    vec!["root", "viewport", "scrollbar-y", "scrollbar-x"]
-                }
-            };
-            for suffix in suffixes {
+            for suffix in state.kind.expansion_suffixes() {
                 let expansion_id = format!("{}-{suffix}", state.local_id);
                 self.reverse.remove(&expansion_id);
             }

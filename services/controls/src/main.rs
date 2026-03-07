@@ -220,13 +220,10 @@ impl StdinHandler {
 
     /// Determine if the event target is a scrollbar sub-element and which one.
     fn scrollbar_target_kind(state: &ControlState, expansion_id: &str) -> ScrollbarTarget {
-        let id = &state.local_id;
-        if expansion_id == format!("{id}-thumb") {
-            ScrollbarTarget::Thumb
-        } else if expansion_id == format!("{id}-track") {
-            ScrollbarTarget::Track
-        } else {
-            ScrollbarTarget::Other
+        match expansion_id.strip_prefix(&state.local_id as &str) {
+            Some("-thumb") => ScrollbarTarget::Thumb,
+            Some("-track") => ScrollbarTarget::Track,
+            _ => ScrollbarTarget::Other,
         }
     }
 
@@ -369,38 +366,17 @@ impl StdinHandler {
                 ScrollbarTarget::Thumb => {
                     state.thumb_pressed = true;
                     let prop_map = props_to_map(props);
+                    let is_vertical = state.is_vertical();
                     // Use viewport-relative coords (stable during capture)
-                    let cy: f64 = prop_map
-                        .get("client-y")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0.0);
-                    let cx: f64 = prop_map
-                        .get("client-x")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0.0);
-                    let direction = state
-                        .props
-                        .get("direction")
-                        .map(|s| s.as_str())
-                        .unwrap_or("vertical");
-                    let is_vertical = direction != "horizontal";
+                    let cy = get_f64(&prop_map, "client-y", 0.0);
+                    let cx = get_f64(&prop_map, "client-x", 0.0);
                     state.drag_start_pos = if is_vertical { cy } else { cx };
-                    state.drag_start_scroll = state
-                        .props
-                        .get("scroll-position")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0);
+                    state.drag_start_scroll = get_f64(&state.props, "scroll-position", 0.0);
                     // Derive track size from thumb pixel size + content/viewport ratio
-                    let thumb_pixels: f64 = if is_vertical {
-                        prop_map
-                            .get("height")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1.0)
+                    let thumb_pixels = if is_vertical {
+                        get_f64(&prop_map, "height", 1.0)
                     } else {
-                        prop_map
-                            .get("width")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1.0)
+                        get_f64(&prop_map, "width", 1.0)
                     };
                     let thumb_pct = if state.content_size > 0.0 {
                         (state.viewport_size / state.content_size).clamp(0.05, 1.0)
@@ -435,34 +411,16 @@ impl StdinHandler {
                 ScrollbarTarget::Track => {
                     // Track click: jump to position
                     let prop_map = props_to_map(props);
-                    let direction = state
-                        .props
-                        .get("direction")
-                        .map(|s| s.as_str())
-                        .unwrap_or("vertical")
-                        .to_owned();
-                    let is_vertical = direction != "horizontal";
-                    let pos: f64 = if is_vertical {
-                        prop_map
-                            .get("y")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0)
+                    let is_vertical = state.is_vertical();
+                    let pos = if is_vertical {
+                        get_f64(&prop_map, "y", 0.0)
                     } else {
-                        prop_map
-                            .get("x")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0)
+                        get_f64(&prop_map, "x", 0.0)
                     };
-                    let track_size: f64 = if is_vertical {
-                        prop_map
-                            .get("height")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1.0)
+                    let track_size = if is_vertical {
+                        get_f64(&prop_map, "height", 1.0)
                     } else {
-                        prop_map
-                            .get("width")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1.0)
+                        get_f64(&prop_map, "width", 1.0)
                     };
 
                     let content_size = state.content_size;
@@ -475,18 +433,13 @@ impl StdinHandler {
                         0.0
                     };
 
-                    // Extract what we need before releasing the mutable borrow
-                    let props_clone = state.props.clone();
-                    let _ = state;
+                    // Update scrollbar state
+                    state
+                        .props
+                        .insert("scroll-position".to_string(), new_scroll.to_string());
 
                     // Find the parent scroll-view to update
                     let scroll_view_qid = find_parent_scroll_view(&self.daemon, source_qid);
-
-                    // Update scrollbar state
-                    let mut props_update = props_clone;
-                    props_update.insert("scroll-position".to_string(), new_scroll.to_string());
-                    let state_mut = self.daemon.get_mut(source_qid).unwrap();
-                    state_mut.props = props_update;
 
                     let daemon = &self.daemon;
                     let state = daemon.get(source_qid).unwrap();
@@ -554,12 +507,7 @@ impl StdinHandler {
                 Self::scrollbar_target_kind(state, expansion_id),
                 ScrollbarTarget::Thumb
             );
-            let direction = state
-                .props
-                .get("direction")
-                .map(|s| s.as_str())
-                .unwrap_or("vertical")
-                .to_owned();
+            let is_vertical = state.is_vertical();
             if was_thumb {
                 state.thumb_pressed = false;
             }
@@ -579,7 +527,6 @@ impl StdinHandler {
                     && let Some(sv_state) = daemon.get(sv_qid)
                 {
                     let sv_id = &sv_state.local_id;
-                    let is_vertical = direction != "horizontal";
                     if is_vertical {
                         byo_write!(em, @view {format!("{sv_id}-viewport")} ~scroll-y)?;
                     } else {
@@ -683,23 +630,12 @@ impl StdinHandler {
         let prop_map = props_to_map(props);
         let state = self.daemon.get(source_qid).unwrap();
 
-        let direction = state
-            .props
-            .get("direction")
-            .map(|s| s.as_str())
-            .unwrap_or("vertical");
-        let is_vertical = direction != "horizontal";
+        let is_vertical = state.is_vertical();
         // Use viewport-relative coords (stable during capture)
-        let current_pos: f64 = if is_vertical {
-            prop_map
-                .get("client-y")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.0)
+        let current_pos = if is_vertical {
+            get_f64(&prop_map, "client-y", 0.0)
         } else {
-            prop_map
-                .get("client-x")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.0)
+            get_f64(&prop_map, "client-x", 0.0)
         };
 
         let content_size = state.content_size;
@@ -731,9 +667,9 @@ impl StdinHandler {
 
         // Update scrollbar state
         let state = self.daemon.get_mut(source_qid).unwrap();
-        let mut props_update = state.props.clone();
-        props_update.insert("scroll-position".to_string(), new_scroll.to_string());
-        state.props = props_update;
+        state
+            .props
+            .insert("scroll-position".to_string(), new_scroll.to_string());
 
         // Find parent scroll-view to update viewport
         let scroll_view_qid = find_parent_scroll_view(&self.daemon, source_qid);
@@ -798,59 +734,23 @@ impl StdinHandler {
         // The compositor owns scroll state — read the authoritative clamped
         // position and dimensions from the event props.
         let prop_map = props_to_map(props);
-        let scroll_y: f64 = prop_map
-            .get("scroll-y")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let scroll_x: f64 = prop_map
-            .get("scroll-x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let content_height: f64 = prop_map
-            .get("content-height")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let content_width: f64 = prop_map
-            .get("content-width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let viewport_height: f64 = prop_map
-            .get("viewport-height")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let viewport_width: f64 = prop_map
-            .get("viewport-width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let overflow_y: f64 = prop_map
-            .get("scroll-overflow-y")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let overflow_x: f64 = prop_map
-            .get("scroll-overflow-x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
+        let scroll_y = get_f64(&prop_map, "scroll-y", 0.0);
+        let scroll_x = get_f64(&prop_map, "scroll-x", 0.0);
+        let content_height = get_f64(&prop_map, "content-height", 0.0);
+        let content_width = get_f64(&prop_map, "content-width", 0.0);
+        let viewport_height = get_f64(&prop_map, "viewport-height", 0.0);
+        let viewport_width = get_f64(&prop_map, "viewport-width", 0.0);
+        let overflow_y = get_f64(&prop_map, "scroll-overflow-y", 0.0);
+        let overflow_x = get_f64(&prop_map, "scroll-overflow-x", 0.0);
 
-        let direction = state
-            .props
-            .get("direction")
-            .map(|s| s.as_str())
-            .unwrap_or("vertical");
-        let scroll_y_enabled = direction == "vertical" || direction == "both";
-        let scroll_x_enabled = direction == "horizontal" || direction == "both";
+        let (scroll_y_enabled, scroll_x_enabled) = state.scroll_axes();
 
         let max_y = (content_height - viewport_height).max(0.0);
         let max_x = (content_width - viewport_width).max(0.0);
 
         // Check if we're at bounds (for nested scroll propagation)
-        let delta_y: f64 = prop_map
-            .get("delta-y")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let delta_x: f64 = prop_map
-            .get("delta-x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
+        let delta_y = get_f64(&prop_map, "delta-y", 0.0);
+        let delta_x = get_f64(&prop_map, "delta-x", 0.0);
         let at_bounds = if scroll_y_enabled {
             (delta_y > 0.0 && scroll_y <= 0.0) || (delta_y < 0.0 && scroll_y >= max_y)
         } else if scroll_x_enabled {
@@ -880,81 +780,52 @@ impl StdinHandler {
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar)
         let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
         if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            sb.content_size = content_height;
-            sb.viewport_size = viewport_height;
-            sb.scroll_overflow = overflow_y;
-            sb.props
-                .insert("content-size".to_string(), content_height.to_string());
-            sb.props
-                .insert("viewport-size".to_string(), viewport_height.to_string());
-            sb.props
-                .insert("scroll-position".to_string(), scroll_y.to_string());
+            update_scrollbar_dimensions(
+                &mut self.daemon,
+                qid,
+                content_height,
+                viewport_height,
+                Some(scroll_y),
+                Some(overflow_y),
+            );
         }
         if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            sb.content_size = content_width;
-            sb.viewport_size = viewport_width;
-            sb.scroll_overflow = overflow_x;
-            sb.props
-                .insert("content-size".to_string(), content_width.to_string());
-            sb.props
-                .insert("viewport-size".to_string(), viewport_width.to_string());
-            sb.props
-                .insert("scroll-position".to_string(), scroll_x.to_string());
+            update_scrollbar_dimensions(
+                &mut self.daemon,
+                qid,
+                content_width,
+                viewport_width,
+                Some(scroll_x),
+                Some(overflow_x),
+            );
         }
 
         // Fade-in: make modern scrollbars visible on scroll and arm hide timer
-        let mut fade_y_timer: Option<String> = None;
-        let mut fade_x_timer: Option<String> = None;
-        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            if resolve_scrollbar_style(sb) == "modern" {
-                sb.fade_visible = true;
-                fade_y_timer = Some(format!("{}-fade", sb.local_id));
-            }
-        }
-        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            if resolve_scrollbar_style(sb) == "modern" {
-                sb.fade_visible = true;
-                fade_x_timer = Some(format!("{}-fade", sb.local_id));
-            }
-        }
+        let axes = ScrollbarAxes {
+            fade_y_timer: if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
+                fade_in_scrollbar(&mut self.daemon, qid)
+            } else {
+                None
+            },
+            fade_x_timer: if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
+                fade_in_scrollbar(&mut self.daemon, qid)
+            } else {
+                None
+            },
+            sb_y_qid,
+            sb_x_qid,
+            scroll_y_enabled,
+            scroll_x_enabled,
+        };
 
-        // Get immutable ref for emission
         let daemon = &self.daemon;
-
         let handled = if at_bounds { "false" } else { "true" };
 
         let mut em = Emitter::new(&mut self.stdout);
         em.frame(|em| {
             byo_write!(em, !ack {ack_kind} {ack_seq} handled={handled})?;
 
-            // No viewport scroll-position patch — compositor owns ScrollPosition
-            // directly via apply_overscroll_offset system.
-
-            // Patch scrollbar visuals directly (compositor-native @view, no re-expand)
-            if scroll_y_enabled
-                && let Some(ref qid) = sb_y_qid
-                && let Some(sb_state) = daemon.get(qid)
-            {
-                patch_scrollbar_state(em, sb_state)?;
-            }
-            if scroll_x_enabled
-                && let Some(ref qid) = sb_x_qid
-                && let Some(sb_state) = daemon.get(qid)
-            {
-                patch_scrollbar_state(em, sb_state)?;
-            }
-
-            // Arm fade-out timers for modern scrollbars
-            if let Some(ref timer_id) = fade_y_timer {
-                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
-            }
-            if let Some(ref timer_id) = fade_x_timer {
-                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
-            }
+            emit_scrollbar_patches_and_timers(em, daemon, &axes)?;
 
             // Release any controlled scroll props from a prior track click.
             // This is harmless if the props aren't set (removing absent prop is a no-op).
@@ -994,35 +865,17 @@ impl StdinHandler {
         }
 
         let prop_map = props_to_map(props);
-        let viewport_height: f64 = prop_map
-            .get("height")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let viewport_width: f64 = prop_map
-            .get("width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let content_height: f64 = prop_map
-            .get("content-height")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let content_width: f64 = prop_map
-            .get("content-width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
+        let viewport_height = get_f64(&prop_map, "height", 0.0);
+        let viewport_width = get_f64(&prop_map, "width", 0.0);
+        let content_height = get_f64(&prop_map, "content-height", 0.0);
+        let content_width = get_f64(&prop_map, "content-width", 0.0);
 
         info!(
             "on_resize: viewport={viewport_width:.0}x{viewport_height:.0} content={content_width:.0}x{content_height:.0} scroll_y={:.1} scroll_x={:.1}",
             state.scroll_y, state.scroll_x
         );
 
-        let direction = state
-            .props
-            .get("direction")
-            .map(|s| s.as_str())
-            .unwrap_or("vertical");
-        let scroll_y_enabled = direction == "vertical" || direction == "both";
-        let scroll_x_enabled = direction == "horizontal" || direction == "both";
+        let (scroll_y_enabled, scroll_x_enabled) = state.scroll_axes();
 
         let id = state.local_id.clone();
 
@@ -1034,71 +887,52 @@ impl StdinHandler {
         };
 
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar).
-        // Find child scrollbar QIDs and update their content_size/viewport_size + props.
         let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
         if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            sb.content_size = content_height;
-            sb.viewport_size = viewport_height;
-            sb.props
-                .insert("content-size".to_string(), content_height.to_string());
-            sb.props
-                .insert("viewport-size".to_string(), viewport_height.to_string());
+            update_scrollbar_dimensions(
+                &mut self.daemon,
+                qid,
+                content_height,
+                viewport_height,
+                None,
+                None,
+            );
         }
         if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            sb.content_size = content_width;
-            sb.viewport_size = viewport_width;
-            sb.props
-                .insert("content-size".to_string(), content_width.to_string());
-            sb.props
-                .insert("viewport-size".to_string(), viewport_width.to_string());
+            update_scrollbar_dimensions(
+                &mut self.daemon,
+                qid,
+                content_width,
+                viewport_width,
+                None,
+                None,
+            );
         }
 
         // Fade-in: make modern scrollbars visible on resize and arm hide timer
-        let mut fade_y_timer: Option<String> = None;
-        let mut fade_x_timer: Option<String> = None;
-        if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            if resolve_scrollbar_style(sb) == "modern" {
-                sb.fade_visible = true;
-                fade_y_timer = Some(format!("{}-fade", sb.local_id));
-            }
-        }
-        if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
-            let sb = self.daemon.get_mut(qid).unwrap();
-            if resolve_scrollbar_style(sb) == "modern" {
-                sb.fade_visible = true;
-                fade_x_timer = Some(format!("{}-fade", sb.local_id));
-            }
-        }
+        let axes = ScrollbarAxes {
+            fade_y_timer: if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
+                fade_in_scrollbar(&mut self.daemon, qid)
+            } else {
+                None
+            },
+            fade_x_timer: if scroll_x_enabled && let Some(ref qid) = sb_x_qid {
+                fade_in_scrollbar(&mut self.daemon, qid)
+            } else {
+                None
+            },
+            sb_y_qid,
+            sb_x_qid,
+            scroll_y_enabled,
+            scroll_x_enabled,
+        };
 
-        // Emit visual patches directly (compositor-native @view, no re-expand)
         let daemon = &self.daemon;
         let mut em = Emitter::new(&mut self.stdout);
         em.frame(|em| {
             byo_write!(em, !ack {ack_kind} {ack_seq} handled=true)?;
 
-            if scroll_y_enabled
-                && let Some(ref qid) = sb_y_qid
-                && let Some(sb_state) = daemon.get(qid)
-            {
-                patch_scrollbar_state(em, sb_state)?;
-            }
-            if scroll_x_enabled
-                && let Some(ref qid) = sb_x_qid
-                && let Some(sb_state) = daemon.get(qid)
-            {
-                patch_scrollbar_state(em, sb_state)?;
-            }
-
-            // Arm fade-out timers for modern scrollbars
-            if let Some(ref timer_id) = fade_y_timer {
-                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
-            }
-            if let Some(ref timer_id) = fade_x_timer {
-                byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
-            }
+            emit_scrollbar_patches_and_timers(em, daemon, &axes)?;
 
             // Forward resize event to app if subscribed
             if let Some(seq) = resize_seq {
@@ -1226,14 +1060,8 @@ impl StdinHandler {
         // x = pointer position relative to the dispatch element (track)
         // width = dispatch element's computed width
         let prop_map = props_to_map(props);
-        let x: f64 = prop_map
-            .get("x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let width: f64 = prop_map
-            .get("width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
+        let x = get_f64(&prop_map, "x", 0.0);
+        let width = get_f64(&prop_map, "width", 0.0);
 
         let state = self.daemon.get(source_qid).unwrap();
         let is_controlled = state.is_controlled_slider();
@@ -1382,10 +1210,88 @@ fn find_child_scrollbars(
     (y_qid, x_qid)
 }
 
+/// Update a child scrollbar's content/viewport dimensions and optionally scroll position.
+fn update_scrollbar_dimensions(
+    daemon: &mut Daemon,
+    qid: &str,
+    content_size: f64,
+    viewport_size: f64,
+    scroll_position: Option<f64>,
+    overflow: Option<f64>,
+) {
+    let sb = daemon.get_mut(qid).unwrap();
+    sb.content_size = content_size;
+    sb.viewport_size = viewport_size;
+    sb.props
+        .insert("content-size".to_string(), content_size.to_string());
+    sb.props
+        .insert("viewport-size".to_string(), viewport_size.to_string());
+    if let Some(pos) = scroll_position {
+        sb.props
+            .insert("scroll-position".to_string(), pos.to_string());
+    }
+    if let Some(overflow) = overflow {
+        sb.scroll_overflow = overflow;
+    }
+}
+
+/// Fade-in a modern scrollbar and return its timer ID (for arming the fade-out timer).
+fn fade_in_scrollbar(daemon: &mut Daemon, qid: &str) -> Option<String> {
+    let sb = daemon.get_mut(qid).unwrap();
+    if resolve_scrollbar_style(sb) == "modern" {
+        sb.fade_visible = true;
+        Some(format!("{}-fade", sb.local_id))
+    } else {
+        None
+    }
+}
+
+/// Resolved scrollbar state for a scroll-view's two axes.
+struct ScrollbarAxes {
+    sb_y_qid: Option<String>,
+    sb_x_qid: Option<String>,
+    scroll_y_enabled: bool,
+    scroll_x_enabled: bool,
+    fade_y_timer: Option<String>,
+    fade_x_timer: Option<String>,
+}
+
+/// Emit scrollbar patches and arm fade-out timers for the given axes.
+fn emit_scrollbar_patches_and_timers<W: io::Write>(
+    em: &mut Emitter<W>,
+    daemon: &Daemon,
+    axes: &ScrollbarAxes,
+) -> io::Result<()> {
+    if axes.scroll_y_enabled
+        && let Some(qid) = &axes.sb_y_qid
+        && let Some(sb_state) = daemon.get(qid)
+    {
+        patch_scrollbar_state(em, sb_state)?;
+    }
+    if axes.scroll_x_enabled
+        && let Some(qid) = &axes.sb_x_qid
+        && let Some(sb_state) = daemon.get(qid)
+    {
+        patch_scrollbar_state(em, sb_state)?;
+    }
+    if let Some(timer_id) = &axes.fade_y_timer {
+        byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+    }
+    if let Some(timer_id) = &axes.fade_x_timer {
+        byo_write!(em, +timer {timer_id.as_str()} delay=2000)?;
+    }
+    Ok(())
+}
+
 /// Emit an ACK-only frame (no additional response).
 fn ack_only(stdout: &mut Stdout, kind: &str, seq: u64) -> io::Result<()> {
     let mut em = Emitter::new(stdout);
     em.frame(|em| byo_write!(em, !ack {kind} {seq} handled=true))
+}
+
+/// Read an f64 from a prop map, returning a default if missing or unparseable.
+fn get_f64(map: &HashMap<String, String>, key: &str, default: f64) -> f64 {
+    map.get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 /// Convert a Prop slice to a HashMap for easy lookup.

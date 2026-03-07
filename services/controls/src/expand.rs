@@ -189,14 +189,7 @@ pub fn expand_slider<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
     let id = &state.local_id;
     let label = state.props.get("label").map(|s| s.as_str()).unwrap_or("");
     let value = state.value.unwrap_or(50.0);
-    let min = state.slider_min();
-    let max = state.slider_max();
-
-    let pct = if (max - min).abs() > f64::EPSILON {
-        ((value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
+    let pct = state.slider_pct();
 
     let mut root_class = String::from("flex flex-col gap-1");
     if state.disabled {
@@ -286,14 +279,7 @@ pub fn patch_slider_state<W: io::Write>(
 ) -> io::Result<()> {
     let id = &state.local_id;
     let value = state.value.unwrap_or(50.0);
-    let min = state.slider_min();
-    let max = state.slider_max();
-
-    let pct = if (max - min).abs() > f64::EPSILON {
-        ((value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
+    let pct = state.slider_pct();
 
     let fill_bg = if state.pressed || state.hover {
         "bg-blue-400"
@@ -434,12 +420,7 @@ fn scrollbar_track_transition(style: &str, is_vertical: bool) -> &'static str {
 /// Emit the expansion for a scrollbar.
 pub fn expand_scrollbar<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
     let id = &state.local_id;
-    let direction = state
-        .props
-        .get("direction")
-        .map(|s| s.as_str())
-        .unwrap_or("vertical");
-    let is_vertical = direction != "horizontal";
+    let is_vertical = state.is_vertical();
     let style = resolve_scrollbar_style(state);
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
@@ -566,12 +547,7 @@ pub fn patch_scrollbar_state<W: io::Write>(
     state: &ControlState,
 ) -> io::Result<()> {
     let id = &state.local_id;
-    let direction = state
-        .props
-        .get("direction")
-        .map(|s| s.as_str())
-        .unwrap_or("vertical");
-    let is_vertical = direction != "horizontal";
+    let is_vertical = state.is_vertical();
     let style = resolve_scrollbar_style(state);
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
