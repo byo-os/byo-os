@@ -143,6 +143,7 @@ impl Prop {
 /// | `Pragma`  | `#kind targets`       | Stream pragma (fire-and-forget)      |
 /// | `Request` | `?kind seq target`    | Request (expand, custom)             |
 /// | `Response`| `.kind seq props body`| Response (expand, custom)            |
+/// | `Message` | `.kind target props`  | Standalone message (fire-and-forget) |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// `+type id props...` — Create or update (full replace, idempotent).
@@ -198,6 +199,18 @@ pub enum Command {
     Response {
         kind: ResponseKind,
         seq: u64,
+        props: Vec<Prop>,
+        body: Option<Vec<Command>>,
+    },
+    /// `.kind target props... [{ body }]` — Standalone message (no seq, no response expected).
+    ///
+    /// Routed like a request but fire-and-forget. Distinguished from
+    /// `Response` on the wire by the absence of a sequence number:
+    /// the token after the kind name starts with a letter (target ID)
+    /// rather than a digit (seq number).
+    Message {
+        kind: ByteStr,
+        target: ByteStr,
         props: Vec<Prop>,
         body: Option<Vec<Command>>,
     },

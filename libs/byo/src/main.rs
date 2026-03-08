@@ -472,6 +472,23 @@ fn write_tsv_record(
         Command::Pragma(pragma) => {
             writeln!(out, "#\t{}\t{e}\t{e}\t{e}\t{e}", pragma.as_str())
         }
+        Command::Message {
+            kind,
+            target,
+            props,
+            body,
+        } => {
+            let b = body
+                .as_ref()
+                .map(|b| serialize_body(b))
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| e.to_string());
+            writeln!(
+                out,
+                ".\t{kind}\t{e}\t{target}\t{}\t{b}",
+                f(serialize_props(props))
+            )
+        }
         Command::Push { .. } | Command::Pop => Ok(()),
     }
 }
@@ -619,6 +636,21 @@ fn write_json_obj(
                 }
             }
             out.write_all(b"]")?;
+        }
+        Command::Message {
+            kind,
+            target,
+            props,
+            body,
+        } => {
+            out.write_all(b"\"op\":\".\",\"kind\":")?;
+            write_json_str(out, kind)?;
+            out.write_all(b",\"target\":")?;
+            write_json_str(out, target)?;
+            write_json_props_field(out, props)?;
+            if let Some(body) = body {
+                write_json_body_field(out, body)?;
+            }
         }
         Command::Push { .. } | Command::Pop => {}
     }

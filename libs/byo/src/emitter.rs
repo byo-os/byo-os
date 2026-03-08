@@ -522,6 +522,32 @@ impl<W: io::Write> Emitter<W> {
         props.emit_props(&mut self.writer)
     }
 
+    /// `.kind target props...` — Standalone message without body.
+    pub fn message(
+        &mut self,
+        kind: &str,
+        target: &str,
+        props: &(impl EmitProps + ?Sized),
+    ) -> io::Result<()> {
+        write!(self.writer, "\n.{kind} {target}")?;
+        props.emit_props(&mut self.writer)
+    }
+
+    /// `.kind target props... { body }` — Standalone message with body (closure-based).
+    pub fn message_with(
+        &mut self,
+        kind: &str,
+        target: &str,
+        props: &(impl EmitProps + ?Sized),
+        body: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        write!(self.writer, "\n.{kind} {target}")?;
+        props.emit_props(&mut self.writer)?;
+        self.writer.write_all(b" {")?;
+        body(self)?;
+        self.writer.write_all(b"\n}")
+    }
+
     /// `.kind seq props... { body }` — Generic response with body (closure-based).
     pub fn response_with(
         &mut self,
@@ -672,6 +698,20 @@ impl<W: io::Write> Emitter<W> {
                     body,
                 } => {
                     write!(self.writer, "\n.{} {seq}", kind.as_str())?;
+                    props.emit_props(&mut self.writer)?;
+                    if let Some(body) = body {
+                        self.writer.write_all(b" {")?;
+                        self.commands(body)?;
+                        self.writer.write_all(b"\n}")?;
+                    }
+                }
+                Command::Message {
+                    kind,
+                    target,
+                    props,
+                    body,
+                } => {
+                    write!(self.writer, "\n.{kind} {target}")?;
                     props.emit_props(&mut self.writer)?;
                     if let Some(body) = body {
                         self.writer.write_all(b" {")?;
@@ -1506,5 +1546,67 @@ mod tests {
                 _ => panic!("command mismatch: {a:?} vs {b:?}"),
             }
         }
+    }
+
+    #[test]
+    fn message_round_trip_simple() {
+        let input = ".scroll-to-end my-scroll";
+        let cmds = crate::parser::parse(input).unwrap();
+        assert!(matches!(&cmds[0], Command::Message { .. }));
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        em.commands(&cmds).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(".scroll-to-end my-scroll"));
+
+        // Re-parse the output and verify
+        let cmds2 = crate::parser::parse(output.trim()).unwrap();
+        assert_eq!(cmds, cmds2);
+    }
+
+    #[test]
+    fn message_round_trip_with_props() {
+        let input = ".scroll-to my-scroll position=500 animated";
+        let cmds = crate::parser::parse(input).unwrap();
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        em.commands(&cmds).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let cmds2 = crate::parser::parse(output.trim()).unwrap();
+        assert_eq!(cmds, cmds2);
+    }
+
+    #[test]
+    fn message_round_trip_with_body() {
+        let input = ".batch my-list { +view item1 +view item2 }";
+        let cmds = crate::parser::parse(input).unwrap();
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        em.commands(&cmds).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let cmds2 = crate::parser::parse(output.trim()).unwrap();
+        assert_eq!(cmds, cmds2);
+    }
+
+    #[test]
+    fn message_emitter_api() {
+        let out = emit(|em| em.message("scroll-to-end", "my-scroll", &[] as &[Prop]));
+        assert!(out.contains(".scroll-to-end my-scroll"));
+    }
+
+    #[test]
+    fn message_with_emitter_api() {
+        let out = emit(|em| {
+            em.message_with("batch", "my-list", &[] as &[Prop], |em| {
+                em.upsert("view", "item1", &[] as &[Prop])
+            })
+        });
+        assert!(out.contains(".batch my-list {"));
+        assert!(out.contains("+view item1"));
     }
 }

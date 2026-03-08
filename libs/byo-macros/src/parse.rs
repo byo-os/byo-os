@@ -781,17 +781,45 @@ impl Parser {
         })
     }
 
-    /// Parse a response command after the `.` has been consumed.
+    /// Parse a response or message command after the `.` has been consumed.
+    ///
+    /// Disambiguates by peeking at the token after the kind name:
+    /// - Integer literal → Response (has seq number)
+    /// - Identifier → Message (has target ID, no seq)
+    /// - `{expr}` → Response (interpolated seq number)
     fn parse_response_command(&mut self) -> Result<IrCommand, String> {
         let kind = self.parse_type()?;
-        let seq = self.parse_seq()?;
-        let (props, children) = self.parse_props()?;
-        Ok(IrCommand::Response {
-            kind,
-            seq,
-            props,
-            children,
-        })
+
+        // Peek: if next token is an integer literal or brace group, it's a Response (seq).
+        // If it's an identifier, it's a Message (target).
+        let is_response = match self.peek() {
+            Some(TokenTree::Literal(lit)) => {
+                let s = lit.to_string();
+                s.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+            }
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => true,
+            _ => false,
+        };
+
+        if is_response {
+            let seq = self.parse_seq()?;
+            let (props, children) = self.parse_props()?;
+            Ok(IrCommand::Response {
+                kind,
+                seq,
+                props,
+                children,
+            })
+        } else {
+            let target = self.parse_id()?;
+            let (props, children) = self.parse_props()?;
+            Ok(IrCommand::Message {
+                kind,
+                target,
+                props,
+                children,
+            })
+        }
     }
 
     /// Parse a sequence number (integer literal or `{expr}`).

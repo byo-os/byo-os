@@ -132,6 +132,12 @@ impl Codegen {
                 props,
                 children,
             } => self.gen_response(kind, seq, props, children, em_ident),
+            IrCommand::Message {
+                kind,
+                target,
+                props,
+                children,
+            } => self.gen_message(kind, target, props, children, em_ident),
             IrCommand::Conditional {
                 condition,
                 then_cmds,
@@ -511,6 +517,72 @@ impl Codegen {
                         #kind_binds
                         #seq_binds
                         #em_ident.response(#kind_expr, #seq_expr, &[#(#prop_items),*])?;
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_message(
+        &mut self,
+        kind: &IrValue,
+        target: &IrValue,
+        props: &[IrProp],
+        children: &Option<Vec<IrCommand>>,
+        em_ident: &proc_macro2::Ident,
+    ) -> TokenStream {
+        let (kind_binds, kind_expr) = self.gen_str_value(kind);
+        let (target_binds, target_expr) = self.gen_str_value(target);
+
+        match children {
+            Some(ch) => {
+                let child_code = self.gen_commands(ch, em_ident);
+                if has_dynamic_props(props) {
+                    let props_var = self.fresh_ident("props");
+                    let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                    quote! {
+                        {
+                            #kind_binds
+                            #target_binds
+                            let mut #props_var = ::std::vec::Vec::new();
+                            #push_stmts
+                            #em_ident.message_with(#kind_expr, #target_expr, &#props_var, |#em_ident| {
+                                #child_code
+                                ::std::result::Result::Ok(())
+                            })?;
+                        }
+                    }
+                } else {
+                    let prop_items = self.gen_static_prop_items(props);
+                    quote! {
+                        #kind_binds
+                        #target_binds
+                        #em_ident.message_with(#kind_expr, #target_expr, &[#(#prop_items),*], |#em_ident| {
+                            #child_code
+                            ::std::result::Result::Ok(())
+                        })?;
+                    }
+                }
+            }
+            None => {
+                if has_dynamic_props(props) {
+                    let props_var = self.fresh_ident("props");
+                    let push_stmts = self.gen_dynamic_prop_pushes(props, &props_var);
+                    quote! {
+                        {
+                            #kind_binds
+                            #target_binds
+                            let mut #props_var = ::std::vec::Vec::new();
+                            #push_stmts
+                            #em_ident.message(#kind_expr, #target_expr, &#props_var)?;
+                        }
+                    }
+                } else {
+                    let prop_items = self.gen_static_prop_items(props);
+                    quote! {
+                        #kind_binds
+                        #target_binds
+                        #em_ident.message(#kind_expr, #target_expr, &[#(#prop_items),*])?;
                     }
                 }
             }

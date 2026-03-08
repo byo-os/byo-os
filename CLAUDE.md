@@ -233,9 +233,17 @@ The orchestrator routes custom requests using a **3-tier strategy**:
 | `?` | `?kind seq target`     | Generic/custom request              |
 | `.` | `.expand seq { body }` | Expansion response with body        |
 | `.` | `.kind seq props`      | Generic/custom response             |
+| `.` | `.kind target props`   | Standalone message (fire-and-forget) |
 
 Requests (`?`) and responses (`.`) handle daemon interactions.
 `?expand` expects a `.expand` response from the daemon.
+
+**Standalone messages** (`.kind target`) are fire-and-forget
+imperatives directed at objects. Distinguished from responses on the
+wire by the absence of a sequence number — the token after the kind
+name starts with a letter (target ID) rather than a digit (seq).
+Routed using the same 3-tier handler resolution as requests but with
+no response expected. Use cases: `scroll-to-end`, `page-down`, etc.
 
 `?expand` carries the qualified ID and original props (e.g.
 `?expand 0 notes-app:save kind=button label="Save"`). The daemon

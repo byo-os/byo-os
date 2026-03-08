@@ -384,6 +384,41 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             });
         }
 
+        // Disambiguate Response vs Message: peek at next token.
+        // If it starts with a digit → seq number → Response.
+        // If it starts with a letter → target ID → Message.
+        let next_starts_with_digit = matches!(
+            self.peek(),
+            Some(Spanned { token: Token::Word(w), .. }) if w.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+        );
+
+        if !next_starts_with_digit {
+            // .kind target props... [{ body }] — standalone message
+            let kind_bs = self.byte_str_at(span);
+            let target = self.expect_id()?;
+            let props = self.parse_props()?;
+            let body = if matches!(
+                self.peek(),
+                Some(Spanned {
+                    token: Token::LBrace,
+                    ..
+                })
+            ) {
+                let mut body = Vec::new();
+                self.parse_mandatory_children(&mut body)?;
+                if body.is_empty() { None } else { Some(body) }
+            } else {
+                None
+            };
+            cmds.push(Command::Message {
+                kind: kind_bs,
+                target,
+                props,
+                body,
+            });
+            return Ok(());
+        }
+
         let kind = ResponseKind::from_wire(self.byte_str_at(span));
         let seq = self.expect_seqnum()?;
 
@@ -2158,5 +2193,89 @@ mod tests {
             }
             _ => panic!("expected Upsert"),
         }
+    }
+
+    #[test]
+    fn parse_message_simple() {
+        let cmds = parse(".scroll-to-end my-scroll").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Message {
+                kind,
+                target,
+                props,
+                body,
+            } => {
+                assert_eq!(kind.as_ref(), "scroll-to-end");
+                assert_eq!(target.as_ref(), "my-scroll");
+                assert!(props.is_empty());
+                assert!(body.is_none());
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_with_props() {
+        let cmds = parse(".scroll-to my-scroll position=500 animated").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Message {
+                kind,
+                target,
+                props,
+                body,
+            } => {
+                assert_eq!(kind.as_ref(), "scroll-to");
+                assert_eq!(target.as_ref(), "my-scroll");
+                assert_eq!(props.len(), 2);
+                assert_eq!(props[0], Prop::val("position", "500"));
+                assert_eq!(props[1], Prop::flag("animated"));
+                assert!(body.is_none());
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_with_body() {
+        let cmds = parse(".batch my-list { +view item1 +view item2 }").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Message {
+                kind, target, body, ..
+            } => {
+                assert_eq!(kind.as_ref(), "batch");
+                assert_eq!(target.as_ref(), "my-list");
+                let body = body.as_ref().unwrap();
+                assert_eq!(body.len(), 2);
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_response_still_works() {
+        // Ensure Response disambiguation still works (seq starts with digit)
+        let cmds = parse(".measure 42 width=100 height=200").unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::Response {
+                kind, seq, props, ..
+            } => {
+                assert_eq!(kind.as_str(), "measure");
+                assert_eq!(*seq, 42);
+                assert_eq!(props.len(), 2);
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_and_response_mixed() {
+        let cmds = parse(".scroll-to-end my-scroll .measure 0 width=50").unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(&cmds[0], Command::Message { .. }));
+        assert!(matches!(&cmds[1], Command::Response { .. }));
     }
 }

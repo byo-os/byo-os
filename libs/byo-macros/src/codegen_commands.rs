@@ -45,6 +45,10 @@ impl Codegen {
                         children: Some(_),
                         ..
                     }
+                    | IrCommand::Message {
+                        children: Some(_),
+                        ..
+                    }
                     | IrCommand::SlotBlock { .. }
             )
         })
@@ -247,6 +251,31 @@ impl Codegen {
                     });
                 }
             }
+            IrCommand::Message {
+                kind,
+                target,
+                props,
+                children,
+            } => {
+                let kind_expr = self.gen_bytestr_value(kind);
+                let target_expr = self.gen_bytestr_value(target);
+                let props_expr = self.gen_props_expr(props);
+                let body_expr = match children {
+                    Some(ch) => {
+                        let vec_expr = self.gen_vec_expr(ch);
+                        quote! { ::std::option::Option::Some(#vec_expr) }
+                    }
+                    None => quote! { ::std::option::Option::None },
+                };
+                quote! {
+                    #acc.push(::byo::protocol::Command::Message {
+                        kind: #kind_expr,
+                        target: #target_expr,
+                        props: #props_expr,
+                        body: #body_expr,
+                    });
+                }
+            }
             IrCommand::SlotBlock { name, children } => {
                 let name_expr = self.gen_bytestr_value(name);
                 let child_stmts = self.gen_commands_into(children, acc);
@@ -410,6 +439,31 @@ impl Codegen {
                     ::byo::protocol::Command::Response {
                         kind: #kind_expr,
                         seq: #seq_expr,
+                        props: #props_expr,
+                        body: #body_expr,
+                    }
+                }
+            }
+            IrCommand::Message {
+                kind,
+                target,
+                props,
+                children,
+            } => {
+                let kind_expr = self.gen_bytestr_value(kind);
+                let target_expr = self.gen_bytestr_value(target);
+                let props_expr = self.gen_props_expr(props);
+                let body_expr = match children {
+                    Some(ch) => {
+                        let vec_expr = self.gen_vec_expr(ch);
+                        quote! { ::std::option::Option::Some(#vec_expr) }
+                    }
+                    None => quote! { ::std::option::Option::None },
+                };
+                quote! {
+                    ::byo::protocol::Command::Message {
+                        kind: #kind_expr,
+                        target: #target_expr,
                         props: #props_expr,
                         body: #body_expr,
                     }

@@ -184,6 +184,28 @@ fn serialize_command(cmd: &IrCommand, out: &mut String, indent: &str) -> Result<
                 out.push('}');
             }
         }
+        IrCommand::Message {
+            kind,
+            target,
+            props,
+            children,
+        } => {
+            out.push('\n');
+            out.push_str(indent);
+            out.push('.');
+            out.push_str(&expect_literal(kind, "message kind")?);
+            out.push(' ');
+            out.push_str(&expect_literal(target, "message target")?);
+            serialize_props(props, out)?;
+            if let Some(children) = children {
+                out.push_str(" {");
+                let child_indent = format!("{indent}  ");
+                serialize_commands_into(children, out, &child_indent)?;
+                out.push('\n');
+                out.push_str(indent);
+                out.push('}');
+            }
+        }
         IrCommand::Conditional { .. } => {
             return Err("byo_str!/byo_assert_eq! does not support `if` conditionals".to_string());
         }

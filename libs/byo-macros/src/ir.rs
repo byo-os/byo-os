@@ -83,6 +83,13 @@ pub enum IrCommand {
         props: Vec<IrProp>,
         children: Option<Vec<IrCommand>>,
     },
+    /// `.kind target props... [{ children }]` — standalone message (no seq)
+    Message {
+        kind: IrValue,
+        target: IrValue,
+        props: Vec<IrProp>,
+        children: Option<Vec<IrCommand>>,
+    },
     /// `if cond { cmds... } [else { cmds... }]`
     Conditional {
         condition: TokenStream,

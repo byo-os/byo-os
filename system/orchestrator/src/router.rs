@@ -294,6 +294,15 @@ impl Router {
                 Command::Ack { kind, seq, props } => {
                     self.handle_ack(from, kind, *seq, props).await;
                 }
+                Command::Message {
+                    kind,
+                    target,
+                    props,
+                    body,
+                } => {
+                    self.handle_message(from, &client, kind, target, props, body)
+                        .await;
+                }
                 _ => {}
             }
         }
@@ -1221,6 +1230,40 @@ impl Router {
     /// 1. Explicit handler: `handlers[(obj_type, request_kind)]`
     /// 2. Owner: the process that created the target object
     /// 3. BFS fallback: walk expansion children for a handler match
+    ///
+    /// Resolve the handler for a dot-command (request or message) targeting an object.
+    ///
+    /// Qualifies the target ID, looks up the object in the state tree,
+    /// and uses the 3-tier handler resolution to find the destination process.
+    /// Returns `(target_pid, dest_client, dequalified_target)` on success.
+    fn resolve_dot_target(
+        &self,
+        from: ProcessId,
+        client: &str,
+        kind: &str,
+        target: &str,
+    ) -> Option<(ProcessId, String, String)> {
+        use crate::id::{dequalify, qualify};
+
+        let qualified_id = qualify(client, target);
+        let qid = QualifiedId::parse(&qualified_id)?;
+
+        let obj = self.state.get(&qid)?;
+
+        let obj_type = match &obj.kind {
+            ObjectKind::Type(t) => t.as_str(),
+            _ => return None,
+        };
+        let owner_pid = obj.data;
+
+        let target_pid = self.resolve_request_handler(from, obj_type, owner_pid, &qid, kind)?;
+
+        let dest_client = self.client_name(target_pid)?.to_owned();
+        let dequalified_target = dequalify(&dest_client, &qualified_id).to_owned();
+
+        Some((target_pid, dest_client, dequalified_target))
+    }
+
     async fn handle_request(
         &mut self,
         from: ProcessId,
@@ -1230,43 +1273,18 @@ impl Router {
         target: &str,
         props: &[Prop],
     ) {
-        use crate::id::{dequalify, qualify};
-
-        let qualified_id = qualify(client, target);
-        let qid = match QualifiedId::parse(&qualified_id) {
-            Some(q) => q,
-            None => return,
-        };
-
-        let obj = match self.state.get(&qid) {
-            Some(o) => o,
-            None => return, // Object doesn't exist — drop silently
-        };
-
-        let obj_type = match &obj.kind {
-            ObjectKind::Type(t) => t.as_str(),
-            _ => return,
-        };
-        let owner_pid = obj.data;
-
-        let Some(target_pid) =
-            self.resolve_request_handler(from, obj_type, owner_pid, &qid, kind_name)
+        let Some((target_pid, _, dequalified_target)) =
+            self.resolve_dot_target(from, client, kind_name, target)
         else {
             return;
         };
 
-        let dest_client = match self.client_name(target_pid) {
-            Some(n) => n.to_owned(),
-            None => return,
-        };
-
         let remapped_seq = self.next_request_seq(target_pid, kind_name);
-        let dequalified_target = dequalify(&dest_client, &qualified_id);
 
         self.send_to(
             target_pid,
             WriteMsg::Byo(Arc::new(byo_vec! {
-                ?{kind_name} {remapped_seq} {dequalified_target} {..props}
+                ?{kind_name} {remapped_seq} {&dequalified_target} {..props}
             })),
         );
 
@@ -1277,6 +1295,36 @@ impl Router {
                 sender_seq: seq,
                 forwarded_at: Instant::now(),
             },
+        );
+    }
+
+    /// Route a standalone message to the appropriate handler.
+    ///
+    /// Like request routing but fire-and-forget: no seq remapping, no
+    /// pending response tracking. Uses the same 3-tier handler resolution.
+    async fn handle_message(
+        &mut self,
+        from: ProcessId,
+        client: &str,
+        kind: &str,
+        target: &str,
+        props: &[Prop],
+        body: &Option<Vec<Command>>,
+    ) {
+        let Some((target_pid, _, dequalified_target)) =
+            self.resolve_dot_target(from, client, kind, target)
+        else {
+            return;
+        };
+
+        self.send_to(
+            target_pid,
+            WriteMsg::Byo(Arc::new(vec![Command::Message {
+                kind: kind.into(),
+                target: dequalified_target.into(),
+                props: props.to_vec(),
+                body: body.clone(),
+            }])),
         );
     }
 
