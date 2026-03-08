@@ -711,7 +711,7 @@ impl<W: io::Write> Emitter<W> {
                     props,
                     body,
                 } => {
-                    write!(self.writer, "\n.{kind} {target}")?;
+                    write!(self.writer, "\n.{} {target}", kind.as_str())?;
                     props.emit_props(&mut self.writer)?;
                     if let Some(body) = body {
                         self.writer.write_all(b" {")?;

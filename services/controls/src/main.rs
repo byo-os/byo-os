@@ -14,7 +14,7 @@ use std::io::{self, Read, Stdout};
 use byo::byo_write;
 use byo::emitter::Emitter;
 use byo::parser::parse;
-use byo::protocol::{Command, EventKind, Prop, RequestKind};
+use byo::protocol::{Command, EventKind, MessageKind, Prop, RequestKind};
 use byo::scanner::{Handler, Scanner};
 use tracing::info;
 
@@ -89,6 +89,14 @@ impl StdinHandler {
                 props,
             } => {
                 self.handle_event(&kind, seq, &id, &props)?;
+            }
+            Command::Message {
+                kind: kind @ (MessageKind::ScrollTo | MessageKind::ScrollBy),
+                target,
+                props,
+                ..
+            } => {
+                self.handle_scroll_message(&kind, &target, &props)?;
             }
             Command::Destroy { id, .. } => {
                 self.handle_destroy(&id);
@@ -1139,6 +1147,32 @@ impl StdinHandler {
         Ok(())
     }
 
+    /// Handle `.scroll-to` / `.scroll-by` messages on a scroll-view.
+    ///
+    /// Forwards the message to the viewport view. The compositor handles
+    /// the actual scroll, clamping, and emits `!scroll` with authoritative
+    /// position/dimensions — which updates the scrollbar via the existing path.
+    fn handle_scroll_message(
+        &mut self,
+        kind: &MessageKind,
+        target: &byo::ByteStr,
+        props: &[Prop],
+    ) -> io::Result<()> {
+        let target_str = target.as_ref();
+
+        let state = match self.daemon.get(target_str) {
+            Some(s) if s.kind == ControlKind::ScrollView => s,
+            _ => {
+                tracing::warn!("scroll message for unknown scroll-view {target_str}");
+                return Ok(());
+            }
+        };
+
+        let viewport_id = format!("{}-viewport", state.local_id);
+        let mut em = Emitter::new(&mut self.stdout);
+        em.frame(|em| em.message(kind.as_str(), &viewport_id, props))
+    }
+
     fn handle_destroy(&mut self, id: &str) {
         // The orchestrator sends -type {qualified_id} when the source is destroyed.
         // Try direct lookup first, then check reverse map.
@@ -1320,8 +1354,13 @@ fn main() {
     {
         let mut stdout = io::stdout();
         let mut em = Emitter::new(&mut stdout);
-        em.frame(|em| byo_write!(em, #claim button, checkbox, slider, scrollbar, scroll-view))
-            .expect("failed to claim types");
+        em.frame(|em| {
+            byo_write!(em,
+                #claim button, checkbox, slider, scrollbar, scroll-view
+                #handle scroll-view?scroll-to, scroll-view?scroll-by
+            )
+        })
+        .expect("failed to claim types");
     }
 
     // Main event loop

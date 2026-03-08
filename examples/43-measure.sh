@@ -144,8 +144,8 @@ while IFS=$'\t' read -r OP KIND SEQ ID PROPS BODY; do
           }
         }"
 
-        # Scroll to bottom (large value gets clamped to max)
-        send "@scroll-view results-scroll scroll-y=999999"
+        # Scroll to bottom via imperative message (large value gets clamped)
+        send ".scroll-to results-scroll y=999999"
       fi
       ;;
 

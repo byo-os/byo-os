@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use byo::props::FromProps;
 
@@ -11,6 +12,14 @@ use crate::id_map::IdMap;
 use crate::io::ByoBatch;
 use crate::measure::MeasureRequest;
 use crate::plugin::WorldScale;
+use crate::scroll_message::ScrollMessage;
+
+/// Bundled message writers to stay within Bevy's 16-param limit.
+#[derive(SystemParam)]
+pub(crate) struct CommandOutputs<'w> {
+    measure: MessageWriter<'w, MeasureRequest>,
+    scroll: MessageWriter<'w, ScrollMessage>,
+}
 use crate::props::layer::LayerProps;
 use crate::props::text::TextProps;
 use crate::props::tty::TtyProps;
@@ -39,7 +48,7 @@ pub fn process_commands(
     layer_renders: Query<&LayerRender>,
     primary_window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     world_scale: Res<WorldScale>,
-    mut measure_requests: MessageWriter<MeasureRequest>,
+    mut outputs: CommandOutputs,
     engine: Option<Res<EngineHandle>>,
 ) {
     let scale_factor = primary_window
@@ -222,11 +231,37 @@ pub fn process_commands(
                     kind, seq, targets, ..
                 } if kind.as_str() == "measure" => {
                     if let Some(target) = targets.first() {
-                        measure_requests.write(MeasureRequest {
+                        outputs.measure.write(MeasureRequest {
                             target: target.as_ref().to_string(),
                             seq: *seq,
                         });
                     }
+                }
+
+                byo::Command::Message {
+                    kind: byo::protocol::MessageKind::ScrollTo,
+                    target,
+                    props,
+                    ..
+                } => {
+                    outputs.scroll.write(ScrollMessage::ScrollTo {
+                        target: target.as_ref().to_string(),
+                        x: prop_f32(props, "x"),
+                        y: prop_f32(props, "y"),
+                    });
+                }
+
+                byo::Command::Message {
+                    kind: byo::protocol::MessageKind::ScrollBy,
+                    target,
+                    props,
+                    ..
+                } => {
+                    outputs.scroll.write(ScrollMessage::ScrollBy {
+                        target: target.as_ref().to_string(),
+                        dx: prop_f32(props, "dx").unwrap_or(0.0),
+                        dy: prop_f32(props, "dy").unwrap_or(0.0),
+                    });
                 }
 
                 _ => {}
@@ -426,4 +461,12 @@ fn extract_order(props: &[byo::Prop]) -> Option<i32> {
         }
     }
     None
+}
+
+/// Extract a named f32 prop value from a prop slice.
+fn prop_f32(props: &[byo::Prop], key: &str) -> Option<f32> {
+    props.iter().find_map(|p| match p {
+        byo::Prop::Value { key: k, value } if k.as_ref() == key => value.parse().ok(),
+        _ => None,
+    })
 }

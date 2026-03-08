@@ -21,7 +21,9 @@ use bytes::Bytes;
 
 use crate::byte_str::ByteStr;
 use crate::lexer::{ParseError, ParseErrorKind, Span, Spanned, Token, tokenize};
-use crate::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
+use crate::protocol::{
+    Command, EventKind, MessageKind, PragmaKind, Prop, RequestKind, ResponseKind,
+};
 
 /// Zero-copy parse from a `Bytes` source.
 ///
@@ -394,7 +396,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
         if !next_starts_with_digit {
             // .kind target props... [{ body }] — standalone message
-            let kind_bs = self.byte_str_at(span);
+            let kind = MessageKind::from_wire(self.byte_str_at(span));
             let target = self.expect_id()?;
             let props = self.parse_props()?;
             let body = if matches!(
@@ -411,7 +413,7 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 None
             };
             cmds.push(Command::Message {
-                kind: kind_bs,
+                kind,
                 target,
                 props,
                 body,
@@ -2206,7 +2208,7 @@ mod tests {
                 props,
                 body,
             } => {
-                assert_eq!(kind.as_ref(), "scroll-to-end");
+                assert_eq!(kind.as_str(), "scroll-to-end");
                 assert_eq!(target.as_ref(), "my-scroll");
                 assert!(props.is_empty());
                 assert!(body.is_none());
@@ -2226,7 +2228,7 @@ mod tests {
                 props,
                 body,
             } => {
-                assert_eq!(kind.as_ref(), "scroll-to");
+                assert_eq!(kind.as_str(), "scroll-to");
                 assert_eq!(target.as_ref(), "my-scroll");
                 assert_eq!(props.len(), 2);
                 assert_eq!(props[0], Prop::val("position", "500"));
@@ -2245,7 +2247,7 @@ mod tests {
             Command::Message {
                 kind, target, body, ..
             } => {
-                assert_eq!(kind.as_ref(), "batch");
+                assert_eq!(kind.as_str(), "batch");
                 assert_eq!(target.as_ref(), "my-list");
                 let body = body.as_ref().unwrap();
                 assert_eq!(body.len(), 2);

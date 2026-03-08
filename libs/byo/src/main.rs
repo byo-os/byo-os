@@ -485,7 +485,8 @@ fn write_tsv_record(
                 .unwrap_or_else(|| e.to_string());
             writeln!(
                 out,
-                ".\t{kind}\t{e}\t{target}\t{}\t{b}",
+                ".\t{}\t{e}\t{target}\t{}\t{b}",
+                kind.as_str(),
                 f(serialize_props(props))
             )
         }
@@ -644,7 +645,7 @@ fn write_json_obj(
             body,
         } => {
             out.write_all(b"\"op\":\".\",\"kind\":")?;
-            write_json_str(out, kind)?;
+            write_json_str(out, kind.as_str())?;
             out.write_all(b",\"target\":")?;
             write_json_str(out, target)?;
             write_json_props_field(out, props)?;

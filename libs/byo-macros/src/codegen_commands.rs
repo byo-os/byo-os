@@ -269,7 +269,7 @@ impl Codegen {
                 };
                 quote! {
                     #acc.push(::byo::protocol::Command::Message {
-                        kind: #kind_expr,
+                        kind: ::byo::protocol::MessageKind::from_wire(#kind_expr),
                         target: #target_expr,
                         props: #props_expr,
                         body: #body_expr,
@@ -462,7 +462,7 @@ impl Codegen {
                 };
                 quote! {
                     ::byo::protocol::Command::Message {
-                        kind: #kind_expr,
+                        kind: ::byo::protocol::MessageKind::from_wire(#kind_expr),
                         target: #target_expr,
                         props: #props_expr,
                         body: #body_expr,

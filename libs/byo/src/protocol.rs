@@ -209,7 +209,7 @@ pub enum Command {
     /// the token after the kind name starts with a letter (target ID)
     /// rather than a digit (seq number).
     Message {
-        kind: ByteStr,
+        kind: MessageKind,
         target: ByteStr,
         props: Vec<Prop>,
         body: Option<Vec<Command>>,
@@ -475,6 +475,41 @@ impl ResponseKind {
         match s.as_ref() {
             "expand" => ResponseKind::Expand,
             _ => ResponseKind::Other(s),
+        }
+    }
+}
+
+/// Known message types for `.` messages (fire-and-forget, no seq number).
+///
+/// Built-in message kinds have dedicated variants; third-party or unknown
+/// kinds use [`Other`](MessageKind::Other).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageKind {
+    /// `.scroll-to` — set scroll position
+    ScrollTo,
+    /// `.scroll-by` — adjust scroll position by delta
+    ScrollBy,
+    /// Custom message
+    Other(ByteStr),
+}
+
+impl MessageKind {
+    /// Returns the wire-format string for this message kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            MessageKind::ScrollTo => "scroll-to",
+            MessageKind::ScrollBy => "scroll-by",
+            MessageKind::Other(s) => s,
+        }
+    }
+
+    /// Maps a wire-format message name to the corresponding variant.
+    pub fn from_wire(s: impl Into<ByteStr>) -> Self {
+        let s = s.into();
+        match s.as_ref() {
+            "scroll-to" => MessageKind::ScrollTo,
+            "scroll-by" => MessageKind::ScrollBy,
+            _ => MessageKind::Other(s),
         }
     }
 }

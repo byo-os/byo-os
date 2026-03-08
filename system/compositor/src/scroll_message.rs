@@ -1,0 +1,158 @@
+//! Scroll message handling — processes `.scroll-to` and `.scroll-by` messages.
+//!
+//! Messages are buffered in PreUpdate (by `process_commands`) and processed
+//! in a PreUpdate system that runs after commands, so ScrollPosition state
+//! is updated before the frame's tick.
+//!
+//! After layout (PostUpdate, after `UiSystems::Prepare`), a follow-up system
+//! emits `!scroll` events for entities that were scrolled programmatically,
+//! so daemons (e.g. controls) can update scrollbar visuals.
+
+use bevy::prelude::*;
+use bevy::ui::{ScrollPosition, UiSystems};
+use byo::byo_write;
+
+use crate::id_map::IdMap;
+use crate::io::StdoutEmitter;
+use crate::resize;
+
+pub struct ScrollMessagePlugin;
+
+impl Plugin for ScrollMessagePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<ScrollMessage>()
+            .init_resource::<PendingScrollEvents>()
+            .init_resource::<ScrollSeqCounter>()
+            .add_systems(
+                PreUpdate,
+                process_scroll_messages.after(crate::commands::process_commands),
+            )
+            .add_systems(PostUpdate, emit_scroll_events.after(UiSystems::Prepare));
+    }
+}
+
+/// A buffered scroll message (`.scroll-to` or `.scroll-by`).
+#[derive(Message)]
+pub enum ScrollMessage {
+    ScrollTo {
+        target: String,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    ScrollBy {
+        target: String,
+        dx: f32,
+        dy: f32,
+    },
+}
+
+/// Entities that had their scroll position changed programmatically this frame.
+#[derive(Resource, Default)]
+struct PendingScrollEvents(Vec<Entity>);
+
+/// Monotonic sequence counter for programmatic `!scroll` events.
+#[derive(Resource, Default)]
+struct ScrollSeqCounter(u64);
+
+impl ScrollSeqCounter {
+    fn next(&mut self) -> u64 {
+        let seq = self.0;
+        self.0 += 1;
+        seq
+    }
+}
+
+fn process_scroll_messages(
+    mut messages: MessageReader<ScrollMessage>,
+    id_map: Res<IdMap>,
+    mut scroll_query: Query<&mut ScrollPosition>,
+    mut pending: ResMut<PendingScrollEvents>,
+    mut redraw: MessageWriter<bevy::window::RequestRedraw>,
+) {
+    let mut any = false;
+
+    for msg in messages.read() {
+        let (target, sx, sy) = match msg {
+            ScrollMessage::ScrollTo { target, x, y } => {
+                let Some(entity) = id_map.get_entity(target) else {
+                    continue;
+                };
+                let Ok(sp) = scroll_query.get(entity) else {
+                    continue;
+                };
+                let sx = x.unwrap_or(sp.x);
+                let sy = y.unwrap_or(sp.y);
+                (target.as_str(), sx, sy)
+            }
+            ScrollMessage::ScrollBy { target, dx, dy } => {
+                let Some(entity) = id_map.get_entity(target) else {
+                    continue;
+                };
+                let Ok(sp) = scroll_query.get(entity) else {
+                    continue;
+                };
+                (target.as_str(), sp.x + dx, sp.y + dy)
+            }
+        };
+
+        let Some(entity) = id_map.get_entity(target) else {
+            continue;
+        };
+        if let Ok(mut sp) = scroll_query.get_mut(entity) {
+            sp.x = sx;
+            sp.y = sy;
+            pending.0.push(entity);
+            any = true;
+        }
+    }
+
+    if any {
+        redraw.write(bevy::window::RequestRedraw);
+    }
+}
+
+/// PostUpdate system: emit `!scroll` events for programmatically scrolled entities.
+///
+/// Runs after `UiSystems::Prepare` so `ComputedNode` has authoritative dimensions
+/// and `ScrollPosition` has been clamped by Bevy's layout.
+fn emit_scroll_events(
+    mut pending: ResMut<PendingScrollEvents>,
+    mut seq_counter: ResMut<ScrollSeqCounter>,
+    id_map: Res<IdMap>,
+    emitter: Res<StdoutEmitter>,
+    computed_query: Query<&ComputedNode>,
+    scroll_query: Query<&ScrollPosition>,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+
+    for entity in pending.0.drain(..) {
+        let Some(byo_id) = id_map.get_id(entity) else {
+            continue;
+        };
+
+        let (vw, vh, cw, ch) = computed_query
+            .get(entity)
+            .map(resize::compute_dimensions)
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+
+        let (sx, sy) = scroll_query
+            .get(entity)
+            .map(|sp| (sp.x as f64, sp.y as f64))
+            .unwrap_or((0.0, 0.0));
+
+        let seq = seq_counter.next();
+        emitter.frame(|em| {
+            byo_write!(em,
+                !scroll {seq} {byo_id}
+                    scroll-x={format!("{sx:.1}")}
+                    scroll-y={format!("{sy:.1}")}
+                    content-width={format!("{cw:.1}")}
+                    content-height={format!("{ch:.1}")}
+                    viewport-width={format!("{vw:.1}")}
+                    viewport-height={format!("{vh:.1}")}
+            )
+        });
+    }
+}

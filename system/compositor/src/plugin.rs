@@ -12,6 +12,7 @@ use crate::kitty_gfx;
 use crate::measure;
 use crate::resize;
 use crate::scroll;
+use crate::scroll_message;
 use crate::style;
 use crate::transition;
 use crate::tty;
@@ -86,6 +87,7 @@ impl Plugin for ByoPlugin {
                     .before(UiSystems::Prepare),
             )
             .add_plugins(measure::MeasurePlugin)
+            .add_plugins(scroll_message::ScrollMessagePlugin)
             .add_systems(
                 PostUpdate,
                 resize::emit_resize_events.after(UiSystems::Prepare),

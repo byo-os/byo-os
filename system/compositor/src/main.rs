@@ -11,6 +11,7 @@ mod props;
 mod render;
 mod resize;
 mod scroll;
+mod scroll_message;
 mod style;
 mod transition;
 mod tty;

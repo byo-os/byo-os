@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 
 use byo::ByteStr;
 use byo::byo_vec;
-use byo::protocol::{Command, EventKind, PragmaKind, Prop, RequestKind, ResponseKind};
+use byo::protocol::{Command, EventKind, MessageKind, PragmaKind, Prop, RequestKind, ResponseKind};
 use byo::tree::{ObjectKind, PropValue, props_to_map, props_to_patch};
 
 use crate::batch::{OutputQueue, PendingBatch};
@@ -1306,13 +1306,13 @@ impl Router {
         &mut self,
         from: ProcessId,
         client: &str,
-        kind: &str,
+        kind: &MessageKind,
         target: &str,
         props: &[Prop],
         body: &Option<Vec<Command>>,
     ) {
         let Some((target_pid, _, dequalified_target)) =
-            self.resolve_dot_target(from, client, kind, target)
+            self.resolve_dot_target(from, client, kind.as_str(), target)
         else {
             return;
         };
@@ -1320,7 +1320,7 @@ impl Router {
         self.send_to(
             target_pid,
             WriteMsg::Byo(Arc::new(vec![Command::Message {
-                kind: kind.into(),
+                kind: kind.clone(),
                 target: dequalified_target.into(),
                 props: props.to_vec(),
                 body: body.clone(),

@@ -39,6 +39,10 @@ for i in $(seq 1 20); do
     }"
 done
 
+send() {
+  printf '\e_B %s \e\\' "$1"
+}
+
 printf '\e_B
   +view root class="flex flex-col gap-6 p-8 w-full h-full bg-zinc-900" {
 
@@ -52,6 +56,11 @@ printf '\e_B
           +view vscroll-content class="flex flex-col gap-2 p-2" {
             '"$v_items"'
           }
+        }
+        +view v-controls class="flex gap-2 mt-1" {
+          +button v-top label="Scroll Top" events="press"
+          +button v-down label="Scroll Down 100px" events="press"
+          +button v-bottom label="Scroll Bottom" events="press"
         }
       }
 
@@ -72,11 +81,34 @@ printf '\e_B
           '"$hblocks"'
         }
       }
+      +view h-controls class="flex gap-2 mt-1" {
+        +button h-left label="Scroll Left" events="press"
+        +button h-right label="Scroll Right 100px" events="press"
+        +button h-end label="Scroll End" events="press"
+      }
     }
   }
 \e\\'
 
-# Keep alive — read events from stdin
-while IFS= read -r line; do
-  echo "$line" >&2
-done
+# Event loop — handle button presses for scroll commands
+while IFS=$'\t' read -r OP KIND SEQ ID PROPS BODY; do
+
+  case "$OP" in
+    "!")
+      if [ "$KIND" = "press" ]; then
+        case "$ID" in
+          v-top)    send ".scroll-to vscroll y=0" ;;
+          v-down)   send ".scroll-by vscroll dy=100" ;;
+          v-bottom) send ".scroll-to vscroll y=999999" ;;
+          h-left)   send ".scroll-to hscroll x=0" ;;
+          h-right)  send ".scroll-by hscroll dx=100" ;;
+          h-end)    send ".scroll-to hscroll x=999999" ;;
+        esac
+        send "!ack press $SEQ handled"
+      else
+        send "!ack $KIND $SEQ"
+      fi
+      ;;
+  esac
+
+done < <(byo parse)
