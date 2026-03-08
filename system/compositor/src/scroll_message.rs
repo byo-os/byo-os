@@ -72,7 +72,7 @@ fn process_scroll_messages(
     let mut any = false;
 
     for msg in messages.read() {
-        let (target, sx, sy) = match msg {
+        let (entity, sx, sy) = match msg {
             ScrollMessage::ScrollTo { target, x, y } => {
                 let Some(entity) = id_map.get_entity(target) else {
                     continue;
@@ -80,9 +80,7 @@ fn process_scroll_messages(
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                let sx = x.unwrap_or(sp.x);
-                let sy = y.unwrap_or(sp.y);
-                (target.as_str(), sx, sy)
+                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y))
             }
             ScrollMessage::ScrollBy { target, dx, dy } => {
                 let Some(entity) = id_map.get_entity(target) else {
@@ -91,17 +89,16 @@ fn process_scroll_messages(
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (target.as_str(), sp.x + dx, sp.y + dy)
+                (entity, sp.x + dx, sp.y + dy)
             }
         };
 
-        let Some(entity) = id_map.get_entity(target) else {
-            continue;
-        };
         if let Ok(mut sp) = scroll_query.get_mut(entity) {
             sp.x = sx;
             sp.y = sy;
-            pending.0.push(entity);
+            if !pending.0.contains(&entity) {
+                pending.0.push(entity);
+            }
             any = true;
         }
     }
