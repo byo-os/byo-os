@@ -929,7 +929,7 @@ fn on_pointer_scroll(
 }
 
 /// Walk up from `entity` to find the nearest ancestor with a Scroll event
-/// subscription (the viewport with `events="scroll"`).
+/// subscription (e.g. the scroll-view root with `events="scroll forward(...)"`).
 pub(crate) fn find_scroll_event_target(
     entity: Entity,
     parent_query: &Query<&ChildOf>,

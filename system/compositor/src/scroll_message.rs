@@ -188,8 +188,8 @@ fn emit_scroll_events(
     }
 }
 
-/// If `entity` has no `ScrollPosition`, check its `EventSubscriptions` for a
-/// scroll `forward()` target and resolve to that entity instead.
+/// If `entity` has a scroll `forward()` target in its `EventSubscriptions`,
+/// resolve to that entity instead.
 ///
 /// This handles tap copies that target the scroll-view root (which has
 /// `events="scroll forward(viewport)"`) — the scroll position lives on the

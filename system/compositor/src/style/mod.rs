@@ -369,11 +369,6 @@ pub fn reconcile_views(
                 .scroll_y
                 .or(resolved.default_scroll_y)
                 .unwrap_or(0.0);
-            if sx != 0.0 || sy != 0.0 {
-                commands
-                    .entity(entity)
-                    .insert(ScrollPosition(Vec2::new(sx, sy)));
-            }
             commands
                 .entity(entity)
                 .insert(ScrollPosition(Vec2::new(sx, sy)));

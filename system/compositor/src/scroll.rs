@@ -687,7 +687,7 @@ pub fn tick_scroll_physics(
     }
 
     for event in synthetic_events {
-        // The event.entity is the viewport (has ScrollPosition and events="scroll").
+        // The event.entity is the viewport (has ScrollPosition).
         let Some(event_target) = find_scroll_event_target(event.entity, &parent_query, &subs_query)
         else {
             continue;
