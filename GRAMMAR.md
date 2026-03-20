@@ -33,15 +33,24 @@ other_event = type seqnum id prop*
 
 # -- Pragmas (fire-and-forget, no sequence numbers) --
 
-pragma     = '#' (claim | unclaim | observe | unobserve | redirect | unredirect | other_pragma)
+pragma     = '#' (claim | unclaim | observe | unobserve | redirect | unredirect
+             | handle | unhandle | tap | untap | other_pragma)
 claim      = 'claim' types
 unclaim    = 'unclaim' types
 observe    = 'observe' types
 unobserve  = 'unobserve' types
 redirect   = 'redirect' id
 unredirect = 'unredirect'
+handle     = 'handle' handle_targets
+unhandle   = 'unhandle' handle_targets
+tap        = 'tap' tap_targets
+untap      = 'untap' tap_targets
 other_pragma = type (types | id)?
 types      = type (',' type)*
+handle_targets = handle_target (',' handle_target)*
+handle_target  = type '?' type
+tap_targets    = tap_target (',' tap_target)*
+tap_target     = type '!' type
 
 # -- Requests --
 
@@ -66,7 +75,7 @@ dqchar     = [^"\\] | escape
 sqstring   = "'" sqchar* "'"
 sqchar     = [^'\\] | escape
 escape     = '\\' ["'\\/nrt0]
-bare       = [^\s{}="'~\\,+\-@!?.#] [^\s{}="'~\\,]*
+bare       = [^\s{}="'~\\,+\-@!?.#] [^\s{}="'~\\,!?]*
 
 # -- Atoms --
 
@@ -129,8 +138,10 @@ Unrecognized escape sequences (e.g. `\q`) are parse errors.
 
 - **Bare values and operators.** Operator characters (`+`, `@`, `!`,
   `?`, `.`, `#`) cannot start a bare value — they are always parsed as
-  command operators at a token boundary. They are valid mid-value
-  (e.g. `notes-app`, `w-64`, `a+b`, `com.example.foo`). To use a
+  command operators at a token boundary. Most are valid mid-value
+  (e.g. `notes-app`, `w-64`, `a+b`, `com.example.foo`), except `!`
+  and `?` which also terminate bare words (to support `type?request`
+  and `type!event` syntax in `#handle` and `#tap` pragmas). To use a
   value that starts with an operator character, quote it: `value="+5"`.
 
 - **Negative values.** `-` is special-cased in value position: after

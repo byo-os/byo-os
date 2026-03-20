@@ -238,6 +238,29 @@ pub fn process_commands(
                     }
                 }
 
+                // Tap copies of scroll events — apply scroll position from
+                // another compositor to keep multi-compositor scroll in sync.
+                byo::Command::Event {
+                    kind: byo::protocol::EventKind::Scroll,
+                    id,
+                    props,
+                    ..
+                } if props
+                    .iter()
+                    .any(|p| matches!(p, byo::Prop::Boolean { key } if key == "tap")) =>
+                {
+                    let sx = prop_f32(props, "scroll-x");
+                    let sy = prop_f32(props, "scroll-y");
+                    if sx.is_some() || sy.is_some() {
+                        outputs.scroll.write(ScrollMessage::ScrollTo {
+                            target: id.as_ref().to_string(),
+                            x: sx,
+                            y: sy,
+                            external: true,
+                        });
+                    }
+                }
+
                 byo::Command::Message {
                     kind: byo::protocol::MessageKind::ScrollTo,
                     target,
@@ -248,6 +271,7 @@ pub fn process_commands(
                         target: target.as_ref().to_string(),
                         x: prop_f32(props, "x"),
                         y: prop_f32(props, "y"),
+                        external: false,
                     });
                 }
 

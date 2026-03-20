@@ -385,6 +385,10 @@ pub enum PragmaKind {
     Handle(Vec<(ByteStr, ByteStr)>),
     /// `#unhandle type?request,...` — release handler registration
     Unhandle(Vec<(ByteStr, ByteStr)>),
+    /// `#tap type!event,...` — tap (eavesdrop) events for (type, event) pairs
+    Tap(Vec<(ByteStr, ByteStr)>),
+    /// `#untap type!event,...` — stop tapping events for (type, event) pairs
+    Untap(Vec<(ByteStr, ByteStr)>),
     /// Custom pragma with raw targets
     Other {
         name: ByteStr,
@@ -404,6 +408,8 @@ impl PragmaKind {
             PragmaKind::Unredirect => "unredirect",
             PragmaKind::Handle(_) => "handle",
             PragmaKind::Unhandle(_) => "unhandle",
+            PragmaKind::Tap(_) => "tap",
+            PragmaKind::Untap(_) => "untap",
             PragmaKind::Other { name, .. } => name,
         }
     }

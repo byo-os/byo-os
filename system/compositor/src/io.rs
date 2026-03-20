@@ -192,6 +192,7 @@ pub fn setup_io(mut commands: Commands, event_loop_proxy: Res<EventLoopProxyWrap
             #observe view,text,layer,window,tty,G
             #handle view?measure,text?measure,layer?measure,window?measure
             #handle view?scroll-to,view?scroll-by
+            #tap view!scroll
         )
     });
 

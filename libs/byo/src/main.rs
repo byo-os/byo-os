@@ -623,6 +623,14 @@ fn write_json_obj(
                         write_json_str(out, &format!("{t}?{r}"))?;
                     }
                 }
+                Tap(targets) | Untap(targets) => {
+                    for (i, (t, e)) in targets.iter().enumerate() {
+                        if i > 0 {
+                            out.write_all(b",")?;
+                        }
+                        write_json_str(out, &format!("{t}!{e}"))?;
+                    }
+                }
                 Redirect(target) => {
                     write_json_str(out, target)?;
                 }

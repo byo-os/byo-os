@@ -574,32 +574,46 @@ impl Codegen {
                     quote! { ::byo::protocol::PragmaKind::Redirect(#target) }
                 }
                 "unredirect" => quote! { ::byo::protocol::PragmaKind::Unredirect },
-                "handle" | "unhandle" => {
-                    // Handle targets are combined "type?request" strings in the IR.
-                    // Split them at compile time into (ByteStr, ByteStr) tuples.
+                "handle" | "unhandle" | "tap" | "untap" => {
+                    // Pair targets are combined "type<sep>kind" strings in the IR.
+                    // Split at compile time into (ByteStr, ByteStr) tuples.
+                    let sep = if k == "handle" || k == "unhandle" {
+                        '?'
+                    } else {
+                        '!'
+                    };
                     let pair_exprs: Vec<TokenStream> = targets.iter().map(|t| {
                         match t {
                             IrValue::Literal(s) => {
-                                let (ty, req) = s.split_once('?').expect("handle target must contain '?'");
-                                quote! { (::byo::byte_str::ByteStr::from(#ty), ::byo::byte_str::ByteStr::from(#req)) }
+                                let (a, b) = s.split_once(sep)
+                                    .unwrap_or_else(|| panic!("{k} target must contain '{sep}'"));
+                                quote! { (::byo::byte_str::ByteStr::from(#a), ::byo::byte_str::ByteStr::from(#b)) }
                             }
                             IrValue::Interpolation(expr) => {
                                 let v = self.fresh_ident("v");
+                                let sep_str = sep.to_string();
                                 quote! {
                                     {
                                         let #v: &str = (#expr).as_ref();
-                                        let (t, r) = #v.split_once('?').expect("handle target must contain '?'");
-                                        (::byo::byte_str::ByteStr::from(t), ::byo::byte_str::ByteStr::from(r))
+                                        let (a, b) = #v.split_once(#sep_str)
+                                            .expect(concat!(#k, " target must contain '", #sep_str, "'"));
+                                        (::byo::byte_str::ByteStr::from(a), ::byo::byte_str::ByteStr::from(b))
                                     }
                                 }
                             }
                         }
                     }).collect();
-                    if k == "handle" {
-                        quote! { ::byo::protocol::PragmaKind::Handle(::std::vec![#(#pair_exprs),*]) }
-                    } else {
-                        quote! { ::byo::protocol::PragmaKind::Unhandle(::std::vec![#(#pair_exprs),*]) }
-                    }
+                    let variant = format_ident!(
+                        "{}",
+                        match k.as_str() {
+                            "handle" => "Handle",
+                            "unhandle" => "Unhandle",
+                            "tap" => "Tap",
+                            "untap" => "Untap",
+                            _ => unreachable!(),
+                        }
+                    );
+                    quote! { ::byo::protocol::PragmaKind::#variant(::std::vec![#(#pair_exprs),*]) }
                 }
                 _ => {
                     let name_expr = self.gen_bytestr_value(kind);

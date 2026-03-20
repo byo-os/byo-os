@@ -226,17 +226,32 @@ impl Parser {
 
     /// Parse a `type?request` handle target.
     ///
-    /// Consumes type name, `?` punct, request kind. Returns a combined
-    /// literal `"type?request"`.
+    /// Parse a `type?request` handle target, returning a combined literal.
     fn parse_handle_target(&mut self) -> Result<IrValue, String> {
-        let type_name = self.parse_type()?;
-        if !self.eat_punct('?') {
-            return Err("expected '?' after type name in handle target".to_string());
+        self.parse_pair_target('?', "handle")
+    }
+
+    /// Parse a `type!event` tap target, returning a combined literal.
+    fn parse_tap_target(&mut self) -> Result<IrValue, String> {
+        self.parse_pair_target('!', "tap")
+    }
+
+    /// Parse a `type<sep>kind` pair target, returning a combined literal string.
+    fn parse_pair_target(&mut self, sep: char, context: &str) -> Result<IrValue, String> {
+        let first = self.parse_type()?;
+        if !self.eat_punct(sep) {
+            return Err(format!(
+                "expected '{sep}' after type name in {context} target"
+            ));
         }
-        let request_kind = self.parse_type()?;
-        match (type_name, request_kind) {
-            (IrValue::Literal(t), IrValue::Literal(r)) => Ok(IrValue::Literal(format!("{t}?{r}"))),
-            _ => Err("handle targets must be literal type?request pairs".to_string()),
+        let second = self.parse_type()?;
+        match (first, second) {
+            (IrValue::Literal(a), IrValue::Literal(b)) => {
+                Ok(IrValue::Literal(format!("{a}{sep}{b}")))
+            }
+            _ => Err(format!(
+                "{context} targets must be literal type{sep}kind pairs"
+            )),
         }
     }
 
@@ -722,6 +737,18 @@ impl Parser {
             while self.peek_punct(',') {
                 self.pos += 1; // consume ','
                 targets.push(self.parse_handle_target()?);
+            }
+            return Ok(IrCommand::Pragma { kind, targets });
+        }
+
+        // tap/untap: #tap type!event[,type!event,...], etc.
+        if self.peek_keyword("tap") || self.peek_keyword("untap") {
+            let kind_str = self.expect_ident("expected pragma kind")?;
+            let kind = IrValue::Literal(kind_str);
+            let mut targets = vec![self.parse_tap_target()?];
+            while self.peek_punct(',') {
+                self.pos += 1; // consume ','
+                targets.push(self.parse_tap_target()?);
             }
             return Ok(IrCommand::Pragma { kind, targets });
         }

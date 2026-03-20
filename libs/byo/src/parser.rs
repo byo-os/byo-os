@@ -307,6 +307,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             "unredirect" => PragmaKind::Unredirect,
             "handle" => PragmaKind::Handle(self.parse_comma_handle_targets()?),
             "unhandle" => PragmaKind::Unhandle(self.parse_comma_handle_targets()?),
+            "tap" => PragmaKind::Tap(self.parse_comma_tap_targets()?),
+            "untap" => PragmaKind::Untap(self.parse_comma_tap_targets()?),
             _ => {
                 let name = self.byte_str_at(span);
                 let mut targets = Vec::new();
@@ -762,7 +764,21 @@ impl<'a, 'tok> Parser<'a, 'tok> {
 
     /// Parse a comma-separated list of `type?request` handle targets.
     fn parse_comma_handle_targets(&mut self) -> Result<Vec<(ByteStr, ByteStr)>, ParseError> {
-        let mut targets = vec![self.parse_handle_target()?];
+        self.parse_comma_pair_targets(&Token::Question, "'?' in handle target (type?request)")
+    }
+
+    /// Parse a comma-separated list of `type!event` tap targets.
+    fn parse_comma_tap_targets(&mut self) -> Result<Vec<(ByteStr, ByteStr)>, ParseError> {
+        self.parse_comma_pair_targets(&Token::Bang, "'!' in tap target (type!event)")
+    }
+
+    /// Parse a comma-separated list of pair targets separated by `sep_token`.
+    fn parse_comma_pair_targets(
+        &mut self,
+        sep_token: &Token,
+        expected_msg: &'static str,
+    ) -> Result<Vec<(ByteStr, ByteStr)>, ParseError> {
+        let mut targets = vec![self.parse_pair_target(sep_token, expected_msg)?];
         while matches!(
             self.peek(),
             Some(Spanned {
@@ -771,27 +787,25 @@ impl<'a, 'tok> Parser<'a, 'tok> {
             })
         ) {
             self.advance(); // consume comma
-            targets.push(self.parse_handle_target()?);
+            targets.push(self.parse_pair_target(sep_token, expected_msg)?);
         }
         Ok(targets)
     }
 
-    /// Parse a single `type?request` handle target as a (type, request) tuple.
-    fn parse_handle_target(&mut self) -> Result<(ByteStr, ByteStr), ParseError> {
-        let type_name = self.expect_type()?;
+    /// Parse a single `type<sep>kind` pair target as a (type, kind) tuple.
+    fn parse_pair_target(
+        &mut self,
+        sep_token: &Token,
+        expected_msg: &'static str,
+    ) -> Result<(ByteStr, ByteStr), ParseError> {
+        let first = self.expect_type()?;
         let span = self.here_span();
-        if matches!(
-            self.peek(),
-            Some(Spanned {
-                token: Token::Question,
-                ..
-            })
-        ) {
-            self.advance(); // consume ?
+        if self.peek().is_some_and(|s| s.token == *sep_token) {
+            self.advance();
         } else {
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "'?' in handle target (type?request)",
+                    expected: expected_msg,
                     found: self
                         .peek()
                         .map(|t| format!("{:?}", t.token))
@@ -800,8 +814,8 @@ impl<'a, 'tok> Parser<'a, 'tok> {
                 span,
             });
         }
-        let request_kind = self.expect_type()?;
-        Ok((type_name, request_kind))
+        let second = self.expect_type()?;
+        Ok((first, second))
     }
 
     /// Expect a Word token matching the type pattern: `[a-zA-Z][a-zA-Z0-9._-]*`
@@ -1516,6 +1530,128 @@ mod tests {
     #[test]
     fn handle_missing_type_name() {
         assert!(parse("#handle ?measure").is_err());
+    }
+
+    #[test]
+    fn tap_single() {
+        let cmds = parse("#tap view!scroll").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Tap(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "scroll");
+            }
+            _ => panic!("expected Tap pragma"),
+        }
+    }
+
+    #[test]
+    fn tap_multiple() {
+        let cmds = parse("#tap view!scroll,view!click").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Tap(targets)) => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "scroll");
+                assert_eq!(targets[1].0, "view");
+                assert_eq!(targets[1].1, "click");
+            }
+            _ => panic!("expected Tap pragma"),
+        }
+    }
+
+    #[test]
+    fn untap_single() {
+        let cmds = parse("#untap view!scroll").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Untap(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "scroll");
+            }
+            _ => panic!("expected Untap pragma"),
+        }
+    }
+
+    #[test]
+    fn tap_dot_qualified_type() {
+        let cmds = parse("#tap org.example.Widget!scroll").unwrap();
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Tap(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "org.example.Widget");
+                assert_eq!(targets[0].1, "scroll");
+            }
+            _ => panic!("expected Tap pragma"),
+        }
+    }
+
+    #[test]
+    fn tap_round_trip() {
+        use crate::emitter::Emitter;
+
+        let mut buf = Vec::new();
+        let mut em = Emitter::new(&mut buf);
+        em.frame(|em| {
+            em.tap("view!scroll")?;
+            em.tap_many(&["text!click", "layer!resize"])?;
+            em.untap("view!scroll")
+        })
+        .unwrap();
+
+        let wire = String::from_utf8(buf).unwrap();
+        let payload = wire
+            .strip_prefix("\x1b_B")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+
+        let cmds = parse(payload).unwrap();
+        assert_eq!(cmds.len(), 3);
+
+        match &cmds[0] {
+            Command::Pragma(PragmaKind::Tap(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "scroll");
+            }
+            _ => panic!("expected Tap"),
+        }
+        match &cmds[1] {
+            Command::Pragma(PragmaKind::Tap(targets)) => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, "text");
+                assert_eq!(targets[0].1, "click");
+                assert_eq!(targets[1].0, "layer");
+                assert_eq!(targets[1].1, "resize");
+            }
+            _ => panic!("expected Tap"),
+        }
+        match &cmds[2] {
+            Command::Pragma(PragmaKind::Untap(targets)) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].0, "view");
+                assert_eq!(targets[0].1, "scroll");
+            }
+            _ => panic!("expected Untap"),
+        }
+    }
+
+    #[test]
+    fn tap_missing_bang() {
+        assert!(parse("#tap view").is_err());
+    }
+
+    #[test]
+    fn tap_missing_event_kind() {
+        assert!(parse("#tap view!").is_err());
+    }
+
+    #[test]
+    fn tap_missing_type_name() {
+        assert!(parse("#tap !scroll").is_err());
     }
 
     #[test]

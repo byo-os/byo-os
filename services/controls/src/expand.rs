@@ -643,7 +643,6 @@ pub fn expand_scroll_view<W: io::Write>(
     // Start root
     byo_write!(em,
         +view {format!("{id}-root")} class={root_class.as_str()}
-            events="scroll"
             if !width.is_empty() { width={width} }
             if !height.is_empty() { height={height} }
         {
@@ -654,7 +653,7 @@ pub fn expand_scroll_view<W: io::Write>(
                 if let Some(v) = scroll_y_prop { scroll-y={v.as_str()} }
                 if let Some(v) = default_scroll_x { default-scroll-x={v.as_str()} }
                 if let Some(v) = default_scroll_y { default-scroll-y={v.as_str()} }
-                events="resize"
+                events="scroll,resize"
             {
                 ::_ {}
             }
@@ -864,9 +863,8 @@ mod tests {
         assert!(out.contains("overflow-x=hidden"));
         // No scroll-y in output: uncontrolled mode (compositor owns scroll position)
         assert!(!out.contains("scroll-y="));
-        // Scroll events on root container, resize on viewport (separate targets)
-        assert!(out.contains("events=scroll"));
-        assert!(out.contains("events=resize"));
+        // Scroll and resize events both on viewport
+        assert!(out.contains("events=\"scroll,resize\""));
         assert!(out.contains("::_ {"));
         assert!(out.contains("+scrollbar content-scrollbar-y"));
         assert!(out.contains("direction=vertical"));

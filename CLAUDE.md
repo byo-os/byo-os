@@ -175,6 +175,8 @@ ACK carries a handling disposition for event bubbling:
 | `#` | `#unredirect`         | Restore default passthrough (root tty) |
 | `#` | `#handle type?req,..` | Register as handler for request(s)     |
 | `#` | `#unhandle type?req,..`| Release handler registration           |
+| `#` | `#tap type!event,..`  | Tap (eavesdrop) events for type(s)     |
+| `#` | `#untap type!event,..`| Stop tapping events                    |
 
 Pragmas are fire-and-forget stream directives — they have no
 sequence numbers and no responses. They manage subscriptions and
@@ -224,6 +226,23 @@ The orchestrator routes custom requests using a **3-tier strategy**:
 3. **BFS fallback**: walk expansion children to find a type with
    an explicit handler (e.g. `?measure` on a `button` → finds a
    `view` child → routes to compositor)
+
+**Event tapping:** `#tap type!event,...` registers the process to
+receive read-only copies of events matching the given (type, event)
+pairs. Plural — multiple processes can tap the same pair. Tap copies
+are fire-and-forget: they carry the original sender's sequence number,
+use the fully qualified target ID, and include a `tap` flag prop.
+The event sender and primary recipient are excluded (self-suppression).
+Use case: multi-compositor sync (e.g. scroll position replication).
+
+#### System-injected props
+
+The orchestrator injects the following props during routing:
+
+- `kind=<type>` — added to `?expand` requests with the original
+  object type being expanded
+- `tap` — boolean flag on event tap copies, indicating the event
+  is a fire-and-forget eavesdrop copy (no ACK expected)
 
 #### Requests and responses
 
@@ -286,6 +305,8 @@ the protocol extensible.
 - `unredirect` — restore default passthrough routing
 - `handle` — register as handler for (type, request) pairs
 - `unhandle` — release handler registration
+- `tap` — tap (eavesdrop) events for (type, event) pairs
+- `untap` — stop tapping events
 
 **Requests (`?`):**
 - `expand` — request daemon expansion

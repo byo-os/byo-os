@@ -675,7 +675,6 @@ fn on_pointer_scroll(
     id_map: Res<IdMap>,
     keys: Res<ButtonInput<KeyCode>>,
     parent_query: Query<&ChildOf>,
-    children_query: Query<&Children>,
     subs_query: Query<&EventSubscriptions>,
     byo_entities: Query<(), ByoEntityFilter>,
     node_query: Query<&ComputedNode>,
@@ -714,24 +713,21 @@ fn on_pointer_scroll(
         target, event.entity, event.unit, event.x, event.y
     );
 
-    // Find the nearest ancestor with a scroll event subscription (the root
-    // container). The root stays in place even when the viewport is translated
-    // by overscroll, so pointer events always reach it.
+    // Find the nearest ancestor with a scroll event subscription (the viewport).
     let Some(event_target) = find_scroll_event_target(event.entity, &parent_query, &subs_query)
     else {
         return;
     };
 
-    // From the event target, find the actual scrollable viewport child
-    // (the one with overflow:scroll) for dimensions and ScrollPosition.
-    // The viewport is a direct child of the event target (root container).
-    let scroll_entity = find_scrollable_child(event_target, &children_query, &style_node_query)
-        .unwrap_or(event_target);
+    // The event target has events="scroll" — now on the viewport itself,
+    // which also has overflow:scroll and ScrollPosition.
+    let scroll_entity = event_target;
 
-    let scroll_byo_id = id_map.get_id(scroll_entity).unwrap_or_default();
     debug!(
-        "raw_scroll: event_target={:?} scroll_entity={:?} byo_id={} (hit={:?})",
-        event_target, scroll_entity, scroll_byo_id, event.entity
+        "raw_scroll: scroll_entity={:?} byo_id={} (hit={:?})",
+        scroll_entity,
+        id_map.get_id(scroll_entity).unwrap_or_default(),
+        event.entity
     );
 
     // Compute content/viewport dimensions from the scrollable viewport
@@ -811,9 +807,7 @@ fn on_pointer_scroll(
     pointer.scroll_overflow_x = overflow_x;
     pointer.scroll_overflow_y = overflow_y;
 
-    // Build spine from the event target (root container), which has the
-    // scroll event subscription. The root stays in place even during
-    // overscroll, ensuring events always reach the daemon.
+    // Build spine from the event target (viewport with events="scroll").
     dispatch_pointer_event(
         event_target,
         EventKind::Scroll,
@@ -829,8 +823,7 @@ fn on_pointer_scroll(
 }
 
 /// Walk up from `entity` to find the nearest ancestor with a Scroll event
-/// subscription. This targets the non-moving container (e.g. scroll-view root)
-/// rather than the viewport, which may be translated by overscroll.
+/// subscription (the viewport with `events="scroll"`).
 pub(crate) fn find_scroll_event_target(
     entity: Entity,
     parent_query: &Query<&ChildOf>,
@@ -845,26 +838,6 @@ pub(crate) fn find_scroll_event_target(
             return Some(e);
         }
         current = parent_query.get(e).ok().map(|c| c.parent());
-    }
-    None
-}
-
-/// Among direct children of `entity`, find the one with `OverflowAxis::Scroll`.
-/// Used to locate the scrollable viewport inside a scroll-view container.
-fn find_scrollable_child(
-    entity: Entity,
-    children_query: &Query<&Children>,
-    node_query: &Query<&Node>,
-) -> Option<Entity> {
-    let Ok(children) = children_query.get(entity) else {
-        return None;
-    };
-    for child in children.iter() {
-        if let Ok(node) = node_query.get(child)
-            && (node.overflow.x == OverflowAxis::Scroll || node.overflow.y == OverflowAxis::Scroll)
-        {
-            return Some(child);
-        }
     }
     None
 }

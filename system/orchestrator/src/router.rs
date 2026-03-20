@@ -75,6 +75,8 @@ pub struct Router {
     claims: HashMap<String, ProcessId>,
     /// (type_name, request_kind) → ONE handler process.
     handlers: HashMap<(String, String), ProcessId>,
+    /// (type_name, event_kind) → MULTIPLE tapping processes (event eavesdroppers).
+    taps: HashMap<(String, String), Vec<ProcessId>>,
     /// Type name → MULTIPLE observer processes (final output consumers).
     observers: HashMap<String, Vec<ProcessId>>,
     /// Reverse index: observer PID → set of observed type names.
@@ -122,6 +124,7 @@ impl Default for Router {
             processes: HashMap::new(),
             claims: HashMap::new(),
             handlers: HashMap::new(),
+            taps: HashMap::new(),
             observers: HashMap::new(),
             observer_types: HashMap::new(),
             state: ObjectTree::new(),
@@ -252,6 +255,16 @@ impl Router {
                 Command::Pragma(PragmaKind::Unhandle(targets)) => {
                     for (type_name, request_kind) in targets {
                         self.unregister_handler(from, &client, type_name, request_kind);
+                    }
+                }
+                Command::Pragma(PragmaKind::Tap(targets)) => {
+                    for (type_name, event_kind) in targets {
+                        self.register_tap(from, &client, type_name, event_kind);
+                    }
+                }
+                Command::Pragma(PragmaKind::Untap(targets)) => {
+                    for (type_name, event_kind) in targets {
+                        self.unregister_tap(from, &client, type_name, event_kind);
                     }
                 }
                 Command::Response {
@@ -727,6 +740,12 @@ impl Router {
         // Remove all handler registrations for this process.
         self.handlers.retain(|_, &mut pid| pid != process);
 
+        // Remove all tap registrations for this process.
+        for tappers in self.taps.values_mut() {
+            tappers.retain(|&pid| pid != process);
+        }
+        self.taps.retain(|_, v| !v.is_empty());
+
         // Remove all observer entries for this process.
         for observers in self.observers.values_mut() {
             observers.retain(|&pid| pid != process);
@@ -947,6 +966,43 @@ impl Router {
             .map(|(_, &pid)| pid)
     }
 
+    /// Register a tap for a (type, event) pair. Plural — multiple processes can tap.
+    fn register_tap(&mut self, from: ProcessId, client: &str, type_name: &str, event_kind: &str) {
+        tracing::info!("{client} taps {type_name}!{event_kind}");
+        let entry = self
+            .taps
+            .entry((type_name.to_owned(), event_kind.to_owned()))
+            .or_default();
+        if !entry.contains(&from) {
+            entry.push(from);
+        }
+    }
+
+    /// Unregister a tap for a (type, event) pair.
+    fn unregister_tap(&mut self, from: ProcessId, client: &str, type_name: &str, event_kind: &str) {
+        tracing::info!("{client} untaps {type_name}!{event_kind}");
+        // Linear scan avoids allocating owned Strings (consistent with lookup_taps).
+        if let Some((_, entry)) = self
+            .taps
+            .iter_mut()
+            .find(|((t, e), _)| t == type_name && e == event_kind)
+        {
+            entry.retain(|&pid| pid != from);
+        }
+        self.taps.retain(|_, v| !v.is_empty());
+    }
+
+    /// Look up all tappers for a (type_name, event_kind) pair.
+    fn lookup_taps(&self, type_name: &str, event_kind: &str) -> &[ProcessId] {
+        // Linear scan avoids allocating owned Strings for HashMap::get.
+        // The taps map is expected to be small.
+        self.taps
+            .iter()
+            .find(|((t, e), _)| t == type_name && e == event_kind)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// BFS through expansion children to find a handler for the given request kind.
     ///
     /// Walks the expansion subtree of `qid` breadth-first, checking if any
@@ -1138,9 +1194,9 @@ impl Router {
             }
         };
 
-        // Look up the owner of this object in the state tree.
-        let target_pid = match self.state.get(&qid) {
-            Some(obj) => obj.data,
+        // Look up the owner and type of this object in the state tree.
+        let (target_pid, obj_type) = match self.state.get(&qid) {
+            Some(obj) => (obj.data, obj.kind.as_type().map(|s| s.to_owned())),
             None => {
                 tracing::warn!(
                     "handle_event: {qid} not in state tree (event={} from={client})",
@@ -1188,6 +1244,24 @@ impl Router {
                 forwarded_at: Instant::now(),
             },
         );
+
+        // --- Tap fan-out: send read-only copies to tapping processes ---
+        if let Some(ref obj_type) = obj_type {
+            let tappers: Vec<ProcessId> = self
+                .lookup_taps(obj_type, event_type)
+                .iter()
+                .copied()
+                .filter(|&pid| pid != from && pid != target_pid)
+                .collect();
+            if !tappers.is_empty() {
+                let tap_msg = WriteMsg::Byo(Arc::new(byo_vec! {
+                    !{event_type} {seq} {&qualified_id} tap {..props}
+                }));
+                for tapper_pid in tappers {
+                    self.send_to(tapper_pid, tap_msg.clone());
+                }
+            }
+        }
     }
 
     /// Route an ACK back to the original event sender.
@@ -2986,6 +3060,536 @@ mod tests {
         assert!(
             has_destroy,
             "reconcile_expansion should detect real parent change for controls:item. Delta: {delta:?}"
+        );
+    }
+
+    // ── #tap / #untap registration tests ─────────────────────────
+
+    #[test]
+    fn register_tap() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_tap(pid, "compositor", "view", "scroll");
+        assert_eq!(
+            router.taps.get(&("view".to_owned(), "scroll".to_owned())),
+            Some(&vec![pid])
+        );
+    }
+
+    #[test]
+    fn register_tap_plural() {
+        let mut router = Router::new();
+        let pid1 = ProcessId(1);
+        let pid2 = ProcessId(2);
+        router.register_tap(pid1, "compositor", "view", "scroll");
+        router.register_tap(pid2, "compositor2", "view", "scroll");
+        let tappers = router
+            .taps
+            .get(&("view".to_owned(), "scroll".to_owned()))
+            .unwrap();
+        assert_eq!(tappers.len(), 2);
+        assert!(tappers.contains(&pid1));
+        assert!(tappers.contains(&pid2));
+    }
+
+    #[test]
+    fn register_tap_idempotent() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_tap(pid, "compositor", "view", "scroll");
+        router.register_tap(pid, "compositor", "view", "scroll");
+        assert_eq!(
+            router
+                .taps
+                .get(&("view".to_owned(), "scroll".to_owned()))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unregister_tap() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_tap(pid, "compositor", "view", "scroll");
+        router.unregister_tap(pid, "compositor", "view", "scroll");
+        assert!(router.taps.is_empty());
+    }
+
+    #[test]
+    fn unregister_tap_preserves_others() {
+        let mut router = Router::new();
+        let pid1 = ProcessId(1);
+        let pid2 = ProcessId(2);
+        router.register_tap(pid1, "compositor", "view", "scroll");
+        router.register_tap(pid2, "compositor2", "view", "scroll");
+        router.unregister_tap(pid1, "compositor", "view", "scroll");
+        assert_eq!(
+            router.taps.get(&("view".to_owned(), "scroll".to_owned())),
+            Some(&vec![pid2])
+        );
+    }
+
+    #[test]
+    fn tap_cleanup_on_disconnect() {
+        let mut router = Router::new();
+        let pid = ProcessId(1);
+        router.register_tap(pid, "compositor", "view", "scroll");
+        router.register_tap(pid, "compositor", "text", "click");
+        // Simulate disconnect cleanup (same pattern as handle_disconnect).
+        for tappers in router.taps.values_mut() {
+            tappers.retain(|&p| p != pid);
+        }
+        router.taps.retain(|_, v| !v.is_empty());
+        assert!(router.taps.is_empty());
+    }
+
+    // ── #tap fan-out behavior tests ──────────────────────────────
+
+    use crate::channel::tracked_unbounded_channel;
+
+    /// Create a test Process with a channel pair for verifying sends.
+    fn make_test_process(
+        id: ProcessId,
+        name: &str,
+    ) -> (Process, crate::channel::TrackedUnboundedReceiver<WriteMsg>) {
+        let (tx, rx) = tracked_unbounded_channel(format!("test-{name}"), 512, 256);
+        let process = Process {
+            id,
+            name: name.to_owned(),
+            kind: ProcessKind::InProcess,
+            tx,
+        };
+        (process, rx)
+    }
+
+    /// Drain all WriteMsg::Byo commands from a receiver.
+    fn drain_byo(rx: &mut crate::channel::TrackedUnboundedReceiver<WriteMsg>) -> Vec<Vec<Command>> {
+        let mut all = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let WriteMsg::Byo(cmds) = msg {
+                all.push((*cmds).clone());
+            }
+        }
+        all
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_basic() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(
+                sender,
+                "sender",
+                &EventKind::Scroll,
+                0,
+                "btn",
+                &[Prop::val("delta-y", "-20")],
+            )
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        assert_eq!(msgs.len(), 1, "tapper should receive exactly one tap copy");
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_no_self_send() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+
+        let (p1, mut rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        router.add_process(p1);
+        router.add_process(p2);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        // Sender also taps — should NOT receive its own event.
+        router.register_tap(sender, "sender", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx1);
+        assert!(
+            msgs.is_empty(),
+            "sender should not receive tap copy of its own event"
+        );
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_no_recipient_send() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, mut rx2) = make_test_process(owner, "owner");
+        router.add_process(p1);
+        router.add_process(p2);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        // Owner also taps — should NOT get duplicate.
+        router.register_tap(owner, "owner", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        // Owner gets exactly 1 message (the primary routed event), not 2.
+        let msgs = drain_byo(&mut rx2);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "owner should get primary event only, no tap duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_multiple_tappers() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper_a = ProcessId(3);
+        let tapper_b = ProcessId(4);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper_a, "tapper-a");
+        let (p4, mut rx4) = make_test_process(tapper_b, "tapper-b");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+        router.add_process(p4);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper_a, "tapper-a", "view", "scroll");
+        router.register_tap(tapper_b, "tapper-b", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        assert_eq!(drain_byo(&mut rx3).len(), 1, "tapper_a should receive tap");
+        assert_eq!(drain_byo(&mut rx4).len(), 1, "tapper_b should receive tap");
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_qualified_id() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        let cmds = &msgs[0];
+        // The tap copy should use the qualified ID "sender:btn".
+        match &cmds[0] {
+            Command::Event { id, .. } => {
+                assert_eq!(
+                    id.as_ref(),
+                    "sender:btn",
+                    "tap copy should use qualified ID"
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_has_tap_flag() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        let cmds = &msgs[0];
+        match &cmds[0] {
+            Command::Event { props, .. } => {
+                assert!(
+                    props
+                        .iter()
+                        .any(|p| matches!(p, Prop::Boolean { key } if key == "tap")),
+                    "tap copy should contain 'tap' flag prop"
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_preserves_seq() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 42, "btn", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        match &msgs[0][0] {
+            Command::Event { seq, .. } => {
+                assert_eq!(*seq, 42, "tap copy should preserve original sender's seq");
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_preserves_props() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(
+                sender,
+                "sender",
+                &EventKind::Scroll,
+                0,
+                "btn",
+                &[Prop::val("delta-y", "-20"), Prop::val("scroll-y", "100")],
+            )
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        match &msgs[0][0] {
+            Command::Event { props, .. } => {
+                assert!(
+                    props.iter().any(|p| matches!(p, Prop::Value { key, value } if key == "delta-y" && value == "-20")),
+                    "tap copy should preserve delta-y prop"
+                );
+                assert!(
+                    props.iter().any(|p| matches!(p, Prop::Value { key, value } if key == "scroll-y" && value == "100")),
+                    "tap copy should preserve scroll-y prop"
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_no_pending_ack() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, _rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "btn", &[])
+            .await;
+
+        // Only the primary routing should have a PendingAck (for owner), not the tapper.
+        let tapper_acks: Vec<_> = router
+            .pending_acks
+            .keys()
+            .filter(|(pid, _, _)| *pid == tapper)
+            .collect();
+        assert!(
+            tapper_acks.is_empty(),
+            "no PendingAck should exist for tapper"
+        );
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_unmatched_type() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        // Object type is "text", but tapper taps "view!scroll".
+        let qid = QualifiedId::parse("sender:label").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("text".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Scroll, 0, "label", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        assert!(
+            msgs.is_empty(),
+            "tapper should not receive event for unmatched type"
+        );
+    }
+
+    #[tokio::test]
+    async fn tap_fan_out_unmatched_event() {
+        let mut router = Router::new();
+        let sender = ProcessId(1);
+        let owner = ProcessId(2);
+        let tapper = ProcessId(3);
+
+        let (p1, _rx1) = make_test_process(sender, "sender");
+        let (p2, _rx2) = make_test_process(owner, "owner");
+        let (p3, mut rx3) = make_test_process(tapper, "tapper");
+        router.add_process(p1);
+        router.add_process(p2);
+        router.add_process(p3);
+
+        let qid = QualifiedId::parse("sender:btn").unwrap();
+        router.state.upsert(
+            ObjectKind::Type("view".into()),
+            &qid,
+            &IndexMap::new(),
+            owner,
+        );
+        // Tapper taps view!scroll, but event is click.
+        router.register_tap(tapper, "tapper", "view", "scroll");
+
+        router
+            .handle_event(sender, "sender", &EventKind::Click, 0, "btn", &[])
+            .await;
+
+        let msgs = drain_byo(&mut rx3);
+        assert!(
+            msgs.is_empty(),
+            "tapper should not receive event for unmatched event kind"
         );
     }
 }

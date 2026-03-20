@@ -416,6 +416,25 @@ impl<W: io::Write> Emitter<W> {
         Ok(())
     }
 
+    /// Write `#name a<sep>b,a<sep>b,...` — pair-target pragma (handle/tap).
+    fn write_pair_pragma(
+        &mut self,
+        name: &str,
+        targets: &[(crate::byte_str::ByteStr, crate::byte_str::ByteStr)],
+        sep: char,
+    ) -> io::Result<()> {
+        write!(self.writer, "\n#{name}")?;
+        for (i, (a, b)) in targets.iter().enumerate() {
+            if i > 0 {
+                write!(self.writer, ",")?;
+            } else {
+                write!(self.writer, " ")?;
+            }
+            write!(self.writer, "{a}{sep}{b}")?;
+        }
+        Ok(())
+    }
+
     /// `#claim type` — Claim ownership of an object type.
     pub fn claim(&mut self, target_type: &str) -> io::Result<()> {
         self.pragma("claim", target_type)
@@ -484,6 +503,26 @@ impl<W: io::Write> Emitter<W> {
     /// `#unhandle type?request,...` — Unregister as handler for multiple request types.
     pub fn unhandle_many(&mut self, targets: &[&str]) -> io::Result<()> {
         self.pragma_many("unhandle", targets)
+    }
+
+    /// `#tap type!event` — Tap (eavesdrop) events for a (type, event) pair.
+    pub fn tap(&mut self, target: &str) -> io::Result<()> {
+        self.pragma("tap", target)
+    }
+
+    /// `#tap type!event,...` — Tap events for multiple (type, event) pairs.
+    pub fn tap_many(&mut self, targets: &[&str]) -> io::Result<()> {
+        self.pragma_many("tap", targets)
+    }
+
+    /// `#untap type!event` — Stop tapping events for a (type, event) pair.
+    pub fn untap(&mut self, target: &str) -> io::Result<()> {
+        self.pragma("untap", target)
+    }
+
+    /// `#untap type!event,...` — Stop tapping events for multiple (type, event) pairs.
+    pub fn untap_many(&mut self, targets: &[&str]) -> io::Result<()> {
+        self.pragma_many("untap", targets)
     }
 
     // -- Requests/Responses ---------------------------------------------------
@@ -650,15 +689,10 @@ impl<W: io::Write> Emitter<W> {
                             }
                         }
                         PragmaKind::Handle(targets) | PragmaKind::Unhandle(targets) => {
-                            write!(self.writer, "\n#{}", pragma.as_str())?;
-                            for (i, (t, r)) in targets.iter().enumerate() {
-                                if i > 0 {
-                                    write!(self.writer, ",")?;
-                                } else {
-                                    write!(self.writer, " ")?;
-                                }
-                                write!(self.writer, "{t}?{r}")?;
-                            }
+                            self.write_pair_pragma(pragma.as_str(), targets, '?')?;
+                        }
+                        PragmaKind::Tap(targets) | PragmaKind::Untap(targets) => {
+                            self.write_pair_pragma(pragma.as_str(), targets, '!')?;
                         }
                         PragmaKind::Redirect(target) => {
                             write!(self.writer, "\n#redirect {target}")?;

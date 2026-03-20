@@ -38,6 +38,10 @@ pub enum ScrollMessage {
         target: String,
         x: Option<f32>,
         y: Option<f32>,
+        /// When true, the scroll position came from an external source (e.g.
+        /// a tap copy from another compositor). Don't emit a `!scroll` event
+        /// back to the orchestrator to prevent feedback loops.
+        external: bool,
     },
     ScrollBy {
         target: String,
@@ -72,15 +76,20 @@ fn process_scroll_messages(
     let mut any = false;
 
     for msg in messages.read() {
-        let (entity, sx, sy) = match msg {
-            ScrollMessage::ScrollTo { target, x, y } => {
+        let (entity, sx, sy, external) = match msg {
+            ScrollMessage::ScrollTo {
+                target,
+                x,
+                y,
+                external,
+            } => {
                 let Some(entity) = id_map.get_entity(target) else {
                     continue;
                 };
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y))
+                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y), *external)
             }
             ScrollMessage::ScrollBy { target, dx, dy } => {
                 let Some(entity) = id_map.get_entity(target) else {
@@ -89,14 +98,14 @@ fn process_scroll_messages(
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (entity, sp.x + dx, sp.y + dy)
+                (entity, sp.x + dx, sp.y + dy, false)
             }
         };
 
         if let Ok(mut sp) = scroll_query.get_mut(entity) {
             sp.x = sx;
             sp.y = sy;
-            if !pending.0.contains(&entity) {
+            if !external && !pending.0.contains(&entity) {
                 pending.0.push(entity);
             }
             any = true;
