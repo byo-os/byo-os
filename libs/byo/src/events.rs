@@ -42,6 +42,9 @@ pub struct EventSub {
     pub phase: Phase,
     pub passive: bool,
     pub verbose: bool,
+    /// Optional forward target: when this node is reached during dispatch,
+    /// splice a nested capture/bubble cycle on the target's subtree.
+    pub forward_target: Option<String>,
 }
 
 /// Parsed event subscription set.
@@ -108,6 +111,7 @@ fn parse_entry(entry: &str) -> Option<EventSub> {
     let mut has_bubble = false;
     let mut passive = false;
     let mut verbose = false;
+    let mut forward_target = None;
 
     for token in tokens {
         match token {
@@ -115,7 +119,11 @@ fn parse_entry(entry: &str) -> Option<EventSub> {
             "bubble" => has_bubble = true,
             "passive" => passive = true,
             "verbose" => verbose = true,
-            _ => {} // ignore unknown options
+            _ => {
+                if let Some(id) = token.strip_prefix("forward(").and_then(|s| s.strip_suffix(')')) {
+                    forward_target = Some(id.to_string());
+                }
+            }
         }
     }
 
@@ -131,6 +139,7 @@ fn parse_entry(entry: &str) -> Option<EventSub> {
         phase,
         passive,
         verbose,
+        forward_target,
     })
 }
 
@@ -272,5 +281,57 @@ mod tests {
         assert!(subs.contains(&EventKind::PointerDown));
         assert!(!subs.contains(&EventKind::Scroll));
         assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn forward_basic() {
+        let subs = EventSubscriptionSet::parse("scroll forward(viewport)");
+        let sub = subs.get(&EventKind::Scroll).unwrap();
+        assert_eq!(sub.forward_target.as_deref(), Some("viewport"));
+        assert_eq!(sub.phase, Phase::Bubble);
+        assert!(!sub.passive);
+    }
+
+    #[test]
+    fn forward_with_modifiers() {
+        let subs = EventSubscriptionSet::parse("scroll capture forward(viewport)");
+        let sub = subs.get(&EventKind::Scroll).unwrap();
+        assert_eq!(sub.forward_target.as_deref(), Some("viewport"));
+        assert_eq!(sub.phase, Phase::Capture);
+    }
+
+    #[test]
+    fn forward_multiple_events() {
+        let subs =
+            EventSubscriptionSet::parse("scroll forward(vp), click forward(btn)");
+        let scroll = subs.get(&EventKind::Scroll).unwrap();
+        assert_eq!(scroll.forward_target.as_deref(), Some("vp"));
+        let click = subs.get(&EventKind::Click).unwrap();
+        assert_eq!(click.forward_target.as_deref(), Some("btn"));
+    }
+
+    #[test]
+    fn forward_preserves_other_modifiers() {
+        let subs =
+            EventSubscriptionSet::parse("scroll capture passive verbose forward(vp)");
+        let sub = subs.get(&EventKind::Scroll).unwrap();
+        assert_eq!(sub.forward_target.as_deref(), Some("vp"));
+        assert_eq!(sub.phase, Phase::Capture);
+        assert!(sub.passive);
+        assert!(sub.verbose);
+    }
+
+    #[test]
+    fn no_forward() {
+        let subs = EventSubscriptionSet::parse("scroll capture");
+        let sub = subs.get(&EventKind::Scroll).unwrap();
+        assert!(sub.forward_target.is_none());
+    }
+
+    #[test]
+    fn forward_with_hyphenated_id() {
+        let subs = EventSubscriptionSet::parse("scroll forward(content-viewport)");
+        let sub = subs.get(&EventKind::Scroll).unwrap();
+        assert_eq!(sub.forward_target.as_deref(), Some("content-viewport"));
     }
 }

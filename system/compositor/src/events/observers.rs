@@ -86,6 +86,25 @@ fn build_spine(
             if let Ok(subs) = subs_query.get(e)
                 && let Some(sub) = subs.get(kind)
             {
+                // Build forward spine if this node has a forward target
+                let forward_spine = sub.forward_target.as_ref().and_then(|target_id| {
+                    let target_entity =
+                        resolve_forward_target(target_id, byo_id, id_map)?;
+                    let fwd = build_forward_spine(
+                        target_entity,
+                        e, // stop before reaching the forwarding node
+                        kind,
+                        pointer,
+                        id_map,
+                        parent_query,
+                        subs_query,
+                        byo_entities,
+                        node_query,
+                        ui_transforms,
+                    );
+                    if fwd.is_empty() { None } else { Some(fwd) }
+                });
+
                 spine.push(SpineNode {
                     byo_id: byo_id.to_string(),
                     phase: sub.phase,
@@ -95,6 +114,7 @@ fn build_spine(
                     local_y,
                     width: w,
                     height: h,
+                    forward_spine,
                 });
             }
             // Even if no subscription, we still walk up the tree
@@ -105,6 +125,80 @@ fn build_spine(
     }
 
     // Reverse so it's root → leaf
+    spine.reverse();
+    spine
+}
+
+/// Resolve a forward target local ID to an Entity.
+///
+/// The target ID from `forward(id)` is local (e.g. `viewport`). We qualify
+/// it using the forwarding node's client prefix (e.g. `controls:viewport`).
+pub(crate) fn resolve_forward_target(
+    target_local_id: &str,
+    forwarding_node_qid: &str,
+    id_map: &IdMap,
+) -> Option<Entity> {
+    if let Some((prefix, _)) = forwarding_node_qid.split_once(':') {
+        let qualified = format!("{prefix}:{target_local_id}");
+        id_map.get_entity(&qualified)
+    } else {
+        id_map.get_entity(target_local_id)
+    }
+}
+
+/// Build a spine from `target_entity` upward, stopping before `stop_at`.
+///
+/// Used to create the nested capture/bubble cycle for `forward()` targets.
+/// The `stop_at` entity (the forwarding node) is excluded to prevent cycles.
+#[allow(clippy::too_many_arguments)]
+fn build_forward_spine(
+    target_entity: Entity,
+    stop_at: Entity,
+    kind: &EventKind,
+    pointer: &PointerData,
+    id_map: &IdMap,
+    parent_query: &Query<&ChildOf>,
+    subs_query: &Query<&EventSubscriptions>,
+    byo_entities: &Query<(), ByoEntityFilter>,
+    node_query: &Query<&ComputedNode>,
+    ui_transforms: &Query<&UiGlobalTransform>,
+) -> Vec<SpineNode> {
+    let mut spine = Vec::new();
+    let mut current = Some(target_entity);
+
+    while let Some(e) = current {
+        if e == stop_at {
+            break;
+        }
+        if byo_entities.get(e).is_ok()
+            && let Some(byo_id) = id_map.get_id(e)
+        {
+            let (local_x, local_y, w, h) = compute_local_coords(
+                e,
+                pointer.client_x,
+                pointer.client_y,
+                node_query,
+                ui_transforms,
+            );
+            if let Ok(subs) = subs_query.get(e)
+                && let Some(sub) = subs.get(kind)
+            {
+                spine.push(SpineNode {
+                    byo_id: byo_id.to_string(),
+                    phase: sub.phase,
+                    passive: sub.passive,
+                    verbose: sub.verbose,
+                    local_x,
+                    local_y,
+                    width: w,
+                    height: h,
+                    forward_spine: None, // No nested forwards in forward spines
+                });
+            }
+        }
+        current = parent_query.get(e).ok().map(|c| c.parent());
+    }
+
     spine.reverse();
     spine
 }
@@ -159,6 +253,7 @@ fn build_spine_node(
         local_y,
         width: w,
         height: h,
+        forward_spine: None,
     })
 }
 
@@ -713,18 +808,29 @@ fn on_pointer_scroll(
         target, event.entity, event.unit, event.x, event.y
     );
 
-    // Find the nearest ancestor with a scroll event subscription (the viewport).
+    // Find the nearest ancestor with a scroll event subscription.
     let Some(event_target) = find_scroll_event_target(event.entity, &parent_query, &subs_query)
     else {
         return;
     };
 
-    // The event target has events="scroll" — now on the viewport itself,
-    // which also has overflow:scroll and ScrollPosition.
-    let scroll_entity = event_target;
+    // If the event target has forward(), resolve the forward target as the
+    // scroll entity (it has ScrollPosition + overflow:scroll). Otherwise
+    // the event target itself is the scroll entity.
+    let scroll_entity = subs_query
+        .get(event_target)
+        .ok()
+        .and_then(|subs| subs.get(&EventKind::Scroll))
+        .and_then(|sub| sub.forward_target.as_ref())
+        .and_then(|fwd_id| {
+            let byo_id = id_map.get_id(event_target)?;
+            resolve_forward_target(fwd_id, byo_id, &id_map)
+        })
+        .unwrap_or(event_target);
 
     debug!(
-        "raw_scroll: scroll_entity={:?} byo_id={} (hit={:?})",
+        "raw_scroll: event_target={:?} scroll_entity={:?} byo_id={} (hit={:?})",
+        event_target,
         scroll_entity,
         id_map.get_id(scroll_entity).unwrap_or_default(),
         event.entity
@@ -807,7 +913,7 @@ fn on_pointer_scroll(
     pointer.scroll_overflow_x = overflow_x;
     pointer.scroll_overflow_y = overflow_y;
 
-    // Build spine from the event target (viewport with events="scroll").
+    // Build spine from the event target (which may forward to the viewport).
     dispatch_pointer_event(
         event_target,
         EventKind::Scroll,

@@ -6,9 +6,9 @@ name = "compositor"
 command = "cargo run -p byo-compositor"
 # args = ["--fullscreen"]
 
-# [[process]]
-# name = "compositor2"
-# command = "cargo run -p byo-compositor"
+[[process]]
+name = "compositor2"
+command = "cargo run -p byo-compositor"
 
 [[process]]
 name = "controls"

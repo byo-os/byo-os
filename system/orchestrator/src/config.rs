@@ -112,6 +112,7 @@ mod tests {
         let config = Config::parse(content).unwrap();
         assert!(config.process.len() >= 2);
         assert_eq!(config.process[0].name, "compositor");
-        assert_eq!(config.process[1].name, "controls");
+        let names: Vec<&str> = config.process.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"controls"), "config should contain controls process");
     }
 }

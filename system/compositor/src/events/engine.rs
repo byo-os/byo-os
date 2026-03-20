@@ -199,6 +199,9 @@ pub struct SpineNode {
     pub width: f64,
     /// Computed height of this element (dispatch element / currentTarget).
     pub height: f64,
+    /// Pre-built forward spine: when this node is dispatched and not handled,
+    /// splice these nodes into the dispatch order for a nested capture/bubble cycle.
+    pub forward_spine: Option<Vec<SpineNode>>,
 }
 
 impl SpineNode {
@@ -214,6 +217,7 @@ impl SpineNode {
             local_y,
             width,
             height,
+            forward_spine: None,
         }
     }
 }
@@ -328,6 +332,51 @@ struct InFlightPropagation {
     sent_at: Option<Instant>,
     /// Whether propagation was stopped.
     stopped: bool,
+    /// Forward nesting depth (for cycle detection). Max `MAX_FORWARD_DEPTH`.
+    forward_depth: u32,
+}
+
+/// Maximum nesting depth for `forward()` event modifiers.
+const MAX_FORWARD_DEPTH: u32 = 4;
+
+impl InFlightPropagation {
+    /// If the current spine node has a `forward_spine`, splice its nodes into
+    /// `dispatch_order` right after `current_step` for inline nested dispatch.
+    fn splice_forward(&mut self) {
+        if self.forward_depth >= MAX_FORWARD_DEPTH {
+            return;
+        }
+        let spine_idx = self.dispatch_order[self.current_step];
+        let forward_nodes = match self.spine[spine_idx].forward_spine.take() {
+            Some(nodes) if !nodes.is_empty() => nodes,
+            _ => return,
+        };
+
+        // Append forward spine nodes to the main spine
+        let base_idx = self.spine.len();
+        let count = forward_nodes.len();
+        self.spine.extend(forward_nodes);
+
+        // Build capture-then-bubble dispatch order for the forward nodes
+        let mut forward_order = Vec::new();
+        for i in base_idx..base_idx + count {
+            if self.spine[i].phase.includes_capture() {
+                forward_order.push(i);
+            }
+        }
+        for i in (base_idx..base_idx + count).rev() {
+            if self.spine[i].phase.includes_bubble() {
+                forward_order.push(i);
+            }
+        }
+
+        if !forward_order.is_empty() {
+            let insert_pos = self.current_step + 1;
+            self.dispatch_order
+                .splice(insert_pos..insert_pos, forward_order);
+            self.forward_depth += 1;
+        }
+    }
 }
 
 /// Tracks a pointer press to derive click/dblclick on release.
@@ -470,6 +519,7 @@ impl Engine {
                     pending_ack_key: None,
                     sent_at: None,
                     stopped: false,
+                    forward_depth: 0,
                 };
                 self.on_propagation_complete(&prop);
                 self.drain_deferred();
@@ -490,6 +540,7 @@ impl Engine {
             pending_ack_key: None,
             sent_at: None,
             stopped: false,
+            forward_depth: 0,
         };
 
         // Start dispatching
@@ -531,6 +582,8 @@ impl Engine {
 
         if node.passive {
             // Passive: don't wait for ACK, advance immediately
+            // Splice forward spine before advancing (no ACK to trigger it)
+            prop.splice_forward();
             prop.current_step += 1;
             self.dispatch_next(prop);
         }
@@ -581,6 +634,9 @@ impl Engine {
             self.drain_deferred();
             return;
         }
+
+        // Splice forward spine if the current node has one
+        prop.splice_forward();
 
         // Advance to next step
         prop.current_step += 1;

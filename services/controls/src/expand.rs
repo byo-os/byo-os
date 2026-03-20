@@ -640,9 +640,12 @@ pub fn expand_scroll_view<W: io::Write>(
     let default_scroll_x = state.props.get("default-scroll-x");
     let default_scroll_y = state.props.get("default-scroll-y");
 
-    // Start root
+    // Start root — scroll events are caught here (stable during overscroll)
+    // and forwarded to the viewport via forward() for nested dispatch.
+    let scroll_events = format!("scroll forward({id}-viewport)");
     byo_write!(em,
         +view {format!("{id}-root")} class={root_class.as_str()}
+            events={scroll_events.as_str()}
             if !width.is_empty() { width={width} }
             if !height.is_empty() { height={height} }
         {
@@ -653,7 +656,7 @@ pub fn expand_scroll_view<W: io::Write>(
                 if let Some(v) = scroll_y_prop { scroll-y={v.as_str()} }
                 if let Some(v) = default_scroll_x { default-scroll-x={v.as_str()} }
                 if let Some(v) = default_scroll_y { default-scroll-y={v.as_str()} }
-                events="scroll,resize"
+                events="resize"
             {
                 ::_ {}
             }
@@ -863,8 +866,9 @@ mod tests {
         assert!(out.contains("overflow-x=hidden"));
         // No scroll-y in output: uncontrolled mode (compositor owns scroll position)
         assert!(!out.contains("scroll-y="));
-        // Scroll and resize events both on viewport
-        assert!(out.contains("events=\"scroll,resize\""));
+        // Scroll events on root with forward() to viewport, resize on viewport
+        assert!(out.contains("events=\"scroll forward(content-viewport)\""));
+        assert!(out.contains("events=resize"));
         assert!(out.contains("::_ {"));
         assert!(out.contains("+scrollbar content-scrollbar-y"));
         assert!(out.contains("direction=vertical"));

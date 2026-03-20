@@ -11,10 +11,14 @@
 use bevy::prelude::*;
 use bevy::ui::{ScrollPosition, UiSystems};
 use byo::byo_write;
+use byo::protocol::EventKind;
 
+use crate::events::config::EventSubscriptions;
+use crate::events::observers::resolve_forward_target;
 use crate::id_map::IdMap;
 use crate::io::StdoutEmitter;
 use crate::resize;
+use crate::scroll::{OverscrollState, rubber_band};
 
 pub struct ScrollMessagePlugin;
 
@@ -42,6 +46,10 @@ pub enum ScrollMessage {
         /// a tap copy from another compositor). Don't emit a `!scroll` event
         /// back to the orchestrator to prevent feedback loops.
         external: bool,
+        /// Raw overscroll overflow values (for external scroll sync).
+        /// Applied as visual offset via rubber_band() → OverscrollState.
+        overflow_x: Option<f32>,
+        overflow_y: Option<f32>,
     },
     ScrollBy {
         target: String,
@@ -67,38 +75,44 @@ impl ScrollSeqCounter {
 }
 
 fn process_scroll_messages(
+    mut commands: Commands,
     mut messages: MessageReader<ScrollMessage>,
     id_map: Res<IdMap>,
     mut scroll_query: Query<&mut ScrollPosition>,
+    subs_query: Query<&EventSubscriptions>,
     mut pending: ResMut<PendingScrollEvents>,
     mut redraw: MessageWriter<bevy::window::RequestRedraw>,
 ) {
     let mut any = false;
 
     for msg in messages.read() {
-        let (entity, sx, sy, external) = match msg {
+        let (entity, sx, sy, external, overflow_x, overflow_y) = match msg {
             ScrollMessage::ScrollTo {
                 target,
                 x,
                 y,
                 external,
+                overflow_x,
+                overflow_y,
             } => {
                 let Some(entity) = id_map.get_entity(target) else {
                     continue;
                 };
+                let entity = resolve_scroll_entity(entity, target, &id_map, &subs_query);
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y), *external)
+                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y), *external, *overflow_x, *overflow_y)
             }
             ScrollMessage::ScrollBy { target, dx, dy } => {
                 let Some(entity) = id_map.get_entity(target) else {
                     continue;
                 };
+                let entity = resolve_scroll_entity(entity, target, &id_map, &subs_query);
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (entity, sp.x + dx, sp.y + dy, false)
+                (entity, sp.x + dx, sp.y + dy, false, None, None)
             }
         };
 
@@ -108,6 +122,17 @@ fn process_scroll_messages(
             if !external && !pending.0.contains(&entity) {
                 pending.0.push(entity);
             }
+            // Apply overscroll visual offset if provided (from tap sync).
+            if overflow_x.is_some() || overflow_y.is_some() {
+                let ox = overflow_x.map(|v| -rubber_band(v as f64) as f32).unwrap_or(0.0);
+                let oy = overflow_y.map(|v| -rubber_band(v as f64) as f32).unwrap_or(0.0);
+                commands.entity(entity).insert(OverscrollState {
+                    offset_x: ox,
+                    offset_y: oy,
+                    external: true,
+                });
+            }
+
             any = true;
         }
     }
@@ -161,4 +186,26 @@ fn emit_scroll_events(
             )
         });
     }
+}
+
+/// If `entity` has no `ScrollPosition`, check its `EventSubscriptions` for a
+/// scroll `forward()` target and resolve to that entity instead.
+///
+/// This handles tap copies that target the scroll-view root (which has
+/// `events="scroll forward(viewport)"`) — the scroll position lives on the
+/// viewport, not the root.
+fn resolve_scroll_entity(
+    entity: Entity,
+    target_byo_id: &str,
+    id_map: &IdMap,
+    subs_query: &Query<&EventSubscriptions>,
+) -> Entity {
+    if let Ok(subs) = subs_query.get(entity)
+        && let Some(sub) = subs.get(&EventKind::Scroll)
+        && let Some(ref fwd_id) = sub.forward_target
+        && let Some(fwd_entity) = resolve_forward_target(fwd_id, target_byo_id, id_map)
+    {
+        return fwd_entity;
+    }
+    entity
 }

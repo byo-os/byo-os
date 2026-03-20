@@ -257,6 +257,8 @@ pub fn process_commands(
                             x: sx,
                             y: sy,
                             external: true,
+                            overflow_x: prop_f32(props, "scroll-overflow-x"),
+                            overflow_y: prop_f32(props, "scroll-overflow-y"),
                         });
                     }
                 }
@@ -272,6 +274,8 @@ pub fn process_commands(
                         x: prop_f32(props, "x"),
                         y: prop_f32(props, "y"),
                         external: false,
+                        overflow_x: None,
+                        overflow_y: None,
                     });
                 }
 

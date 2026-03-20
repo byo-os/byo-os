@@ -570,7 +570,7 @@ fn dampen_overscroll_delta(delta: f64, overflow: f64) -> f64 {
 /// Logarithmic rubberband: converts raw overflow (px) to visual offset (px).
 /// At small overflows the response is nearly 1:1; at large overflows it
 /// asymptotes toward `OVERSCROLL_DAMPING`. Sign is preserved.
-fn rubber_band(overflow: f64) -> f64 {
+pub(crate) fn rubber_band(overflow: f64) -> f64 {
     if overflow.abs() < 0.01 {
         return 0.0;
     }
@@ -618,6 +618,9 @@ use byo::protocol::EventKind;
 pub struct OverscrollState {
     pub offset_x: f32,
     pub offset_y: f32,
+    /// When true, this overscroll was set by an external source (tap sync)
+    /// and should not be cleared by tick_scroll_physics.
+    pub external: bool,
 }
 
 /// System that ticks scroll physics each frame and dispatches synthetic
@@ -660,18 +663,22 @@ pub fn tick_scroll_physics(
         if let Ok(mut state) = overscroll_query.get_mut(update.entity) {
             state.offset_x = update.offset_x as f32;
             state.offset_y = update.offset_y as f32;
+            state.external = false;
         } else {
             commands.entity(update.entity).insert(OverscrollState {
                 offset_x: update.offset_x as f32,
                 offset_y: update.offset_y as f32,
+                external: false,
             });
         }
     }
 
-    // Clear overscroll on entities that no longer have active overscroll
+    // Clear overscroll on entities that no longer have active overscroll.
+    // Skip externally-set overscroll (from tap sync — managed by scroll messages).
     for (entity, _) in &scroll_query {
         if !physics.states.contains_key(&entity)
             && let Ok(mut state) = overscroll_query.get_mut(entity)
+            && !state.external
             && (state.offset_x != 0.0 || state.offset_y != 0.0)
         {
             state.offset_x = 0.0;
