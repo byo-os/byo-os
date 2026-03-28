@@ -519,3 +519,35 @@ impl MessageKind {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// FromPropValue — used by the byo_read_props! macro
+// ---------------------------------------------------------------------------
+
+/// Parse a typed value from a prop value string.
+///
+/// Implemented for common numeric types, `bool`, `String`, and `Option<T>`.
+/// Used by [`byo_read_props!`](crate::byo_read_props) to extract typed
+/// values from a `&[Prop]` slice in a single pass.
+pub trait FromPropValue: Sized + Default {
+    /// Parse from a prop value string. Returns `None` if parsing fails.
+    fn from_prop(s: &str) -> Option<Self>;
+}
+
+macro_rules! impl_from_prop_value {
+    ($($ty:ty),*) => {
+        $(impl FromPropValue for $ty {
+            fn from_prop(s: &str) -> Option<Self> { s.parse().ok() }
+        })*
+    };
+}
+
+impl_from_prop_value!(f64, f32, i8, i16, i32, i64, u8, u16, u32, u64, usize, isize, bool);
+
+impl FromPropValue for String {
+    fn from_prop(s: &str) -> Option<Self> { Some(s.to_owned()) }
+}
+
+impl<T: FromPropValue> FromPropValue for Option<T> {
+    fn from_prop(s: &str) -> Option<Self> { T::from_prop(s).map(Some) }
+}

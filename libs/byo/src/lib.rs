@@ -135,3 +135,50 @@ pub use byo_macros::ReadProp;
 
 #[cfg(feature = "macros")]
 pub use byo_macros::WriteProp;
+
+/// Extract typed values from a `&[Prop]` slice in a single pass, zero allocations.
+///
+/// Each entry declares a local variable bound to the parsed value. When the prop
+/// key is absent, the variable gets [`FromPropValue::absent()`] (typically
+/// `Default::default()`) or a custom default specified with `|`.
+///
+/// Use `Option<T>` to distinguish "absent" from "zero":
+///
+/// ```
+/// use byo::protocol::Prop;
+/// use byo::byo_read_props;
+///
+/// let props = [Prop::val("x", "42"), Prop::val("label", "hi")];
+/// byo_read_props!(&props,
+///     x: f64 = "x",
+///     y: f64 = "y",
+///     height: f64 = "height" | 1.0,
+///     label: String = "label",
+///     missing: Option<f64> = "missing",
+/// );
+/// assert_eq!(x, 42.0);
+/// assert_eq!(y, 0.0);         // absent → default
+/// assert_eq!(height, 1.0);    // absent → custom default
+/// assert_eq!(label, "hi");
+/// assert!(missing.is_none()); // absent → None
+/// ```
+#[macro_export]
+macro_rules! byo_read_props {
+    ($props:expr, $($name:ident : $ty:ty = $key:literal $(| $default:expr)?),* $(,)?) => {
+        $(let mut $name: $ty = $crate::byo_read_props!(@default $ty $(, $default)?);)*
+        for prop in $props {
+            if let $crate::Prop::Value { key, value } = prop {
+                match key.as_ref() {
+                    $($key => {
+                        if let Some(v) = <$ty as $crate::FromPropValue>::from_prop(value.as_ref()) {
+                            $name = v;
+                        }
+                    })*
+                    _ => {}
+                }
+            }
+        }
+    };
+    (@default $ty:ty, $default:expr) => { $default };
+    (@default $ty:ty) => { <$ty as Default>::default() };
+}

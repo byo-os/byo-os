@@ -11,6 +11,7 @@ mod state;
 use std::collections::HashMap;
 use std::io::{self, Read, Stdout};
 
+use byo::byo_read_props;
 use byo::byo_write;
 use byo::emitter::Emitter;
 use byo::parser::parse;
@@ -393,18 +394,15 @@ impl StdinHandler {
             let target = Self::scrollbar_target_kind(&state.local_id, expansion_id);
             match target {
                 ScrollbarTarget::Thumb => {
-                    let prop_map = props_to_map(props);
+                    byo_read_props!(props,
+                        cy: f64 = "client-y",
+                        cx: f64 = "client-x",
+                        height: f64 = "height" | 1.0,
+                        width: f64 = "width" | 1.0,
+                    );
                     let is_vertical = state.is_vertical();
-                    // Use viewport-relative coords (stable during capture)
-                    let cy = get_f64(&prop_map, "client-y", 0.0);
-                    let cx = get_f64(&prop_map, "client-x", 0.0);
                     let scroll_pos = get_f64(&state.props, "scroll-position", 0.0);
-                    // Derive track size from thumb pixel size + content/viewport ratio
-                    let thumb_pixels = if is_vertical {
-                        get_f64(&prop_map, "height", 1.0)
-                    } else {
-                        get_f64(&prop_map, "width", 1.0)
-                    };
+                    let thumb_pixels = if is_vertical { height } else { width };
                     let KindState::Scrollbar {
                         thumb_pressed,
                         drag_start_pos,
@@ -452,18 +450,15 @@ impl StdinHandler {
                 }
                 ScrollbarTarget::Track => {
                     // Track click: jump to position
-                    let prop_map = props_to_map(props);
+                    byo_read_props!(props,
+                        y: f64 = "y",
+                        x: f64 = "x",
+                        height: f64 = "height" | 1.0,
+                        width: f64 = "width" | 1.0,
+                    );
                     let is_vertical = state.is_vertical();
-                    let pos = if is_vertical {
-                        get_f64(&prop_map, "y", 0.0)
-                    } else {
-                        get_f64(&prop_map, "x", 0.0)
-                    };
-                    let track_size = if is_vertical {
-                        get_f64(&prop_map, "height", 1.0)
-                    } else {
-                        get_f64(&prop_map, "width", 1.0)
-                    };
+                    let pos = if is_vertical { y } else { x };
+                    let track_size = if is_vertical { height } else { width };
 
                     let KindState::Scrollbar { content_size, viewport_size, .. } = &state.kind_state else { unreachable!() };
                     let content_size = *content_size;
@@ -682,16 +677,14 @@ impl StdinHandler {
         source_qid: &str,
         props: &[Prop],
     ) -> io::Result<()> {
-        let prop_map = props_to_map(props);
+        byo_read_props!(props,
+            client_y: f64 = "client-y",
+            client_x: f64 = "client-x",
+        );
         let state = self.daemon.get(source_qid).unwrap();
 
         let is_vertical = state.is_vertical();
-        // Use viewport-relative coords (stable during capture)
-        let current_pos = if is_vertical {
-            get_f64(&prop_map, "client-y", 0.0)
-        } else {
-            get_f64(&prop_map, "client-x", 0.0)
-        };
+        let current_pos = if is_vertical { client_y } else { client_x };
 
         let KindState::Scrollbar {
             content_size,
@@ -800,24 +793,23 @@ impl StdinHandler {
 
         // The compositor owns scroll state — read the authoritative clamped
         // position and dimensions from the event props.
-        let prop_map = props_to_map(props);
-        let scroll_y = get_f64(&prop_map, "scroll-y", 0.0);
-        let scroll_x = get_f64(&prop_map, "scroll-x", 0.0);
-        let content_height = get_f64(&prop_map, "content-height", 0.0);
-        let content_width = get_f64(&prop_map, "content-width", 0.0);
-        let viewport_height = get_f64(&prop_map, "viewport-height", 0.0);
-        let viewport_width = get_f64(&prop_map, "viewport-width", 0.0);
-        let overflow_y = get_f64(&prop_map, "scroll-overflow-y", 0.0);
-        let overflow_x = get_f64(&prop_map, "scroll-overflow-x", 0.0);
+        byo_read_props!(props,
+            scroll_y: f64 = "scroll-y",
+            scroll_x: f64 = "scroll-x",
+            content_height: f64 = "content-height",
+            content_width: f64 = "content-width",
+            viewport_height: f64 = "viewport-height",
+            viewport_width: f64 = "viewport-width",
+            overflow_y: f64 = "scroll-overflow-y",
+            overflow_x: f64 = "scroll-overflow-x",
+            delta_y: f64 = "delta-y",
+            delta_x: f64 = "delta-x",
+        );
 
         let (scroll_y_enabled, scroll_x_enabled) = state.scroll_axes();
 
         let max_y = (content_height - viewport_height).max(0.0);
         let max_x = (content_width - viewport_width).max(0.0);
-
-        // Check if we're at bounds (for nested scroll propagation)
-        let delta_y = get_f64(&prop_map, "delta-y", 0.0);
-        let delta_x = get_f64(&prop_map, "delta-x", 0.0);
         let at_bounds = if scroll_y_enabled {
             (delta_y > 0.0 && scroll_y <= 0.0) || (delta_y < 0.0 && scroll_y >= max_y)
         } else if scroll_x_enabled {
@@ -937,11 +929,12 @@ impl StdinHandler {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
-        let prop_map = props_to_map(props);
-        let viewport_height = get_f64(&prop_map, "height", 0.0);
-        let viewport_width = get_f64(&prop_map, "width", 0.0);
-        let content_height = get_f64(&prop_map, "content-height", 0.0);
-        let content_width = get_f64(&prop_map, "content-width", 0.0);
+        byo_read_props!(props,
+            viewport_height: f64 = "height",
+            viewport_width: f64 = "width",
+            content_height: f64 = "content-height",
+            content_width: f64 = "content-width",
+        );
 
         let (sv_scroll_y, sv_scroll_x) = match &state.kind_state {
             KindState::ScrollView { scroll_x, scroll_y } => (*scroll_y, *scroll_x),
@@ -1140,9 +1133,7 @@ impl StdinHandler {
     ) -> io::Result<()> {
         // x = pointer position relative to the dispatch element (track)
         // width = dispatch element's computed width
-        let prop_map = props_to_map(props);
-        let x = get_f64(&prop_map, "x", 0.0);
-        let width = get_f64(&prop_map, "width", 0.0);
+        byo_read_props!(props, x: f64 = "x", width: f64 = "width");
 
         let state = self.daemon.get(source_qid).unwrap();
         let is_controlled = state.is_controlled_slider();
