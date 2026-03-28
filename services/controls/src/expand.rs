@@ -5,7 +5,9 @@ use std::io;
 use byo::byo_write;
 use byo::emitter::Emitter;
 
-use crate::state::ControlState;
+use std::collections::HashMap;
+
+use crate::state::{ControlState, KindState};
 
 /// Button variants and their base/hover/pressed class sets.
 struct ButtonStyle {
@@ -68,9 +70,9 @@ pub fn button_root_class(state: &ControlState) -> String {
 
     let bg = if state.disabled {
         style.base_bg
-    } else if state.pressed {
+    } else if state.pressed() {
         style.pressed_bg
-    } else if state.hover {
+    } else if state.hover() {
         style.hover_bg
     } else {
         style.base_bg
@@ -148,14 +150,14 @@ fn checkbox_box_class(checked: bool, hover: bool, disabled: bool) -> String {
 pub fn expand_checkbox<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
     let id = &state.local_id;
     let label = state.props.get("label").map(|s| s.as_str()).unwrap_or("");
-    let checked = state.checked.unwrap_or(false);
+    let checked = state.checked().unwrap_or(false);
 
     let mut root_class = String::from("inline-flex items-center gap-2");
     if state.disabled {
         root_class.push_str(" opacity-50");
     }
 
-    let box_class = checkbox_box_class(checked, state.hover, state.disabled);
+    let box_class = checkbox_box_class(checked, state.hover(), state.disabled);
     let check_content = if checked { "\u{2713}" } else { "" };
 
     let check_class = if state.disabled {
@@ -188,7 +190,7 @@ pub fn expand_checkbox<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) 
 pub fn expand_slider<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
     let id = &state.local_id;
     let label = state.props.get("label").map(|s| s.as_str()).unwrap_or("");
-    let value = state.value.unwrap_or(50.0);
+    let value = state.value().unwrap_or(50.0);
     let pct = state.slider_pct();
 
     let mut root_class = String::from("flex flex-col gap-1");
@@ -198,7 +200,7 @@ pub fn expand_slider<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
 
     let fill_bg = if state.disabled {
         "bg-blue-500"
-    } else if state.pressed || state.hover {
+    } else if state.pressed() || state.hover() {
         "bg-blue-400"
     } else {
         "bg-blue-500"
@@ -262,8 +264,8 @@ pub fn patch_checkbox_state<W: io::Write>(
     state: &ControlState,
 ) -> io::Result<()> {
     let id = &state.local_id;
-    let checked = state.checked.unwrap_or(false);
-    let box_class = checkbox_box_class(checked, state.hover, state.disabled);
+    let checked = state.checked().unwrap_or(false);
+    let box_class = checkbox_box_class(checked, state.hover(), state.disabled);
     let check_content = if checked { "\u{2713}" } else { "" };
 
     byo_write!(em,
@@ -278,10 +280,10 @@ pub fn patch_slider_state<W: io::Write>(
     state: &ControlState,
 ) -> io::Result<()> {
     let id = &state.local_id;
-    let value = state.value.unwrap_or(50.0);
+    let value = state.value().unwrap_or(50.0);
     let pct = state.slider_pct();
 
-    let fill_bg = if state.pressed || state.hover {
+    let fill_bg = if state.pressed() || state.hover() {
         "bg-blue-400"
     } else {
         "bg-blue-500"
@@ -310,14 +312,23 @@ const MIN_SQUEEZE_THUMB_PX: f64 = 20.0;
 /// Compute scrollbar thumb position and size as percentages.
 /// Returns (offset_pct, thumb_pct) accounting for overscroll squeeze.
 fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
-    let content_size = state.content_size;
-    let viewport_size = state.viewport_size;
+    let KindState::Scrollbar {
+        content_size,
+        viewport_size,
+        scroll_overflow,
+        ..
+    } = &state.kind_state
+    else {
+        return (0.0, 100.0);
+    };
+    let content_size = *content_size;
+    let viewport_size = *viewport_size;
     let scroll_position = state
         .props
         .get("scroll-position")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let overflow = state.scroll_overflow;
+    let overflow = *scroll_overflow;
 
     if content_size <= viewport_size || content_size <= 0.0 {
         // Content fits in viewport — full-size thumb
@@ -361,9 +372,8 @@ fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
 }
 
 /// Resolve the scrollbar style: "modern", "classic", or "auto" (defaults to "modern").
-pub fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
-    match state
-        .props
+pub fn resolve_scrollbar_style(props: &HashMap<String, String>) -> &'static str {
+    match props
         .get("style")
         .map(|s| s.as_str())
         .unwrap_or("auto")
@@ -377,11 +387,21 @@ pub fn resolve_scrollbar_style(state: &ControlState) -> &'static str {
 
 /// Compute the thumb background color based on state, style, and fade visibility.
 fn scrollbar_thumb_bg(state: &ControlState, style: &str) -> &'static str {
+    let KindState::Scrollbar {
+        thumb_pressed,
+        thumb_hover,
+        track_hover,
+        fade_visible,
+        ..
+    } = &state.kind_state
+    else {
+        return "bg-white/0";
+    };
     match style {
         "classic" => {
-            if state.thumb_pressed {
+            if *thumb_pressed {
                 "bg-white/60"
-            } else if state.thumb_hover {
+            } else if *thumb_hover {
                 "bg-white/50"
             } else {
                 "bg-white/30"
@@ -389,11 +409,11 @@ fn scrollbar_thumb_bg(state: &ControlState, style: &str) -> &'static str {
         }
         _ => {
             // Modern: color-alpha encodes fade visibility
-            if !state.fade_visible {
+            if !*fade_visible {
                 "bg-white/0"
-            } else if state.thumb_pressed {
+            } else if *thumb_pressed {
                 "bg-white/60"
-            } else if state.thumb_hover || state.track_hover {
+            } else if *thumb_hover || *track_hover {
                 "bg-white/50"
             } else {
                 "bg-white/30"
@@ -419,18 +439,28 @@ fn scrollbar_track_transition(style: &str, is_vertical: bool) -> &'static str {
 
 /// Emit the expansion for a scrollbar.
 pub fn expand_scrollbar<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
+    let KindState::Scrollbar {
+        thumb_hover,
+        track_hover,
+        thumb_pressed,
+        fade_visible,
+        ..
+    } = &state.kind_state
+    else {
+        return Ok(());
+    };
     let id = &state.local_id;
     let is_vertical = state.is_vertical();
-    let style = resolve_scrollbar_style(state);
+    let style = state.scrollbar_style();
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
 
     let thumb_bg = scrollbar_thumb_bg(state, style);
-    let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
+    let hovered = *thumb_hover || *track_hover || *thumb_pressed;
 
     // Classic scrollbars are always interactive.
     // Modern scrollbars are only interactive when faded in.
-    let interactive = style == "classic" || state.fade_visible;
+    let interactive = style == "classic" || *fade_visible;
     let pe = if interactive { "auto" } else { "none" };
 
     // Modern track transitions both color and size (width for vertical, height for horizontal).
@@ -546,15 +576,25 @@ pub fn patch_scrollbar_state<W: io::Write>(
     em: &mut Emitter<W>,
     state: &ControlState,
 ) -> io::Result<()> {
+    let KindState::Scrollbar {
+        thumb_hover,
+        track_hover,
+        thumb_pressed,
+        fade_visible,
+        ..
+    } = &state.kind_state
+    else {
+        return Ok(());
+    };
     let id = &state.local_id;
     let is_vertical = state.is_vertical();
-    let style = resolve_scrollbar_style(state);
+    let style = state.scrollbar_style();
 
     let (offset_pct, thumb_pct) = scrollbar_thumb_geometry(state);
     let thumb_bg = scrollbar_thumb_bg(state, style);
-    let hovered = state.thumb_hover || state.track_hover || state.thumb_pressed;
+    let hovered = *thumb_hover || *track_hover || *thumb_pressed;
 
-    let interactive = style == "classic" || state.fade_visible;
+    let interactive = style == "classic" || *fade_visible;
     let pe = if interactive { "auto" } else { "none" };
     let track_transition = scrollbar_track_transition(style, is_vertical);
 
@@ -590,6 +630,13 @@ pub fn expand_scroll_view<W: io::Write>(
     em: &mut Emitter<W>,
     state: &ControlState,
 ) -> io::Result<()> {
+    let KindState::ScrollView {
+        scroll_x: sv_scroll_x,
+        scroll_y: sv_scroll_y,
+    } = &state.kind_state
+    else {
+        return Ok(());
+    };
     let id = &state.local_id;
     let direction = state
         .props
@@ -664,7 +711,7 @@ pub fn expand_scroll_view<W: io::Write>(
                 +scrollbar {format!("{id}-scrollbar-y")}
                     direction=vertical
                     style={scrollbar_style}
-                    scroll-position={state.scroll_y.to_string()}
+                    scroll-position={sv_scroll_y.to_string()}
                     content-size="0"
                     viewport-size="0"
             }
@@ -672,7 +719,7 @@ pub fn expand_scroll_view<W: io::Write>(
                 +scrollbar {format!("{id}-scrollbar-x")}
                     direction=horizontal
                     style={scrollbar_style}
-                    scroll-position={state.scroll_x.to_string()}
+                    scroll-position={sv_scroll_x.to_string()}
                     content-size="0"
                     viewport-size="0"
             }
@@ -695,7 +742,7 @@ pub fn patch_scroll_view_state<W: io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ControlKind, ControlState};
+    use crate::state::{ControlKind, ControlState, KindState};
     use std::collections::HashMap;
 
     fn make_props(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -975,8 +1022,10 @@ mod tests {
         assert!(out.contains("w-2")); // track is thin
 
         // Hovered — track expands to full width
-        state.thumb_hover = true;
-        state.fade_visible = true;
+        if let KindState::Scrollbar { thumb_hover, fade_visible, .. } = &mut state.kind_state {
+            *thumb_hover = true;
+            *fade_visible = true;
+        }
         let out = expand_to_string(|em| expand_scrollbar(em, &state));
         // Both root and track are w-4 when hovered
         assert!(out.contains("w-4"));
@@ -1019,7 +1068,9 @@ mod tests {
         assert!((offset - 0.0).abs() < 0.01);
 
         // Overflow past start (negative) — thumb shrinks, stays at top
-        state.scroll_overflow = -50.0;
+        if let KindState::Scrollbar { scroll_overflow, .. } = &mut state.kind_state {
+            *scroll_overflow = -50.0;
+        }
         let (offset2, size2) = scrollbar_thumb_geometry(&state);
         assert!(size2 < size, "thumb should shrink during overscroll");
         let min_pct = MIN_SQUEEZE_THUMB_PX / 500.0 * 100.0; // 4%
@@ -1041,7 +1092,9 @@ mod tests {
         assert!((offset - 50.0).abs() < 0.01);
 
         // Overflow past end (positive) — thumb shrinks, pushed toward bottom
-        state.scroll_overflow = 50.0;
+        if let KindState::Scrollbar { scroll_overflow, .. } = &mut state.kind_state {
+            *scroll_overflow = 50.0;
+        }
         let (offset2, size2) = scrollbar_thumb_geometry(&state);
         assert!(size2 < size, "thumb should shrink during overscroll");
         let min_pct = MIN_SQUEEZE_THUMB_PX / 500.0 * 100.0; // 4%

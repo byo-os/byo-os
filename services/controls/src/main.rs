@@ -23,7 +23,7 @@ use crate::expand::{
     patch_button_state, patch_checkbox_state, patch_scroll_view_state, patch_scrollbar_state,
     patch_slider_state, resolve_scrollbar_style,
 };
-use crate::state::{ControlKind, ControlState, Daemon};
+use crate::state::{ControlKind, ControlState, Daemon, KindState};
 
 /// Which sub-element of a scrollbar was targeted by an event.
 #[derive(Debug)]
@@ -227,8 +227,8 @@ impl StdinHandler {
     }
 
     /// Determine if the event target is a scrollbar sub-element and which one.
-    fn scrollbar_target_kind(state: &ControlState, expansion_id: &str) -> ScrollbarTarget {
-        match expansion_id.strip_prefix(&state.local_id as &str) {
+    fn scrollbar_target_kind(local_id: &str, expansion_id: &str) -> ScrollbarTarget {
+        match expansion_id.strip_prefix(local_id) {
             Some("-thumb") => ScrollbarTarget::Thumb,
             Some("-track") => ScrollbarTarget::Track,
             _ => ScrollbarTarget::Other,
@@ -252,19 +252,30 @@ impl StdinHandler {
 
         // Scrollbar sub-element hover tracking
         let mut fade_cancel_timer: Option<String> = None;
-        if state.kind == ControlKind::Scrollbar {
-            match Self::scrollbar_target_kind(state, expansion_id) {
-                ScrollbarTarget::Thumb => state.thumb_hover = true,
-                ScrollbarTarget::Track => state.track_hover = true,
-                ScrollbarTarget::Other => {}
+        match &mut state.kind_state {
+            KindState::Scrollbar {
+                thumb_hover,
+                track_hover,
+                fade_visible,
+                ..
+            } => {
+                match Self::scrollbar_target_kind(&state.local_id, expansion_id) {
+                    ScrollbarTarget::Thumb => *thumb_hover = true,
+                    ScrollbarTarget::Track => *track_hover = true,
+                    ScrollbarTarget::Other => {}
+                }
+                // Fade-in on hover and cancel any pending fade-out timer
+                if resolve_scrollbar_style(&state.props) == "modern" {
+                    *fade_visible = true;
+                    fade_cancel_timer = Some(format!("{}-fade", state.local_id));
+                }
             }
-            // Fade-in on hover and cancel any pending fade-out timer
-            if resolve_scrollbar_style(state) == "modern" {
-                state.fade_visible = true;
-                fade_cancel_timer = Some(format!("{}-fade", state.local_id));
+            KindState::Button { hover, .. }
+            | KindState::Checkbox { hover, .. }
+            | KindState::Slider { hover, .. } => {
+                *hover = true;
             }
-        } else {
-            state.hover = true;
+            _ => {}
         }
 
         let wants_enter = state.app_wants_event(&EventKind::PointerEnter);
@@ -306,24 +317,34 @@ impl StdinHandler {
         }
 
         let mut fade_arm_timer: Option<String> = None;
-        if state.kind == ControlKind::Scrollbar {
-            match Self::scrollbar_target_kind(state, expansion_id) {
-                ScrollbarTarget::Thumb => {
-                    state.thumb_hover = false;
-                    // Don't clear thumb_pressed here — it's cleared on PointerUp.
-                    // With pointer capture, PointerLeave fires when the cursor
-                    // exits the thumb bounds but drag should continue.
+        match &mut state.kind_state {
+            KindState::Scrollbar {
+                thumb_hover,
+                track_hover,
+                ..
+            } => {
+                match Self::scrollbar_target_kind(&state.local_id, expansion_id) {
+                    ScrollbarTarget::Thumb => {
+                        *thumb_hover = false;
+                        // Don't clear thumb_pressed here — it's cleared on PointerUp.
+                        // With pointer capture, PointerLeave fires when the cursor
+                        // exits the thumb bounds but drag should continue.
+                    }
+                    ScrollbarTarget::Track => *track_hover = false,
+                    ScrollbarTarget::Other => {}
                 }
-                ScrollbarTarget::Track => state.track_hover = false,
-                ScrollbarTarget::Other => {}
+                // Arm fade-out timer on leave (fade_visible stays true until timer fires)
+                if resolve_scrollbar_style(&state.props) == "modern" {
+                    fade_arm_timer = Some(format!("{}-fade", state.local_id));
+                }
             }
-            // Arm fade-out timer on leave (fade_visible stays true until timer fires)
-            if resolve_scrollbar_style(state) == "modern" {
-                fade_arm_timer = Some(format!("{}-fade", state.local_id));
+            KindState::Button { hover, pressed }
+            | KindState::Checkbox { hover, pressed, .. }
+            | KindState::Slider { hover, pressed, .. } => {
+                *hover = false;
+                *pressed = false;
             }
-        } else {
-            state.hover = false;
-            state.pressed = false;
+            _ => {}
         }
 
         let wants_leave = state.app_wants_event(&EventKind::PointerLeave);
@@ -365,33 +386,46 @@ impl StdinHandler {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
-        let is_slider = state.kind == ControlKind::Slider;
-        let is_scrollbar = state.kind == ControlKind::Scrollbar;
+        let is_slider = state.kind() == ControlKind::Slider;
+        let is_scrollbar = state.kind() == ControlKind::Scrollbar;
 
         if is_scrollbar {
-            let target = Self::scrollbar_target_kind(state, expansion_id);
+            let target = Self::scrollbar_target_kind(&state.local_id, expansion_id);
             match target {
                 ScrollbarTarget::Thumb => {
-                    state.thumb_pressed = true;
                     let prop_map = props_to_map(props);
                     let is_vertical = state.is_vertical();
                     // Use viewport-relative coords (stable during capture)
                     let cy = get_f64(&prop_map, "client-y", 0.0);
                     let cx = get_f64(&prop_map, "client-x", 0.0);
-                    state.drag_start_pos = if is_vertical { cy } else { cx };
-                    state.drag_start_scroll = get_f64(&state.props, "scroll-position", 0.0);
+                    let scroll_pos = get_f64(&state.props, "scroll-position", 0.0);
                     // Derive track size from thumb pixel size + content/viewport ratio
                     let thumb_pixels = if is_vertical {
                         get_f64(&prop_map, "height", 1.0)
                     } else {
                         get_f64(&prop_map, "width", 1.0)
                     };
-                    let thumb_pct = if state.content_size > 0.0 {
-                        (state.viewport_size / state.content_size).clamp(0.05, 1.0)
+                    let KindState::Scrollbar {
+                        thumb_pressed,
+                        drag_start_pos,
+                        drag_start_scroll,
+                        drag_track_size,
+                        content_size,
+                        viewport_size,
+                        ..
+                    } = &mut state.kind_state
+                    else {
+                        unreachable!()
+                    };
+                    *thumb_pressed = true;
+                    *drag_start_pos = if is_vertical { cy } else { cx };
+                    *drag_start_scroll = scroll_pos;
+                    let thumb_pct = if *content_size > 0.0 {
+                        (*viewport_size / *content_size).clamp(0.05, 1.0)
                     } else {
                         1.0
                     };
-                    state.drag_track_size = if thumb_pct > 0.0 {
+                    *drag_track_size = if thumb_pct > 0.0 {
                         thumb_pixels / thumb_pct
                     } else {
                         thumb_pixels
@@ -401,11 +435,11 @@ impl StdinHandler {
                         "thumb_down: scrollbar={source_qid} content={:.0} viewport={:.0} \
                          thumb_px={thumb_pixels:.0} thumb_pct={thumb_pct:.3} track={:.0} \
                          scroll_pos={:.1} drag_start={:.1}",
-                        state.content_size,
-                        state.viewport_size,
-                        state.drag_track_size,
-                        state.drag_start_scroll,
-                        state.drag_start_pos,
+                        *content_size,
+                        *viewport_size,
+                        *drag_track_size,
+                        *drag_start_scroll,
+                        *drag_start_pos,
                     );
 
                     let daemon = &self.daemon;
@@ -431,8 +465,9 @@ impl StdinHandler {
                         get_f64(&prop_map, "width", 1.0)
                     };
 
-                    let content_size = state.content_size;
-                    let viewport_size = state.viewport_size;
+                    let KindState::Scrollbar { content_size, viewport_size, .. } = &state.kind_state else { unreachable!() };
+                    let content_size = *content_size;
+                    let viewport_size = *viewport_size;
                     let max_scroll = (content_size - viewport_size).max(0.0);
 
                     let new_scroll = if track_size > 0.0 {
@@ -480,7 +515,12 @@ impl StdinHandler {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
-        state.pressed = true;
+        match &mut state.kind_state {
+            KindState::Button { pressed, .. }
+            | KindState::Checkbox { pressed, .. }
+            | KindState::Slider { pressed, .. } => *pressed = true,
+            _ => {}
+        }
         if is_slider {
             self.handle_slider_pointer(ack_kind, ack_seq, props, source_qid, true)
         } else {
@@ -510,14 +550,16 @@ impl StdinHandler {
         }
 
         // Scrollbar thumb release
-        if state.kind == ControlKind::Scrollbar {
+        if state.kind() == ControlKind::Scrollbar {
             let was_thumb = matches!(
-                Self::scrollbar_target_kind(state, expansion_id),
+                Self::scrollbar_target_kind(&state.local_id, expansion_id),
                 ScrollbarTarget::Thumb
             );
             let is_vertical = state.is_vertical();
-            if was_thumb {
-                state.thumb_pressed = false;
+            if was_thumb
+                && let KindState::Scrollbar { thumb_pressed, .. } = &mut state.kind_state
+            {
+                *thumb_pressed = false;
             }
             let scroll_view_qid = if was_thumb {
                 find_parent_scroll_view(&self.daemon, source_qid)
@@ -545,10 +587,15 @@ impl StdinHandler {
             });
         }
 
-        let was_slider_pressed = state.pressed && state.kind == ControlKind::Slider;
-        let value = state.value;
+        let was_slider_pressed = state.pressed() && state.kind() == ControlKind::Slider;
+        let value = state.value();
         let wants_change = state.app_wants_event(&EventKind::Change);
-        state.pressed = false;
+        match &mut state.kind_state {
+            KindState::Button { pressed, .. }
+            | KindState::Checkbox { pressed, .. }
+            | KindState::Slider { pressed, .. } => *pressed = false,
+            _ => {}
+        }
         let change_seq = if was_slider_pressed && wants_change {
             Some(self.daemon.next_seq("change"))
         } else {
@@ -583,12 +630,12 @@ impl StdinHandler {
         };
 
         // Scrollbar thumb drag
-        if state.kind == ControlKind::Scrollbar && state.thumb_pressed {
+        if matches!(state.kind_state, KindState::Scrollbar { thumb_pressed: true, .. }) {
             return self.handle_scrollbar_thumb_drag(ack_kind, ack_seq, source_qid, props);
         }
 
         let _ = expansion_id; // used for scrollbar above
-        if state.disabled || !state.pressed || state.kind != ControlKind::Slider {
+        if state.disabled || !state.pressed() || state.kind() != ControlKind::Slider {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
         self.handle_slider_pointer(ack_kind, ack_seq, props, source_qid, false)
@@ -602,7 +649,7 @@ impl StdinHandler {
         if state.disabled {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
-        match state.kind {
+        match state.kind() {
             ControlKind::Button => {
                 let press_seq = if state.app_wants_event(&EventKind::Press) {
                     Some(self.daemon.next_seq("press"))
@@ -646,15 +693,26 @@ impl StdinHandler {
             get_f64(&prop_map, "client-x", 0.0)
         };
 
-        let content_size = state.content_size;
-        let viewport_size = state.viewport_size;
-        let drag_start_pos = state.drag_start_pos;
-        let drag_start_scroll = state.drag_start_scroll;
+        let KindState::Scrollbar {
+            content_size,
+            viewport_size,
+            drag_start_pos,
+            drag_start_scroll,
+            drag_track_size,
+            ..
+        } = &state.kind_state
+        else {
+            unreachable!()
+        };
+        let content_size = *content_size;
+        let viewport_size = *viewport_size;
+        let drag_start_pos = *drag_start_pos;
+        let drag_start_scroll = *drag_start_scroll;
 
         let max_scroll = (content_size - viewport_size).max(0.0);
 
         // Use the track size captured at drag start (stable, not affected by capture)
-        let track_size = state.drag_track_size;
+        let track_size = *drag_track_size;
 
         // Compute scroll-per-pixel ratio
         let thumb_pct = if content_size > 0.0 {
@@ -685,11 +743,12 @@ impl StdinHandler {
         // Also update the scroll-view state
         if let Some(ref sv_qid) = scroll_view_qid
             && let Some(sv_state) = self.daemon.get_mut(sv_qid)
+            && let KindState::ScrollView { scroll_x, scroll_y } = &mut sv_state.kind_state
         {
             if is_vertical {
-                sv_state.scroll_y = new_scroll;
+                *scroll_y = new_scroll;
             } else {
-                sv_state.scroll_x = new_scroll;
+                *scroll_x = new_scroll;
             }
         }
 
@@ -735,7 +794,7 @@ impl StdinHandler {
             Some(s) => s,
             None => return ack_only(&mut self.stdout, ack_kind, ack_seq),
         };
-        if state.kind != ControlKind::ScrollView {
+        if state.kind() != ControlKind::ScrollView {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
@@ -776,8 +835,14 @@ impl StdinHandler {
 
         // Update scroll-view state from compositor-authoritative position
         let state = self.daemon.get_mut(source_qid).unwrap();
-        state.scroll_y = scroll_y;
-        state.scroll_x = scroll_x;
+        if let KindState::ScrollView {
+            scroll_x: sx,
+            scroll_y: sy,
+        } = &mut state.kind_state
+        {
+            *sy = scroll_y;
+            *sx = scroll_x;
+        }
 
         let scroll_seq = if wants_scroll {
             Some(self.daemon.next_seq("scroll"))
@@ -868,7 +933,7 @@ impl StdinHandler {
             Some(s) => s,
             None => return ack_only(&mut self.stdout, ack_kind, ack_seq),
         };
-        if state.kind != ControlKind::ScrollView {
+        if state.kind() != ControlKind::ScrollView {
             return ack_only(&mut self.stdout, ack_kind, ack_seq);
         }
 
@@ -878,9 +943,12 @@ impl StdinHandler {
         let content_height = get_f64(&prop_map, "content-height", 0.0);
         let content_width = get_f64(&prop_map, "content-width", 0.0);
 
+        let (sv_scroll_y, sv_scroll_x) = match &state.kind_state {
+            KindState::ScrollView { scroll_x, scroll_y } => (*scroll_y, *scroll_x),
+            _ => (0.0, 0.0),
+        };
         info!(
-            "on_resize: viewport={viewport_width:.0}x{viewport_height:.0} content={content_width:.0}x{content_height:.0} scroll_y={:.1} scroll_x={:.1}",
-            state.scroll_y, state.scroll_x
+            "on_resize: viewport={viewport_width:.0}x{viewport_height:.0} content={content_width:.0}x{content_height:.0} scroll_y={sv_scroll_y:.1} scroll_x={sv_scroll_x:.1}"
         );
 
         let (scroll_y_enabled, scroll_x_enabled) = state.scroll_axes();
@@ -974,7 +1042,8 @@ impl StdinHandler {
             .controls
             .iter()
             .find(|(_, state)| {
-                state.kind == ControlKind::Scrollbar && state.local_id == scrollbar_local_id
+                matches!(state.kind_state, KindState::Scrollbar { .. })
+                    && state.local_id == scrollbar_local_id
             })
             .map(|(qid, _)| qid.clone());
 
@@ -990,7 +1059,7 @@ impl StdinHandler {
         let state = self.daemon.get_mut(&source_qid).unwrap();
 
         // If the scrollbar is currently hovered, re-arm the timer instead of hiding
-        if state.thumb_hover || state.track_hover || state.thumb_pressed {
+        if state.is_scrollbar_active() {
             let timer_id = id;
             let mut em = Emitter::new(&mut self.stdout);
             return em.frame(|em| {
@@ -1000,7 +1069,9 @@ impl StdinHandler {
         }
 
         // Fade out: set invisible and patch
-        state.fade_visible = false;
+        if let KindState::Scrollbar { fade_visible, .. } = &mut state.kind_state {
+            *fade_visible = false;
+        }
 
         let daemon = &self.daemon;
         let state = daemon.get(&source_qid).unwrap();
@@ -1019,7 +1090,7 @@ impl StdinHandler {
     ) -> io::Result<()> {
         let state = self.daemon.get(source_qid).unwrap();
         let is_controlled = state.is_controlled_checkbox();
-        let checked = state.checked.unwrap_or(false);
+        let checked = state.checked().unwrap_or(false);
         let new_checked = !checked;
         let wants_change = state.app_wants_event(&EventKind::Change);
         let change_seq = if wants_change {
@@ -1040,7 +1111,9 @@ impl StdinHandler {
         } else {
             // Uncontrolled: toggle internal state, patch visuals, emit event
             let state = self.daemon.get_mut(source_qid).unwrap();
-            state.checked = Some(new_checked);
+            if let KindState::Checkbox { checked, .. } = &mut state.kind_state {
+                *checked = Some(new_checked);
+            }
 
             let daemon = &self.daemon;
             let state = daemon.get(source_qid).unwrap();
@@ -1076,7 +1149,7 @@ impl StdinHandler {
         let min = state.slider_min();
         let max = state.slider_max();
         let wants_input = state.app_wants_event(&EventKind::Input);
-        let prev_value = state.value;
+        let prev_value = state.value();
 
         // Compute raw value from pointer position
         let ratio = if width > 0.0 {
@@ -1113,7 +1186,9 @@ impl StdinHandler {
         } else if value_changed {
             // Uncontrolled: update internal state, patch visuals, emit input
             let state = self.daemon.get_mut(source_qid).unwrap();
-            state.value = Some(snapped);
+            if let KindState::Slider { value, .. } = &mut state.kind_state {
+                *value = Some(snapped);
+            }
             let input_seq = if wants_input {
                 Some(self.daemon.next_seq("input"))
             } else {
@@ -1161,7 +1236,7 @@ impl StdinHandler {
         let target_str = target.as_ref();
 
         let state = match self.daemon.get(target_str) {
-            Some(s) if s.kind == ControlKind::ScrollView => s,
+            Some(s) if s.kind() == ControlKind::ScrollView => s,
             _ => {
                 tracing::warn!("scroll message for unknown scroll-view {target_str}");
                 return Ok(());
@@ -1189,7 +1264,7 @@ impl StdinHandler {
 
 /// Emit a visual patch for the current state of a control.
 fn emit_visual_patch<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) -> io::Result<()> {
-    match state.kind {
+    match state.kind() {
         ControlKind::Button => patch_button_state(em, state),
         ControlKind::Checkbox => patch_checkbox_state(em, state),
         ControlKind::Slider => patch_slider_state(em, state),
@@ -1215,7 +1290,7 @@ fn find_parent_scroll_view(daemon: &Daemon, scrollbar_qid: &str) -> Option<Strin
 
     // Search all scroll-views for one whose local_id matches
     for (qid, state) in &daemon.controls {
-        if state.kind == ControlKind::ScrollView && state.local_id == parent_suffix {
+        if state.kind() == ControlKind::ScrollView && state.local_id == parent_suffix {
             return Some(qid.clone());
         }
     }
@@ -1233,7 +1308,7 @@ fn find_child_scrollbars(
     let y_local = format!("{scroll_view_local_id}-scrollbar-y");
     let x_local = format!("{scroll_view_local_id}-scrollbar-x");
     for (qid, state) in &daemon.controls {
-        if state.kind == ControlKind::Scrollbar {
+        if state.kind() == ControlKind::Scrollbar {
             if state.local_id == y_local {
                 y_qid = Some(qid.clone());
             } else if state.local_id == x_local {
@@ -1254,8 +1329,19 @@ fn update_scrollbar_dimensions(
     overflow: Option<f64>,
 ) {
     let sb = daemon.get_mut(qid).unwrap();
-    sb.content_size = content_size;
-    sb.viewport_size = viewport_size;
+    if let KindState::Scrollbar {
+        content_size: cs,
+        viewport_size: vs,
+        scroll_overflow: so,
+        ..
+    } = &mut sb.kind_state
+    {
+        *cs = content_size;
+        *vs = viewport_size;
+        if let Some(overflow) = overflow {
+            *so = overflow;
+        }
+    }
     sb.props
         .insert("content-size".to_string(), content_size.to_string());
     sb.props
@@ -1264,16 +1350,15 @@ fn update_scrollbar_dimensions(
         sb.props
             .insert("scroll-position".to_string(), pos.to_string());
     }
-    if let Some(overflow) = overflow {
-        sb.scroll_overflow = overflow;
-    }
 }
 
 /// Fade-in a modern scrollbar and return its timer ID (for arming the fade-out timer).
 fn fade_in_scrollbar(daemon: &mut Daemon, qid: &str) -> Option<String> {
     let sb = daemon.get_mut(qid).unwrap();
-    if resolve_scrollbar_style(sb) == "modern" {
-        sb.fade_visible = true;
+    if sb.scrollbar_style() == "modern" {
+        if let KindState::Scrollbar { fade_visible, .. } = &mut sb.kind_state {
+            *fade_visible = true;
+        }
         Some(format!("{}-fade", sb.local_id))
     } else {
         None

@@ -30,10 +30,61 @@ impl ControlKind {
     }
 }
 
+/// Kind-specific state for a control instance.
+#[derive(Debug)]
+pub enum KindState {
+    Button {
+        hover: bool,
+        pressed: bool,
+    },
+    Checkbox {
+        hover: bool,
+        pressed: bool,
+        checked: Option<bool>,
+    },
+    Slider {
+        hover: bool,
+        pressed: bool,
+        value: Option<f64>,
+    },
+    Scrollbar {
+        thumb_hover: bool,
+        thumb_pressed: bool,
+        track_hover: bool,
+        /// Drag start position (viewport-relative client-x/y coordinates).
+        drag_start_pos: f64,
+        drag_start_scroll: f64,
+        /// Track pixel size at drag start (derived from thumb pixel size / thumb_pct).
+        drag_track_size: f64,
+        content_size: f64,
+        viewport_size: f64,
+        /// Overscroll overflow amount (negative = past start, positive = past end).
+        scroll_overflow: f64,
+        /// Whether the scrollbar is currently faded in (modern style auto-hide).
+        fade_visible: bool,
+    },
+    ScrollView {
+        scroll_x: f64,
+        scroll_y: f64,
+    },
+}
+
+impl KindState {
+    /// Return the `ControlKind` discriminant for this state.
+    pub fn kind(&self) -> ControlKind {
+        match self {
+            Self::Button { .. } => ControlKind::Button,
+            Self::Checkbox { .. } => ControlKind::Checkbox,
+            Self::Slider { .. } => ControlKind::Slider,
+            Self::Scrollbar { .. } => ControlKind::Scrollbar,
+            Self::ScrollView { .. } => ControlKind::ScrollView,
+        }
+    }
+}
+
 /// State for a single control instance.
 #[derive(Debug)]
 pub struct ControlState {
-    pub kind: ControlKind,
     /// The source qualified ID (e.g. "app:save").
     pub source_qid: String,
     /// The local part of the source ID (after ':'), used as prefix for expansion IDs.
@@ -42,38 +93,10 @@ pub struct ControlState {
     pub props: HashMap<String, String>,
     /// Parsed event subscriptions from the app's `events` prop.
     pub app_events: EventSubscriptionSet,
-    /// Whether the control is currently hovered.
-    pub hover: bool,
-    /// Whether the control is currently pressed (pointer down).
-    pub pressed: bool,
-    /// Internal checked state for uncontrolled checkboxes.
-    pub checked: Option<bool>,
-    /// Internal value for uncontrolled sliders.
-    pub value: Option<f64>,
     /// Whether the control is disabled.
     pub disabled: bool,
-    /// Current scroll position (scroll-view).
-    pub scroll_x: f64,
-    pub scroll_y: f64,
-    /// Scrollbar thumb hover/press state.
-    pub thumb_hover: bool,
-    pub thumb_pressed: bool,
-    /// Track hover state.
-    pub track_hover: bool,
-    /// Drag start position and scroll offset (for thumb drag).
-    /// `drag_start_pos` uses viewport-relative (client-x/y) coordinates.
-    pub drag_start_pos: f64,
-    pub drag_start_scroll: f64,
-    /// Track pixel size at drag start (derived from thumb pixel size / thumb_pct).
-    pub drag_track_size: f64,
-    /// Content and viewport dimensions (scroll-view, scrollbar).
-    pub content_size: f64,
-    pub viewport_size: f64,
-    /// Overscroll overflow amount (negative = past start, positive = past end).
-    /// Used for scrollbar thumb squeeze effect during overscroll.
-    pub scroll_overflow: f64,
-    /// Whether the scrollbar is currently faded in (modern style auto-hide).
-    pub fade_visible: bool,
+    /// Kind-specific interaction and layout state.
+    pub kind_state: KindState,
 }
 
 impl ControlState {
@@ -92,72 +115,143 @@ impl ControlState {
 
         let disabled = props.contains_key("disabled");
 
-        let checked = if props.contains_key("checked") {
-            // Controlled mode — use the prop value
-            Some(props.get("checked").is_none_or(|v| v != "false"))
-        } else if props.contains_key("default-checked") {
-            // Uncontrolled mode — use default
-            Some(props.get("default-checked").is_none_or(|v| v != "false"))
-        } else if kind == ControlKind::Checkbox {
-            // Uncontrolled with no default
-            Some(false)
-        } else {
-            None
-        };
-
-        let value = if kind == ControlKind::Slider {
-            if let Some(v) = props.get("value") {
-                v.parse().ok()
-            } else if let Some(v) = props.get("default-value") {
-                v.parse().ok()
-            } else {
-                Some(Self::default_slider_value(props))
+        let kind_state = match kind {
+            ControlKind::Button => KindState::Button {
+                hover: false,
+                pressed: false,
+            },
+            ControlKind::Checkbox => {
+                let checked = if props.contains_key("checked") {
+                    Some(props.get("checked").is_none_or(|v| v != "false"))
+                } else if props.contains_key("default-checked") {
+                    Some(props.get("default-checked").is_none_or(|v| v != "false"))
+                } else {
+                    Some(false)
+                };
+                KindState::Checkbox {
+                    hover: false,
+                    pressed: false,
+                    checked,
+                }
             }
-        } else {
-            None
+            ControlKind::Slider => {
+                let value = if let Some(v) = props.get("value") {
+                    v.parse().ok()
+                } else if let Some(v) = props.get("default-value") {
+                    v.parse().ok()
+                } else {
+                    Some(Self::default_slider_value(props))
+                };
+                KindState::Slider {
+                    hover: false,
+                    pressed: false,
+                    value,
+                }
+            }
+            ControlKind::Scrollbar => {
+                let content_size = props
+                    .get("content-size")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0);
+                let viewport_size = props
+                    .get("viewport-size")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0);
+                KindState::Scrollbar {
+                    thumb_hover: false,
+                    thumb_pressed: false,
+                    track_hover: false,
+                    drag_start_pos: 0.0,
+                    drag_start_scroll: 0.0,
+                    drag_track_size: 0.0,
+                    content_size,
+                    viewport_size,
+                    scroll_overflow: 0.0,
+                    fade_visible: false,
+                }
+            }
+            ControlKind::ScrollView => {
+                let scroll_x = props
+                    .get("scroll-x")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0);
+                let scroll_y = props
+                    .get("scroll-y")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0);
+                KindState::ScrollView { scroll_x, scroll_y }
+            }
         };
-
-        let scroll_x = props
-            .get("scroll-x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let scroll_y = props
-            .get("scroll-y")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let content_size = props
-            .get("content-size")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let viewport_size = props
-            .get("viewport-size")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
 
         Self {
-            kind,
             source_qid: source_qid.to_owned(),
             local_id,
             props: props.clone(),
             app_events,
-            hover: false,
-            pressed: false,
-            checked,
-            value,
             disabled,
-            scroll_x,
-            scroll_y,
-            thumb_hover: false,
-            thumb_pressed: false,
-            track_hover: false,
-            drag_start_pos: 0.0,
-            drag_start_scroll: 0.0,
-            drag_track_size: 0.0,
-            content_size,
-            viewport_size,
-            scroll_overflow: 0.0,
-            fade_visible: false,
+            kind_state,
         }
+    }
+
+    /// The kind of this control.
+    pub fn kind(&self) -> ControlKind {
+        self.kind_state.kind()
+    }
+
+    /// Whether the control is hovered (button, checkbox, slider).
+    pub fn hover(&self) -> bool {
+        match &self.kind_state {
+            KindState::Button { hover, .. }
+            | KindState::Checkbox { hover, .. }
+            | KindState::Slider { hover, .. } => *hover,
+            _ => false,
+        }
+    }
+
+    /// Whether the control is pressed (button, checkbox, slider).
+    pub fn pressed(&self) -> bool {
+        match &self.kind_state {
+            KindState::Button { pressed, .. }
+            | KindState::Checkbox { pressed, .. }
+            | KindState::Slider { pressed, .. } => *pressed,
+            _ => false,
+        }
+    }
+
+    /// Internal checked state (checkbox only, None for other kinds).
+    pub fn checked(&self) -> Option<bool> {
+        match &self.kind_state {
+            KindState::Checkbox { checked, .. } => *checked,
+            _ => None,
+        }
+    }
+
+    /// Internal value (slider only, None for other kinds).
+    pub fn value(&self) -> Option<f64> {
+        match &self.kind_state {
+            KindState::Slider { value, .. } => *value,
+            _ => None,
+        }
+    }
+
+    /// Whether the scrollbar has any active interaction (hover or drag).
+    pub fn is_scrollbar_active(&self) -> bool {
+        matches!(
+            self.kind_state,
+            KindState::Scrollbar {
+                thumb_hover: true, ..
+            } | KindState::Scrollbar {
+                track_hover: true, ..
+            } | KindState::Scrollbar {
+                thumb_pressed: true,
+                ..
+            }
+        )
+    }
+
+    /// Resolve the scrollbar style for this control.
+    pub fn scrollbar_style(&self) -> &'static str {
+        crate::expand::resolve_scrollbar_style(&self.props)
     }
 
     /// Update props and prop-derived fields for a re-expansion.
@@ -167,44 +261,49 @@ impl ControlState {
     /// position, content/viewport sizes — which may have been updated by
     /// resize events since the last expansion).
     pub fn update_props(&mut self, new_props: &HashMap<String, String>) {
-        // Refresh prop-derived fields
         self.app_events = new_props
             .get("events")
             .map(|e| EventSubscriptionSet::parse(e))
             .unwrap_or_default();
         self.disabled = new_props.contains_key("disabled");
 
-        // Controlled checkbox: update checked from prop
-        if new_props.contains_key("checked") {
-            self.checked = Some(new_props.get("checked").is_none_or(|v| v != "false"));
-        }
-        // (Uncontrolled checkbox: keep existing internal checked state)
-
-        // Controlled slider: update value from prop
-        if self.kind == ControlKind::Slider && new_props.contains_key("value") {
-            self.value = new_props.get("value").and_then(|v| v.parse().ok());
-        }
-        // (Uncontrolled slider: keep existing internal value)
-
-        // Scrollbar: update content/viewport sizes and scroll position from props
-        // (these arrive via reduced state from the orchestrator)
-        if self.kind == ControlKind::Scrollbar {
-            if let Some(v) = new_props.get("content-size").and_then(|v| v.parse().ok()) {
-                self.content_size = v;
+        match &mut self.kind_state {
+            KindState::Checkbox { checked, .. } => {
+                // Controlled checkbox: update checked from prop
+                if new_props.contains_key("checked") {
+                    *checked = Some(new_props.get("checked").is_none_or(|v| v != "false"));
+                }
+                // (Uncontrolled: keep existing internal checked state)
             }
-            if let Some(v) = new_props.get("viewport-size").and_then(|v| v.parse().ok()) {
-                self.viewport_size = v;
+            KindState::Slider { value, .. } => {
+                // Controlled slider: update value from prop
+                if new_props.contains_key("value") {
+                    *value = new_props.get("value").and_then(|v| v.parse().ok());
+                }
+                // (Uncontrolled: keep existing internal value)
             }
-        }
-
-        // Scroll-view: update scroll position from props
-        if self.kind == ControlKind::ScrollView {
-            if let Some(v) = new_props.get("scroll-x").and_then(|v| v.parse().ok()) {
-                self.scroll_x = v;
+            KindState::Scrollbar {
+                content_size,
+                viewport_size,
+                ..
+            } => {
+                // Update content/viewport sizes from props (arrive via reduced state)
+                if let Some(v) = new_props.get("content-size").and_then(|v| v.parse().ok()) {
+                    *content_size = v;
+                }
+                if let Some(v) = new_props.get("viewport-size").and_then(|v| v.parse().ok()) {
+                    *viewport_size = v;
+                }
             }
-            if let Some(v) = new_props.get("scroll-y").and_then(|v| v.parse().ok()) {
-                self.scroll_y = v;
+            KindState::ScrollView { scroll_x, scroll_y } => {
+                if let Some(v) = new_props.get("scroll-x").and_then(|v| v.parse().ok()) {
+                    *scroll_x = v;
+                }
+                if let Some(v) = new_props.get("scroll-y").and_then(|v| v.parse().ok()) {
+                    *scroll_y = v;
+                }
             }
+            _ => {}
         }
 
         self.props = new_props.clone();
@@ -224,24 +323,26 @@ impl ControlState {
 
     /// Whether this is a controlled checkbox (app provides `checked` prop).
     pub fn is_controlled_checkbox(&self) -> bool {
-        self.kind == ControlKind::Checkbox && self.props.contains_key("checked")
+        self.kind() == ControlKind::Checkbox && self.props.contains_key("checked")
     }
 
     /// Whether this is a controlled slider (app provides `value` prop).
     pub fn is_controlled_slider(&self) -> bool {
-        self.kind == ControlKind::Slider && self.props.contains_key("value")
+        self.kind() == ControlKind::Slider && self.props.contains_key("value")
     }
 
     /// Whether the app subscribed to a specific semantic event.
     pub fn app_wants_event(&self, kind: &EventKind) -> bool {
         // If no events prop specified, use defaults per control type
         if self.app_events.is_empty() {
-            return match self.kind {
-                ControlKind::Button => *kind == EventKind::Press,
-                ControlKind::Checkbox => *kind == EventKind::Change,
-                ControlKind::Slider => *kind == EventKind::Change || *kind == EventKind::Input,
-                ControlKind::ScrollView => *kind == EventKind::Scroll || *kind == EventKind::Resize,
-                ControlKind::Scrollbar => false,
+            return match self.kind_state {
+                KindState::Button { .. } => *kind == EventKind::Press,
+                KindState::Checkbox { .. } => *kind == EventKind::Change,
+                KindState::Slider { .. } => *kind == EventKind::Change || *kind == EventKind::Input,
+                KindState::ScrollView { .. } => {
+                    *kind == EventKind::Scroll || *kind == EventKind::Resize
+                }
+                KindState::Scrollbar { .. } => false,
             };
         }
         self.app_events.contains(kind)
@@ -295,7 +396,7 @@ impl ControlState {
 
     /// Compute the slider fill percentage (0–100) from the current value.
     pub fn slider_pct(&self) -> f64 {
-        let value = self.value.unwrap_or(50.0);
+        let value = self.value().unwrap_or(50.0);
         let min = self.slider_min();
         let max = self.slider_max();
         if (max - min).abs() > f64::EPSILON {
@@ -353,7 +454,7 @@ impl Daemon {
         let local_id = state.local_id.clone();
 
         // Register reverse mappings for all expansion IDs
-        for suffix in state.kind.expansion_suffixes() {
+        for suffix in state.kind().expansion_suffixes() {
             let expansion_id = format!("{local_id}-{suffix}");
             self.reverse.insert(expansion_id, source_qid.clone());
         }
@@ -379,7 +480,7 @@ impl Daemon {
     /// Remove a control and its reverse mappings.
     pub fn remove(&mut self, source_qid: &str) {
         if let Some(state) = self.controls.remove(source_qid) {
-            for suffix in state.kind.expansion_suffixes() {
+            for suffix in state.kind().expansion_suffixes() {
                 let expansion_id = format!("{}-{suffix}", state.local_id);
                 self.reverse.remove(&expansion_id);
             }
@@ -442,7 +543,7 @@ mod tests {
         let props = make_props(&[("label", "Check"), ("checked", "true")]);
         let state = ControlState::new(ControlKind::Checkbox, "app:check", &props);
         assert!(state.is_controlled_checkbox());
-        assert_eq!(state.checked, Some(true));
+        assert_eq!(state.checked(), Some(true));
     }
 
     #[test]
@@ -450,7 +551,7 @@ mod tests {
         let props = make_props(&[("label", "Check"), ("default-checked", "true")]);
         let state = ControlState::new(ControlKind::Checkbox, "app:check", &props);
         assert!(!state.is_controlled_checkbox());
-        assert_eq!(state.checked, Some(true));
+        assert_eq!(state.checked(), Some(true));
     }
 
     #[test]
@@ -458,21 +559,21 @@ mod tests {
         let props = make_props(&[("label", "Check")]);
         let state = ControlState::new(ControlKind::Checkbox, "app:check", &props);
         assert!(!state.is_controlled_checkbox());
-        assert_eq!(state.checked, Some(false));
+        assert_eq!(state.checked(), Some(false));
     }
 
     #[test]
     fn slider_default_value() {
         let props = make_props(&[("label", "Volume")]);
         let state = ControlState::new(ControlKind::Slider, "app:vol", &props);
-        assert_eq!(state.value, Some(50.0));
+        assert_eq!(state.value(), Some(50.0));
     }
 
     #[test]
     fn slider_custom_range() {
         let props = make_props(&[("label", "Vol"), ("min", "10"), ("max", "20")]);
         let state = ControlState::new(ControlKind::Slider, "app:vol", &props);
-        assert_eq!(state.value, Some(15.0));
+        assert_eq!(state.value(), Some(15.0));
     }
 
     #[test]
