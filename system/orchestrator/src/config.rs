@@ -113,6 +113,9 @@ mod tests {
         assert!(config.process.len() >= 2);
         assert_eq!(config.process[0].name, "compositor");
         let names: Vec<&str> = config.process.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"controls"), "config should contain controls process");
+        assert!(
+            names.contains(&"controls"),
+            "config should contain controls process"
+        );
     }
 }

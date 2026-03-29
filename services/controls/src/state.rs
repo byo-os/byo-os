@@ -239,9 +239,11 @@ impl ControlState {
         matches!(
             self.kind_state,
             KindState::Scrollbar {
-                thumb_hover: true, ..
+                thumb_hover: true,
+                ..
             } | KindState::Scrollbar {
-                track_hover: true, ..
+                track_hover: true,
+                ..
             } | KindState::Scrollbar {
                 thumb_pressed: true,
                 ..
@@ -478,14 +480,14 @@ impl Daemon {
 
     /// Link a newly registered scrollbar to its parent scroll-view (if already registered).
     fn link_scrollbar(&mut self, scrollbar_local_id: &str, scrollbar_qid: &str) {
-        let (parent_local, is_y) =
-            if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-y") {
-                (p, true)
-            } else if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-x") {
-                (p, false)
-            } else {
-                return;
-            };
+        let (parent_local, is_y) = if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-y")
+        {
+            (p, true)
+        } else if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-x") {
+            (p, false)
+        } else {
+            return;
+        };
 
         // Find the scroll-view by local_id
         let parent_qid = self
@@ -565,10 +567,7 @@ impl Daemon {
 
     /// Look up child scrollbar QIDs for a scroll-view.
     /// Returns (y_scrollbar_qid, x_scrollbar_qid).
-    pub fn scroll_view_children(
-        &self,
-        scroll_view_qid: &str,
-    ) -> (Option<String>, Option<String>) {
+    pub fn scroll_view_children(&self, scroll_view_qid: &str) -> (Option<String>, Option<String>) {
         match self.scroll_view_children.get(scroll_view_qid) {
             Some((y, x)) => (y.clone(), x.clone()),
             None => (None, None),
@@ -810,11 +809,19 @@ mod tests {
         let (y, x) = daemon.scroll_view_children("app:content");
         assert_eq!(y, None);
         assert_eq!(x.as_deref(), Some("controls:content-scrollbar-x"));
-        assert!(daemon.scrollbar_parent("controls:content-scrollbar-y").is_none());
+        assert!(
+            daemon
+                .scrollbar_parent("controls:content-scrollbar-y")
+                .is_none()
+        );
 
         // Remove scroll-view → remaining scrollbar index cleaned
         daemon.remove("app:content");
-        assert!(daemon.scrollbar_parent("controls:content-scrollbar-x").is_none());
+        assert!(
+            daemon
+                .scrollbar_parent("controls:content-scrollbar-x")
+                .is_none()
+        );
     }
 
     #[test]
@@ -834,7 +841,11 @@ mod tests {
         ));
 
         // No parent yet
-        assert!(daemon.scrollbar_parent("controls:list-scrollbar-y").is_none());
+        assert!(
+            daemon
+                .scrollbar_parent("controls:list-scrollbar-y")
+                .is_none()
+        );
 
         // Register scroll-view — should link retroactively
         let sv_props = make_props(&[("height", "300")]);

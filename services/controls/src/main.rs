@@ -460,7 +460,14 @@ impl StdinHandler {
                     let pos = if is_vertical { y } else { x };
                     let track_size = if is_vertical { height } else { width };
 
-                    let KindState::Scrollbar { content_size, viewport_size, .. } = &state.kind_state else { unreachable!() };
+                    let KindState::Scrollbar {
+                        content_size,
+                        viewport_size,
+                        ..
+                    } = &state.kind_state
+                    else {
+                        unreachable!()
+                    };
                     let content_size = *content_size;
                     let viewport_size = *viewport_size;
                     let max_scroll = (content_size - viewport_size).max(0.0);
@@ -477,7 +484,8 @@ impl StdinHandler {
                         .insert("scroll-position".to_string(), new_scroll.to_string());
 
                     // Find the parent scroll-view to update
-                    let scroll_view_qid = self.daemon.scrollbar_parent(source_qid).map(str::to_owned);
+                    let scroll_view_qid =
+                        self.daemon.scrollbar_parent(source_qid).map(str::to_owned);
 
                     let daemon = &self.daemon;
                     let state = daemon.get(source_qid).unwrap();
@@ -551,9 +559,7 @@ impl StdinHandler {
                 ScrollbarTarget::Thumb
             );
             let is_vertical = state.is_vertical();
-            if was_thumb
-                && let KindState::Scrollbar { thumb_pressed, .. } = &mut state.kind_state
-            {
+            if was_thumb && let KindState::Scrollbar { thumb_pressed, .. } = &mut state.kind_state {
                 *thumb_pressed = false;
             }
             let scroll_view_qid = if was_thumb {
@@ -625,7 +631,13 @@ impl StdinHandler {
         };
 
         // Scrollbar thumb drag
-        if matches!(state.kind_state, KindState::Scrollbar { thumb_pressed: true, .. }) {
+        if matches!(
+            state.kind_state,
+            KindState::Scrollbar {
+                thumb_pressed: true,
+                ..
+            }
+        ) {
             return self.handle_scrollbar_thumb_drag(ack_kind, ack_seq, source_qid, props);
         }
 

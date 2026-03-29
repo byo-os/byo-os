@@ -542,12 +542,18 @@ macro_rules! impl_from_prop_value {
     };
 }
 
-impl_from_prop_value!(f64, f32, i8, i16, i32, i64, u8, u16, u32, u64, usize, isize, bool);
+impl_from_prop_value!(
+    f64, f32, i8, i16, i32, i64, u8, u16, u32, u64, usize, isize, bool
+);
 
 impl FromPropValue for String {
-    fn from_prop(s: &str) -> Option<Self> { Some(s.to_owned()) }
+    fn from_prop(s: &str) -> Option<Self> {
+        Some(s.to_owned())
+    }
 }
 
 impl<T: FromPropValue> FromPropValue for Option<T> {
-    fn from_prop(s: &str) -> Option<Self> { T::from_prop(s).map(Some) }
+    fn from_prop(s: &str) -> Option<Self> {
+        T::from_prop(s).map(Some)
+    }
 }

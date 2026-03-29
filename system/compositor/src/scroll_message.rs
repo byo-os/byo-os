@@ -102,7 +102,14 @@ fn process_scroll_messages(
                 let Ok(sp) = scroll_query.get(entity) else {
                     continue;
                 };
-                (entity, x.unwrap_or(sp.x), y.unwrap_or(sp.y), *external, *overflow_x, *overflow_y)
+                (
+                    entity,
+                    x.unwrap_or(sp.x),
+                    y.unwrap_or(sp.y),
+                    *external,
+                    *overflow_x,
+                    *overflow_y,
+                )
             }
             ScrollMessage::ScrollBy { target, dx, dy } => {
                 let Some(entity) = id_map.get_entity(target) else {
@@ -124,8 +131,12 @@ fn process_scroll_messages(
             }
             // Apply overscroll visual offset if provided (from tap sync).
             if overflow_x.is_some() || overflow_y.is_some() {
-                let ox = overflow_x.map(|v| -rubber_band(v as f64) as f32).unwrap_or(0.0);
-                let oy = overflow_y.map(|v| -rubber_band(v as f64) as f32).unwrap_or(0.0);
+                let ox = overflow_x
+                    .map(|v| -rubber_band(v as f64) as f32)
+                    .unwrap_or(0.0);
+                let oy = overflow_y
+                    .map(|v| -rubber_band(v as f64) as f32)
+                    .unwrap_or(0.0);
                 commands.entity(entity).insert(OverscrollState {
                     offset_x: ox,
                     offset_y: oy,

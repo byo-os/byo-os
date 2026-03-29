@@ -373,11 +373,7 @@ fn scrollbar_thumb_geometry(state: &ControlState) -> (f64, f64) {
 
 /// Resolve the scrollbar style: "modern", "classic", or "auto" (defaults to "modern").
 pub fn resolve_scrollbar_style(props: &HashMap<String, String>) -> &'static str {
-    match props
-        .get("style")
-        .map(|s| s.as_str())
-        .unwrap_or("auto")
-    {
+    match props.get("style").map(|s| s.as_str()).unwrap_or("auto") {
         "classic" => "classic",
         "modern" => "modern",
         // "auto" defaults to modern
@@ -1022,7 +1018,12 @@ mod tests {
         assert!(out.contains("w-2")); // track is thin
 
         // Hovered — track expands to full width
-        if let KindState::Scrollbar { thumb_hover, fade_visible, .. } = &mut state.kind_state {
+        if let KindState::Scrollbar {
+            thumb_hover,
+            fade_visible,
+            ..
+        } = &mut state.kind_state
+        {
             *thumb_hover = true;
             *fade_visible = true;
         }
@@ -1068,7 +1069,10 @@ mod tests {
         assert!((offset - 0.0).abs() < 0.01);
 
         // Overflow past start (negative) — thumb shrinks, stays at top
-        if let KindState::Scrollbar { scroll_overflow, .. } = &mut state.kind_state {
+        if let KindState::Scrollbar {
+            scroll_overflow, ..
+        } = &mut state.kind_state
+        {
             *scroll_overflow = -50.0;
         }
         let (offset2, size2) = scrollbar_thumb_geometry(&state);
@@ -1092,7 +1096,10 @@ mod tests {
         assert!((offset - 50.0).abs() < 0.01);
 
         // Overflow past end (positive) — thumb shrinks, pushed toward bottom
-        if let KindState::Scrollbar { scroll_overflow, .. } = &mut state.kind_state {
+        if let KindState::Scrollbar {
+            scroll_overflow, ..
+        } = &mut state.kind_state
+        {
             *scroll_overflow = 50.0;
         }
         let (offset2, size2) = scrollbar_thumb_geometry(&state);

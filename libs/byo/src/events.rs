@@ -120,7 +120,10 @@ fn parse_entry(entry: &str) -> Option<EventSub> {
             "passive" => passive = true,
             "verbose" => verbose = true,
             _ => {
-                if let Some(id) = token.strip_prefix("forward(").and_then(|s| s.strip_suffix(')')) {
+                if let Some(id) = token
+                    .strip_prefix("forward(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
                     forward_target = Some(id.to_string());
                 }
             }
@@ -302,8 +305,7 @@ mod tests {
 
     #[test]
     fn forward_multiple_events() {
-        let subs =
-            EventSubscriptionSet::parse("scroll forward(vp), click forward(btn)");
+        let subs = EventSubscriptionSet::parse("scroll forward(vp), click forward(btn)");
         let scroll = subs.get(&EventKind::Scroll).unwrap();
         assert_eq!(scroll.forward_target.as_deref(), Some("vp"));
         let click = subs.get(&EventKind::Click).unwrap();
@@ -312,8 +314,7 @@ mod tests {
 
     #[test]
     fn forward_preserves_other_modifiers() {
-        let subs =
-            EventSubscriptionSet::parse("scroll capture passive verbose forward(vp)");
+        let subs = EventSubscriptionSet::parse("scroll capture passive verbose forward(vp)");
         let sub = subs.get(&EventKind::Scroll).unwrap();
         assert_eq!(sub.forward_target.as_deref(), Some("vp"));
         assert_eq!(sub.phase, Phase::Capture);

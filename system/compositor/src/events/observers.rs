@@ -88,8 +88,7 @@ fn build_spine(
             {
                 // Build forward spine if this node has a forward target
                 let forward_spine = sub.forward_target.as_ref().and_then(|target_id| {
-                    let target_entity =
-                        resolve_forward_target(target_id, byo_id, id_map)?;
+                    let target_entity = resolve_forward_target(target_id, byo_id, id_map)?;
                     let fwd = build_forward_spine(
                         target_entity,
                         e, // stop before reaching the forwarding node
