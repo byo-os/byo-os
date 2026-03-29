@@ -477,7 +477,7 @@ impl StdinHandler {
                         .insert("scroll-position".to_string(), new_scroll.to_string());
 
                     // Find the parent scroll-view to update
-                    let scroll_view_qid = find_parent_scroll_view(&self.daemon, source_qid);
+                    let scroll_view_qid = self.daemon.scrollbar_parent(source_qid).map(str::to_owned);
 
                     let daemon = &self.daemon;
                     let state = daemon.get(source_qid).unwrap();
@@ -557,7 +557,7 @@ impl StdinHandler {
                 *thumb_pressed = false;
             }
             let scroll_view_qid = if was_thumb {
-                find_parent_scroll_view(&self.daemon, source_qid)
+                self.daemon.scrollbar_parent(source_qid).map(str::to_owned)
             } else {
                 None
             };
@@ -731,7 +731,7 @@ impl StdinHandler {
             .insert("scroll-position".to_string(), new_scroll.to_string());
 
         // Find parent scroll-view to update viewport
-        let scroll_view_qid = find_parent_scroll_view(&self.daemon, source_qid);
+        let scroll_view_qid = self.daemon.scrollbar_parent(source_qid).map(str::to_owned);
 
         // Also update the scroll-view state
         if let Some(ref sv_qid) = scroll_view_qid
@@ -843,7 +843,7 @@ impl StdinHandler {
         };
 
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar)
-        let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
+        let (sb_y_qid, sb_x_qid) = self.daemon.scroll_view_children(source_qid);
         if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
             update_scrollbar_dimensions(
                 &mut self.daemon,
@@ -946,8 +946,6 @@ impl StdinHandler {
 
         let (scroll_y_enabled, scroll_x_enabled) = state.scroll_axes();
 
-        let id = state.local_id.clone();
-
         let wants_resize = state.app_wants_event(&EventKind::Resize);
         let resize_seq = if wants_resize {
             Some(self.daemon.next_seq("resize"))
@@ -956,7 +954,7 @@ impl StdinHandler {
         };
 
         // Update scrollbar internal state directly (avoids re-expand via @scrollbar).
-        let (sb_y_qid, sb_x_qid) = find_child_scrollbars(&self.daemon, &id);
+        let (sb_y_qid, sb_x_qid) = self.daemon.scroll_view_children(source_qid);
         if scroll_y_enabled && let Some(ref qid) = sb_y_qid {
             update_scrollbar_dimensions(
                 &mut self.daemon,
@@ -1262,52 +1260,6 @@ fn emit_visual_patch<W: io::Write>(em: &mut Emitter<W>, state: &ControlState) ->
         ControlKind::Scrollbar => patch_scrollbar_state(em, state),
         ControlKind::ScrollView => patch_scroll_view_state(em, state),
     }
-}
-
-/// Find the parent scroll-view for a scrollbar.
-///
-/// The scrollbar's source_qid is like "controls:content-scrollbar-y", and
-/// the parent scroll-view has source_qid like "app:content". We look for
-/// a scroll-view whose local_id matches the scrollbar's local_id prefix
-/// before "-scrollbar-y" or "-scrollbar-x".
-fn find_parent_scroll_view(daemon: &Daemon, scrollbar_qid: &str) -> Option<String> {
-    let scrollbar_state = daemon.get(scrollbar_qid)?;
-    let scrollbar_local = &scrollbar_state.local_id;
-
-    // The scrollbar local_id is "{parent_id}-scrollbar-{axis}"
-    let parent_suffix = scrollbar_local
-        .strip_suffix("-scrollbar-y")
-        .or_else(|| scrollbar_local.strip_suffix("-scrollbar-x"))?;
-
-    // Search all scroll-views for one whose local_id matches
-    for (qid, state) in &daemon.controls {
-        if state.kind() == ControlKind::ScrollView && state.local_id == parent_suffix {
-            return Some(qid.clone());
-        }
-    }
-    None
-}
-
-/// Find child scrollbar QIDs for a scroll-view by its local_id.
-/// Returns (y_scrollbar_qid, x_scrollbar_qid).
-fn find_child_scrollbars(
-    daemon: &Daemon,
-    scroll_view_local_id: &str,
-) -> (Option<String>, Option<String>) {
-    let mut y_qid = None;
-    let mut x_qid = None;
-    let y_local = format!("{scroll_view_local_id}-scrollbar-y");
-    let x_local = format!("{scroll_view_local_id}-scrollbar-x");
-    for (qid, state) in &daemon.controls {
-        if state.kind() == ControlKind::Scrollbar {
-            if state.local_id == y_local {
-                y_qid = Some(qid.clone());
-            } else if state.local_id == x_local {
-                x_qid = Some(qid.clone());
-            }
-        }
-    }
-    (y_qid, x_qid)
 }
 
 /// Update a child scrollbar's content/viewport dimensions and optionally scroll position.

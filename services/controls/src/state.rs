@@ -429,6 +429,10 @@ pub struct Daemon {
     pub reverse: HashMap<String, String>,
     /// Per-event-type outbound sequence counters for events emitted to apps.
     pub event_seqs: HashMap<String, u64>,
+    /// Scrollbar QID → parent scroll-view QID.
+    scrollbar_parent: HashMap<String, String>,
+    /// Scroll-view QID → (y scrollbar QID, x scrollbar QID).
+    scroll_view_children: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 impl Daemon {
@@ -437,6 +441,8 @@ impl Daemon {
             controls: HashMap::new(),
             reverse: HashMap::new(),
             event_seqs: HashMap::new(),
+            scrollbar_parent: HashMap::new(),
+            scroll_view_children: HashMap::new(),
         }
     }
 
@@ -452,14 +458,89 @@ impl Daemon {
     pub fn register(&mut self, state: ControlState) {
         let source_qid = state.source_qid.clone();
         let local_id = state.local_id.clone();
+        let kind = state.kind();
 
         // Register reverse mappings for all expansion IDs
-        for suffix in state.kind().expansion_suffixes() {
+        for suffix in kind.expansion_suffixes() {
             let expansion_id = format!("{local_id}-{suffix}");
             self.reverse.insert(expansion_id, source_qid.clone());
         }
 
+        // Maintain scroll-view ↔ scrollbar index
+        if kind == ControlKind::Scrollbar {
+            self.link_scrollbar(&local_id, &source_qid);
+        } else if kind == ControlKind::ScrollView {
+            self.link_scroll_view(&local_id, &source_qid);
+        }
+
         self.controls.insert(source_qid, state);
+    }
+
+    /// Link a newly registered scrollbar to its parent scroll-view (if already registered).
+    fn link_scrollbar(&mut self, scrollbar_local_id: &str, scrollbar_qid: &str) {
+        let (parent_local, is_y) =
+            if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-y") {
+                (p, true)
+            } else if let Some(p) = scrollbar_local_id.strip_suffix("-scrollbar-x") {
+                (p, false)
+            } else {
+                return;
+            };
+
+        // Find the scroll-view by local_id
+        let parent_qid = self
+            .controls
+            .values()
+            .find(|s| s.kind() == ControlKind::ScrollView && s.local_id == parent_local)
+            .map(|s| s.source_qid.clone());
+
+        if let Some(ref parent_qid) = parent_qid {
+            self.scrollbar_parent
+                .insert(scrollbar_qid.to_owned(), parent_qid.clone());
+            let entry = self
+                .scroll_view_children
+                .entry(parent_qid.clone())
+                .or_insert((None, None));
+            if is_y {
+                entry.0 = Some(scrollbar_qid.to_owned());
+            } else {
+                entry.1 = Some(scrollbar_qid.to_owned());
+            }
+        }
+    }
+
+    /// Link a newly registered scroll-view to any already-registered child scrollbars.
+    fn link_scroll_view(&mut self, scroll_view_local_id: &str, scroll_view_qid: &str) {
+        let mut y_qid = None;
+        let mut x_qid = None;
+        for state in self.controls.values() {
+            if state.kind() == ControlKind::Scrollbar
+                && let Some(parent) = state
+                    .local_id
+                    .strip_suffix("-scrollbar-y")
+                    .or_else(|| state.local_id.strip_suffix("-scrollbar-x"))
+                && parent == scroll_view_local_id
+            {
+                if state.local_id.ends_with("-y") {
+                    y_qid = Some(state.source_qid.clone());
+                } else {
+                    x_qid = Some(state.source_qid.clone());
+                }
+            }
+        }
+
+        if let Some(ref qid) = y_qid {
+            self.scrollbar_parent
+                .insert(qid.clone(), scroll_view_qid.to_owned());
+        }
+        if let Some(ref qid) = x_qid {
+            self.scrollbar_parent
+                .insert(qid.clone(), scroll_view_qid.to_owned());
+        }
+        if y_qid.is_some() || x_qid.is_some() {
+            self.scroll_view_children
+                .insert(scroll_view_qid.to_owned(), (y_qid, x_qid));
+        }
     }
 
     /// Look up the source qualified ID for an expansion local ID.
@@ -477,12 +558,55 @@ impl Daemon {
         self.controls.get_mut(source_qid)
     }
 
+    /// Look up the parent scroll-view QID for a scrollbar.
+    pub fn scrollbar_parent(&self, scrollbar_qid: &str) -> Option<&str> {
+        self.scrollbar_parent.get(scrollbar_qid).map(|s| s.as_str())
+    }
+
+    /// Look up child scrollbar QIDs for a scroll-view.
+    /// Returns (y_scrollbar_qid, x_scrollbar_qid).
+    pub fn scroll_view_children(
+        &self,
+        scroll_view_qid: &str,
+    ) -> (Option<String>, Option<String>) {
+        match self.scroll_view_children.get(scroll_view_qid) {
+            Some((y, x)) => (y.clone(), x.clone()),
+            None => (None, None),
+        }
+    }
+
     /// Remove a control and its reverse mappings.
     pub fn remove(&mut self, source_qid: &str) {
         if let Some(state) = self.controls.remove(source_qid) {
             for suffix in state.kind().expansion_suffixes() {
                 let expansion_id = format!("{}-{suffix}", state.local_id);
                 self.reverse.remove(&expansion_id);
+            }
+            // Clean up scroll index
+            match state.kind() {
+                ControlKind::Scrollbar => {
+                    if let Some(parent_qid) = self.scrollbar_parent.remove(source_qid)
+                        && let Some(children) = self.scroll_view_children.get_mut(&parent_qid)
+                    {
+                        if children.0.as_deref() == Some(source_qid) {
+                            children.0 = None;
+                        }
+                        if children.1.as_deref() == Some(source_qid) {
+                            children.1 = None;
+                        }
+                    }
+                }
+                ControlKind::ScrollView => {
+                    if let Some((y_qid, x_qid)) = self.scroll_view_children.remove(source_qid) {
+                        if let Some(qid) = y_qid {
+                            self.scrollbar_parent.remove(&qid);
+                        }
+                        if let Some(qid) = x_qid {
+                            self.scrollbar_parent.remove(&qid);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -630,5 +754,101 @@ mod tests {
         let props = make_props(&[("label", "OK"), ("disabled", "")]);
         let state = ControlState::new(ControlKind::Button, "app:ok", &props);
         assert!(state.disabled);
+    }
+
+    #[test]
+    fn scroll_view_scrollbar_index() {
+        let mut daemon = Daemon::new();
+
+        // Register scroll-view first, then scrollbars
+        let sv_props = make_props(&[("height", "400")]);
+        daemon.register(ControlState::new(
+            ControlKind::ScrollView,
+            "app:content",
+            &sv_props,
+        ));
+
+        let sb_y_props = make_props(&[
+            ("direction", "vertical"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        daemon.register(ControlState::new(
+            ControlKind::Scrollbar,
+            "controls:content-scrollbar-y",
+            &sb_y_props,
+        ));
+
+        let sb_x_props = make_props(&[
+            ("direction", "horizontal"),
+            ("content-size", "2000"),
+            ("viewport-size", "500"),
+        ]);
+        daemon.register(ControlState::new(
+            ControlKind::Scrollbar,
+            "controls:content-scrollbar-x",
+            &sb_x_props,
+        ));
+
+        // Forward lookup: scroll-view → scrollbars
+        let (y, x) = daemon.scroll_view_children("app:content");
+        assert_eq!(y.as_deref(), Some("controls:content-scrollbar-y"));
+        assert_eq!(x.as_deref(), Some("controls:content-scrollbar-x"));
+
+        // Reverse lookup: scrollbar → scroll-view
+        assert_eq!(
+            daemon.scrollbar_parent("controls:content-scrollbar-y"),
+            Some("app:content")
+        );
+        assert_eq!(
+            daemon.scrollbar_parent("controls:content-scrollbar-x"),
+            Some("app:content")
+        );
+
+        // Remove scrollbar-y → parent index updated
+        daemon.remove("controls:content-scrollbar-y");
+        let (y, x) = daemon.scroll_view_children("app:content");
+        assert_eq!(y, None);
+        assert_eq!(x.as_deref(), Some("controls:content-scrollbar-x"));
+        assert!(daemon.scrollbar_parent("controls:content-scrollbar-y").is_none());
+
+        // Remove scroll-view → remaining scrollbar index cleaned
+        daemon.remove("app:content");
+        assert!(daemon.scrollbar_parent("controls:content-scrollbar-x").is_none());
+    }
+
+    #[test]
+    fn scroll_view_scrollbar_index_reverse_order() {
+        let mut daemon = Daemon::new();
+
+        // Register scrollbar first, then scroll-view (tests late linking)
+        let sb_props = make_props(&[
+            ("direction", "vertical"),
+            ("content-size", "1000"),
+            ("viewport-size", "500"),
+        ]);
+        daemon.register(ControlState::new(
+            ControlKind::Scrollbar,
+            "controls:list-scrollbar-y",
+            &sb_props,
+        ));
+
+        // No parent yet
+        assert!(daemon.scrollbar_parent("controls:list-scrollbar-y").is_none());
+
+        // Register scroll-view — should link retroactively
+        let sv_props = make_props(&[("height", "300")]);
+        daemon.register(ControlState::new(
+            ControlKind::ScrollView,
+            "app:list",
+            &sv_props,
+        ));
+
+        assert_eq!(
+            daemon.scrollbar_parent("controls:list-scrollbar-y"),
+            Some("app:list")
+        );
+        let (y, _) = daemon.scroll_view_children("app:list");
+        assert_eq!(y.as_deref(), Some("controls:list-scrollbar-y"));
     }
 }
